@@ -123,17 +123,34 @@ conduit doctor
 
 ### Uninstalling
 
-To completely remove Conduit:
+To completely remove Conduit and optionally its dependencies:
 
 ```bash
-conduit uninstall
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
 ```
 
-This will:
-- Stop the running daemon
-- Remove the daemon service
-- Optionally remove all data (`~/.conduit`)
-- Optionally remove binaries
+The uninstall script will interactively ask you about each component:
+- Stop and remove the daemon service
+- Remove Conduit binaries
+- Remove data directory (`~/.conduit`)
+- Clean up shell configuration (PATH entries)
+- Optionally remove Docker/Podman
+- Optionally remove Ollama and AI models
+- Optionally remove Go
+
+**Uninstall Options:**
+```bash
+# Skip all confirmations
+curl -fsSL ... | bash -s -- --force
+
+# Remove everything automatically
+curl -fsSL ... | bash -s -- --remove-all
+
+# Specify custom paths
+bash uninstall.sh --install-dir ~/.local/bin --conduit-home ~/.conduit
+```
+
+The script gracefully handles errors and continues with remaining components. Backups of shell configurations are created with `.conduit-backup` extension
 
 ---
 
