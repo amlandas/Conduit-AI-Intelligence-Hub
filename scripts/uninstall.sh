@@ -349,9 +349,11 @@ remove_docker() {
     echo "Docker Removal"
     echo "──────────────────────────────────────────────────────────────"
 
-    if [[ "$REMOVE_ALL" != "true" ]] && ! confirm "Remove Docker?"; then
-        info "Docker left in place"
-        return 0
+    if [[ "$REMOVE_ALL" != "true" ]]; then
+        if ! confirm "Remove Docker (used by Conduit)?"; then
+            info "Docker left in place"
+            return 0
+        fi
     fi
 
     # Check if Docker is running
@@ -398,9 +400,11 @@ remove_podman() {
     echo "Podman Removal"
     echo "──────────────────────────────────────────────────────────────"
 
-    if [[ "$REMOVE_ALL" != "true" ]] && ! confirm "Remove Podman?"; then
-        info "Podman left in place"
-        return 0
+    if [[ "$REMOVE_ALL" != "true" ]]; then
+        if ! confirm "Remove Podman (used by Conduit)?"; then
+            info "Podman left in place"
+            return 0
+        fi
     fi
 
     # Stop podman machine on macOS
@@ -448,16 +452,37 @@ remove_ollama() {
     echo "Ollama Removal"
     echo "──────────────────────────────────────────────────────────────"
 
-    # Show installed models
-    local models=$(ollama list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
-    if [[ "$models" -gt 0 ]]; then
-        warn "Ollama has $models model(s) installed"
-        ollama list 2>/dev/null | tail -n +2 || true
+    # Check specifically for qwen2.5-coder model
+    local has_qwen_model=false
+    local model_size=""
+    if ollama list 2>/dev/null | grep -q "qwen2.5-coder"; then
+        has_qwen_model=true
+        model_size=$(ollama list 2>/dev/null | grep "qwen2.5-coder" | awk '{print $2}' || echo "~4.7GB")
     fi
 
-    if [[ "$REMOVE_ALL" != "true" ]] && ! confirm "Remove Ollama and all models?"; then
-        info "Ollama left in place"
-        return 0
+    # Show what will be removed
+    if [[ "$has_qwen_model" == "true" ]]; then
+        warn "Ollama is installed with qwen2.5-coder:7b model ($model_size)"
+    else
+        local models=$(ollama list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
+        if [[ "$models" -gt 0 ]]; then
+            warn "Ollama has $models model(s) installed"
+            ollama list 2>/dev/null | tail -n +2 || true
+        fi
+    fi
+
+    if [[ "$REMOVE_ALL" != "true" ]]; then
+        local prompt="Remove Ollama"
+        if [[ "$has_qwen_model" == "true" ]]; then
+            prompt="Remove Ollama and qwen2.5-coder:7b model ($model_size)?"
+        else
+            prompt="Remove Ollama and all models?"
+        fi
+
+        if ! confirm "$prompt"; then
+            info "Ollama left in place"
+            return 0
+        fi
     fi
 
     # Stop Ollama service
@@ -554,30 +579,83 @@ remove_go() {
     fi
 }
 
+# Detect which container runtime Conduit was using
+detect_conduit_runtime() {
+    local RUNTIME=""
+
+    # Check Conduit config if it exists
+    if [[ -f "$CONDUIT_HOME/conduit.yaml" ]]; then
+        # Extract preferred runtime from config
+        RUNTIME=$(grep "preferred:" "$CONDUIT_HOME/conduit.yaml" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "")
+    fi
+
+    # If config says "auto" or not found, detect from what's running
+    if [[ -z "$RUNTIME" ]] || [[ "$RUNTIME" == "auto" ]]; then
+        if command_exists docker && docker info >/dev/null 2>&1; then
+            RUNTIME="docker"
+        elif command_exists podman && podman info >/dev/null 2>&1; then
+            RUNTIME="podman"
+        fi
+    fi
+
+    echo "$RUNTIME"
+}
+
 # Remove dependencies
 remove_dependencies() {
     echo ""
     echo "Step 6: Remove Dependencies"
     echo "──────────────────────────────────────────────────────────────"
 
+    # Detect which runtime Conduit was using
+    local CONDUIT_RUNTIME=$(detect_conduit_runtime)
+
     if [[ "$REMOVE_ALL" != "true" ]]; then
         echo ""
-        echo "Conduit may have installed the following dependencies:"
+        echo "Conduit installed or used the following dependencies:"
         echo ""
-        command_exists docker && echo "  - Docker"
-        command_exists podman && echo "  - Podman"
-        command_exists ollama && echo "  - Ollama"
+
+        # Show runtime Conduit was actually using
+        if [[ "$CONDUIT_RUNTIME" == "docker" ]]; then
+            echo "  - Docker (used by Conduit)"
+        elif [[ "$CONDUIT_RUNTIME" == "podman" ]]; then
+            echo "  - Podman (used by Conduit)"
+        else
+            # Show both if we can't determine
+            command_exists docker && echo "  - Docker"
+            command_exists podman && echo "  - Podman"
+        fi
+
+        command_exists ollama && echo "  - Ollama (with qwen2.5-coder:7b model)"
         command_exists go && echo "  - Go"
         echo ""
+
         if ! confirm "Remove dependencies?"; then
             info "Dependencies left in place"
             return 0
         fi
     fi
 
-    # Remove each dependency with error handling
-    remove_docker || true
-    remove_podman || true
+    # Remove the container runtime Conduit was using
+    if [[ "$CONDUIT_RUNTIME" == "docker" ]]; then
+        remove_docker || true
+    elif [[ "$CONDUIT_RUNTIME" == "podman" ]]; then
+        remove_podman || true
+    elif [[ "$REMOVE_ALL" == "true" ]]; then
+        # In --remove-all mode, remove both if present
+        remove_docker || true
+        remove_podman || true
+    else
+        # Ask user which one they want to remove
+        if command_exists docker || command_exists podman; then
+            echo ""
+            warn "Could not determine which container runtime Conduit was using"
+            command_exists docker && remove_docker || true
+            command_exists podman && remove_podman || true
+        fi
+    fi
+
+    # Always ask about Ollama and Go
     remove_ollama || true
     remove_go || true
 }
