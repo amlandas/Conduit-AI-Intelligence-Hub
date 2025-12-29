@@ -32,6 +32,8 @@ CONDUIT_HOME="${HOME}/.conduit"
 INSTALL_SERVICE=true
 SKIP_DEPS=false
 VERBOSE=false
+AI_PROVIDER=""  # Will be set during installation
+SHELL_RC=""     # Will be detected during installation
 
 # Minimum Go version required
 MIN_GO_VERSION="1.21"
@@ -398,8 +400,7 @@ install_binaries() {
         # Try to add to current session
         export PATH="$PATH:$INSTALL_DIR"
 
-        # Detect shell and offer to add automatically
-        local SHELL_RC=""
+        # Detect shell and offer to add automatically (set global SHELL_RC)
         case "$SHELL" in
             */bash)
                 SHELL_RC="$HOME/.bashrc"
@@ -414,10 +415,19 @@ install_binaries() {
 
         if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
             if confirm "Add to $SHELL_RC automatically?"; then
-                echo "" >> "$SHELL_RC"
-                echo "# Conduit" >> "$SHELL_RC"
-                echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$SHELL_RC"
-                success "Added to $SHELL_RC"
+                # Check if already in config file
+                if ! grep -q "$INSTALL_DIR" "$SHELL_RC" 2>/dev/null; then
+                    echo "" >> "$SHELL_RC"
+                    echo "# Conduit" >> "$SHELL_RC"
+                    echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$SHELL_RC"
+                    success "Added to $SHELL_RC"
+                    warn "Please run: source $SHELL_RC"
+                    warn "Or restart your terminal for the changes to take effect"
+                else
+                    success "PATH already configured in $SHELL_RC"
+                fi
+            else
+                warn "You'll need to manually add $INSTALL_DIR to your PATH"
             fi
         fi
     else
@@ -436,29 +446,46 @@ install_dependencies() {
     echo "Step 5: Runtime Dependencies"
     echo "──────────────────────────────────────────────────────────────"
 
-    # Run conduit's built-in installer
-    if command_exists "$INSTALL_DIR/conduit"; then
-        "$INSTALL_DIR/conduit" install-deps
-    else
-        # Fallback: install manually
-        install_container_runtime
-        install_ollama
-    fi
+    # Install container runtime
+    install_container_runtime
+
+    # Choose and install AI provider
+    choose_ai_provider
 }
 
 # Install container runtime (Docker or Podman)
 install_container_runtime() {
-    if command_exists docker; then
-        success "Docker is installed: $(docker --version)"
-        return 0
+    local DOCKER_INSTALLED=false
+    local PODMAN_INSTALLED=false
+
+    if command_exists docker && docker info >/dev/null 2>&1; then
+        DOCKER_INSTALLED=true
+        success "Docker is installed and running: $(docker --version)"
+    elif command_exists docker; then
+        warn "Docker is installed but not running"
+        if [[ "$OS" == "darwin" ]]; then
+            warn "Please start Docker Desktop manually"
+        fi
     fi
 
-    if command_exists podman; then
-        success "Podman is installed: $(podman --version)"
-        return 0
+    if command_exists podman && podman info >/dev/null 2>&1; then
+        PODMAN_INSTALLED=true
+        success "Podman is installed and running: $(podman --version)"
+    elif command_exists podman; then
+        warn "Podman is installed but not running"
+        if [[ "$OS" == "darwin" ]]; then
+            info "Starting Podman machine..."
+            podman machine start 2>/dev/null || warn "Failed to start Podman machine. Start manually with: podman machine start"
+        fi
     fi
 
-    info "No container runtime found"
+    # If either is running, ask if user wants to install the other
+    if [[ "$DOCKER_INSTALLED" == "true" ]] || [[ "$PODMAN_INSTALLED" == "true" ]]; then
+        echo ""
+        if ! confirm "Container runtime detected. Install additional runtime?"; then
+            return 0
+        fi
+    fi
 
     local RECOMMENDED="Docker"
     [[ "$OS" == "linux" ]] && RECOMMENDED="Podman"
@@ -466,7 +493,7 @@ install_container_runtime() {
     echo ""
     echo "Conduit needs Docker or Podman to run MCP servers in containers."
     echo ""
-    echo "  [1] Install $RECOMMENDED (Recommended)"
+    echo "  [1] Install $RECOMMENDED (Recommended for $OS)"
     [[ "$RECOMMENDED" == "Docker" ]] && echo "  [2] Install Podman" || echo "  [2] Install Docker"
     echo "  [3] Skip (install manually later)"
     echo ""
@@ -538,19 +565,97 @@ install_podman() {
     success "Podman installed"
 }
 
+# Choose AI provider
+choose_ai_provider() {
+    echo ""
+    echo "Step 5a: AI Provider Selection"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Conduit can use AI to analyze MCP servers and provide intelligent assistance."
+    echo ""
+    echo "Choose your AI provider:"
+    echo ""
+    echo "  [1] Ollama (Local, Free, Private)"
+    echo "      - Runs AI models locally on your machine"
+    echo "      - Requires ~5GB disk space for models"
+    echo "      - No API keys needed"
+    echo "      - Complete privacy"
+    echo ""
+    echo "  [2] Anthropic Claude (Cloud, Paid)"
+    echo "      - Uses Claude API (requires API key)"
+    echo "      - No local resources needed"
+    echo "      - Best quality responses"
+    echo "      - Pay per use"
+    echo ""
+    echo "  [3] Skip (Configure later)"
+    echo ""
+
+    read -r -p "Choice [1/2/3]: " ai_choice
+
+    case $ai_choice in
+        1)
+            AI_PROVIDER="ollama"
+            install_ollama
+            ;;
+        2)
+            AI_PROVIDER="anthropic"
+            setup_anthropic_api
+            ;;
+        *)
+            AI_PROVIDER="none"
+            warn "Skipping AI provider setup. Configure later in ~/.conduit/conduit.yaml"
+            ;;
+    esac
+}
+
+# Setup Anthropic API
+setup_anthropic_api() {
+    echo ""
+    info "Setting up Anthropic Claude API..."
+    echo ""
+    echo "To use Claude, you need an API key from Anthropic."
+    echo "Get your API key at: https://console.anthropic.com/settings/keys"
+    echo ""
+
+    if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
+        success "ANTHROPIC_API_KEY environment variable detected"
+    else
+        echo "You can set your API key later by:"
+        echo "  export ANTHROPIC_API_KEY='your-api-key-here'"
+        echo ""
+        warn "Add this to your shell profile (~/.bashrc, ~/.zshrc) to persist"
+    fi
+}
+
 # Install Ollama
 install_ollama() {
     if command_exists ollama; then
         success "Ollama is installed: $(ollama --version 2>/dev/null || echo 'version unknown')"
-        return 0
-    fi
 
-    echo ""
-    echo "Ollama provides local AI capabilities for analyzing MCP servers."
-    echo ""
+        # Check if running
+        if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+            success "Ollama is running"
+        else
+            info "Starting Ollama..."
+            if [[ "$OS" == "darwin" ]]; then
+                ollama serve &>/dev/null &
+            else
+                sudo systemctl start ollama 2>/dev/null || ollama serve &>/dev/null &
+            fi
+            sleep 2
+        fi
 
-    if ! confirm "Install Ollama?"; then
-        warn "Skipping Ollama. You'll need to use ANTHROPIC_API_KEY instead."
+        # Check for model
+        if ollama list 2>/dev/null | grep -q "qwen2.5-coder"; then
+            success "AI model (qwen2.5-coder:7b) already installed"
+            return 0
+        else
+            if confirm "Download AI model (qwen2.5-coder:7b, ~4.7GB)?"; then
+                info "Downloading model... (this may take several minutes)"
+                ollama pull qwen2.5-coder:7b
+                success "Model downloaded"
+            fi
+        fi
         return 0
     fi
 
@@ -560,19 +665,30 @@ install_ollama() {
     success "Ollama installed"
 
     # Start Ollama
+    info "Starting Ollama service..."
     if [[ "$OS" == "darwin" ]]; then
         ollama serve &>/dev/null &
     else
+        sudo systemctl enable ollama 2>/dev/null || true
         sudo systemctl start ollama 2>/dev/null || ollama serve &>/dev/null &
     fi
 
-    sleep 2
+    sleep 3
+
+    # Verify it's running
+    if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+        success "Ollama is running"
+    else
+        warn "Ollama may not be running. Start manually with: ollama serve"
+    fi
 
     # Pull the model
     if confirm "Download AI model (qwen2.5-coder:7b, ~4.7GB)?"; then
         info "Downloading model... (this may take several minutes)"
         ollama pull qwen2.5-coder:7b
         success "Model downloaded"
+    else
+        warn "Skipped model download. Download later with: ollama pull qwen2.5-coder:7b"
     fi
 }
 
@@ -701,15 +817,15 @@ create_config() {
         return 0
     fi
 
-    # Determine AI provider
-    local AI_PROVIDER="ollama"
+    # Use the AI provider selected during installation
+    local CONFIG_AI_PROVIDER="${AI_PROVIDER:-ollama}"
     local AI_MODEL="qwen2.5-coder:7b"
 
-    if ! command_exists ollama; then
-        if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-            AI_PROVIDER="anthropic"
-            AI_MODEL="claude-sonnet-4-20250514"
-        fi
+    if [[ "$CONFIG_AI_PROVIDER" == "anthropic" ]]; then
+        AI_MODEL="claude-sonnet-4-20250514"
+    elif [[ "$CONFIG_AI_PROVIDER" == "none" ]]; then
+        CONFIG_AI_PROVIDER="ollama"
+        warn "No AI provider selected. Using Ollama as default in config."
     fi
 
     cat > "$CONFIG_FILE" << EOF
@@ -728,7 +844,7 @@ log_format: json
 
 # AI Configuration
 ai:
-  provider: ${AI_PROVIDER}
+  provider: ${CONFIG_AI_PROVIDER}
   model: ${AI_MODEL}
   endpoint: http://localhost:11434
   timeout_seconds: 120
@@ -771,10 +887,15 @@ verify_installation() {
     fi
 
     # Check daemon
+    sleep 2  # Give daemon time to start
     if curl -s --unix-socket "$CONDUIT_HOME/conduit.sock" http://localhost/api/v1/health >/dev/null 2>&1; then
         success "Conduit daemon: running"
     else
-        warn "Conduit daemon: not running (start with: conduit-daemon --foreground)"
+        warn "Conduit daemon: not running"
+        if [[ "$INSTALL_SERVICE" == "true" ]]; then
+            info "The daemon service will start automatically on next login"
+            info "To start now: $INSTALL_DIR/conduit-daemon --foreground &"
+        fi
     fi
 
     # Check container runtime
@@ -782,26 +903,50 @@ verify_installation() {
         success "Docker: running"
     elif command_exists podman && podman info >/dev/null 2>&1; then
         success "Podman: running"
+    elif command_exists docker; then
+        warn "Docker: installed but not running"
+        if [[ "$OS" == "darwin" ]]; then
+            info "Start Docker Desktop from Applications"
+        else
+            info "Start with: sudo systemctl start docker"
+        fi
+    elif command_exists podman; then
+        warn "Podman: installed but not running"
+        if [[ "$OS" == "darwin" ]]; then
+            info "Start with: podman machine start"
+        else
+            info "Start with: systemctl start podman"
+        fi
     else
-        warn "Container runtime: not running"
+        warn "Container runtime: not installed"
+        info "Install later with: conduit install-deps"
     fi
 
-    # Check Ollama
-    if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
-        success "Ollama: running"
-
-        # Check model
-        if ollama list 2>/dev/null | grep -q "qwen2.5-coder"; then
-            success "AI Model: qwen2.5-coder installed"
-        else
-            warn "AI Model: qwen2.5-coder not found (pull with: ollama pull qwen2.5-coder:7b)"
-        fi
-    else
+    # Check AI provider
+    if [[ "$AI_PROVIDER" == "anthropic" ]]; then
         if [[ -n "${ANTHROPIC_API_KEY:-}" ]]; then
-            success "Anthropic API: configured"
+            success "Anthropic API: configured (ANTHROPIC_API_KEY set)"
+        else
+            warn "Anthropic API: not configured"
+            info "Set your API key: export ANTHROPIC_API_KEY='your-key-here'"
+        fi
+    elif [[ "$AI_PROVIDER" == "ollama" ]]; then
+        if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+            success "Ollama: running"
+
+            # Check model
+            if ollama list 2>/dev/null | grep -q "qwen2.5-coder"; then
+                success "AI Model: qwen2.5-coder:7b installed"
+            else
+                warn "AI Model: not installed"
+                info "Pull with: ollama pull qwen2.5-coder:7b"
+            fi
         else
             warn "Ollama: not running"
+            info "Start with: ollama serve"
         fi
+    else
+        info "AI provider: not configured (will use defaults)"
     fi
 
     echo ""
@@ -820,26 +965,40 @@ print_completion() {
     echo -e "${GREEN}               Installation Complete!                          ${NC}"
     echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
     echo ""
-    echo "Conduit is now installed and ready to use!"
+    echo "Conduit is now installed!"
     echo ""
-    echo "Quick Start:"
-    echo "  1. Install your first MCP server:"
-    echo "     conduit install https://github.com/7nohe/local-mcp-server-sample"
+
+    # Check if PATH needs update
+    local NEEDS_PATH_UPDATE=false
+    if ! command_exists conduit 2>/dev/null; then
+        NEEDS_PATH_UPDATE=true
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo -e "${YELLOW}⚠  IMPORTANT: Restart your terminal or run:${NC}"
+        echo ""
+        if [[ -n "$SHELL_RC" ]]; then
+            echo -e "  ${GREEN}source $SHELL_RC${NC}"
+        else
+            echo -e "  ${GREEN}export PATH=\"\$PATH:$INSTALL_DIR\"${NC}"
+        fi
+        echo ""
+        echo "This is required for the 'conduit' command to work."
+        echo -e "${YELLOW}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+        echo ""
+    fi
+
+    echo "Quick Start (after restarting terminal):"
     echo ""
-    echo "  2. Check status:"
+    echo "  1. Check status:"
     echo "     conduit status"
+    echo ""
+    echo "  2. Run diagnostics:"
+    echo "     conduit doctor"
     echo ""
     echo "  3. View all commands:"
     echo "     conduit --help"
     echo ""
-
-    if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
-        echo -e "${YELLOW}Note: Remember to reload your shell or run:${NC}"
-        echo "  source ~/.bashrc  # or ~/.zshrc"
-        echo ""
-    fi
-
     echo "Documentation: https://github.com/amlandas/Conduit-AI-Intelligence-Hub"
+    echo "Report issues: https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues"
     echo ""
 }
 
