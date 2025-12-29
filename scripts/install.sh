@@ -188,7 +188,8 @@ confirm() {
         prompt="$prompt [y/N]: "
     fi
 
-    read -r -p "$prompt" response
+    # Use /dev/tty to read from terminal instead of stdin (fixes curl | bash)
+    read -r -p "$prompt" response </dev/tty
     response=${response:-$default}
 
     [[ "$response" =~ ^[Yy]$ ]]
@@ -498,7 +499,7 @@ install_container_runtime() {
     echo "  [3] Skip (install manually later)"
     echo ""
 
-    read -r -p "Choice [1/2/3]: " choice
+    read -r -p "Choice [1/2/3]: " choice </dev/tty
 
     case $choice in
         1)
@@ -590,7 +591,7 @@ choose_ai_provider() {
     echo "  [3] Skip (Configure later)"
     echo ""
 
-    read -r -p "Choice [1/2/3]: " ai_choice
+    read -r -p "Choice [1/2/3]: " ai_choice </dev/tty
 
     case $ai_choice in
         1)

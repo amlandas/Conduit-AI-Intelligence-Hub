@@ -77,7 +77,8 @@ confirm() {
         prompt="$prompt [y/N]: "
     fi
 
-    read -r -p "$prompt" response
+    # Use /dev/tty to read from terminal instead of stdin (fixes curl | bash)
+    read -r -p "$prompt" response </dev/tty
     response=${response:-$default}
 
     [[ "$response" =~ ^[Yy]$ ]]
