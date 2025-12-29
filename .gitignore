@@ -1,0 +1,58 @@
+# Binaries
+/bin/
+/dist/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Build artifacts
+artifacts/
+*.tar.gz
+*.zip
+*.dmg
+*.msi
+*.deb
+*.rpm
+
+# Test artifacts
+coverage.out
+coverage.html
+*.test
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files - NEVER commit secrets
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+service-account-key.json
+
+# Conduit data directories (local development)
+.conduit/
+conduit.db
+conduit.db-wal
+conduit.db-shm
+
+# Dependency directories
+vendor/
+
+# Debug files
+*.log
+debug/
+
+# Temporary files
+tmp/
+temp/
