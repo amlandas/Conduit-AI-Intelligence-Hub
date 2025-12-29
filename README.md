@@ -256,6 +256,56 @@ policy:
     - ~/.aws
 ```
 
+## Uninstalling
+
+### Complete Removal (Recommended)
+
+Remove Conduit and optionally its dependencies with one command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
+```
+
+The uninstall script will:
+- Stop and remove the daemon service
+- Remove binaries from your PATH
+- Optionally remove data directory
+- Clean up shell configuration
+- Optionally remove dependencies (Docker/Podman, Ollama, Go)
+
+**Options:**
+```bash
+# Force mode (skip confirmations)
+curl -fsSL ... | bash -s -- --force
+
+# Remove everything including dependencies
+curl -fsSL ... | bash -s -- --remove-all
+
+# Custom paths
+curl -fsSL ... | bash -s -- --install-dir ~/.local/bin --conduit-home ~/.conduit
+```
+
+The script gracefully handles errors and continues with remaining components.
+
+### Manual Uninstallation
+
+If you prefer manual removal:
+
+```bash
+# 1. Stop and remove service
+conduit service stop
+conduit service remove
+
+# 2. Remove binaries
+rm -f ~/.local/bin/conduit ~/.local/bin/conduit-daemon
+
+# 3. Remove data
+rm -rf ~/.conduit
+
+# 4. Clean shell config (remove PATH exports)
+# Edit ~/.zshrc or ~/.bashrc and remove Conduit PATH line
+```
+
 ## Development
 
 ### Running Tests
