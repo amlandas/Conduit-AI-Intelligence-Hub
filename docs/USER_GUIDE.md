@@ -52,7 +52,7 @@ Conduit is a local-first AI intelligence hub that connects your AI coding assist
 Install Conduit with a single command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/simpleflo/conduit/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
 ```
 
 The installer automatically:
@@ -87,8 +87,8 @@ If you prefer manual installation or the automated installer doesn't work:
 
 ```bash
 # Clone the repository
-git clone https://github.com/simpleflo/conduit.git
-cd conduit
+git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git
+cd Conduit-AI-Intelligence-Hub
 
 # Build the binaries
 make build
@@ -663,7 +663,7 @@ make build  # Uses -tags "fts5" automatically
 ## Getting Help
 
 - **Documentation**: See `docs/` directory
-- **Issues**: Report bugs at https://github.com/simpleflo/conduit/issues
+- **Issues**: Report bugs at https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues
 - **Logs**: Check `~/.conduit/logs/` for detailed logs
 
 ---

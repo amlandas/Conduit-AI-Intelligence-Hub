@@ -33,7 +33,7 @@ Conduit V0 is the foundational release of the AI Intelligence Hub - a local-firs
 
 **Installation Command**:
 ```bash
-curl -fsSL https://raw.githubusercontent.com/simpleflo/conduit/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
 ```
 
 **Service Management**:

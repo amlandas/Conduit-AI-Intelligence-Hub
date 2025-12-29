@@ -15,7 +15,7 @@ Before following these use cases, ensure Conduit is installed and running:
 
 ```bash
 # Install Conduit (if not already installed)
-curl -fsSL https://raw.githubusercontent.com/simpleflo/conduit/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
 
 # Verify installation
 conduit status

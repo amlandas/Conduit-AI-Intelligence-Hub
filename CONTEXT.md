@@ -532,9 +532,9 @@ make test
 
 ## Contact & Resources
 
-- **Repository**: (internal)
+- **Repository**: https://github.com/amlandas/Conduit-AI-Intelligence-Hub
 - **Documentation**: `docs/` directory
-- **Issues**: Track in project management tool
+- **Issues**: https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues
 
 ---
 

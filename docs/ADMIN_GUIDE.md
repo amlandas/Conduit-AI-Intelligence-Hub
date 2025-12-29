@@ -114,7 +114,7 @@
 The easiest way to install Conduit is using the one-click installer:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/simpleflo/conduit/main/scripts/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
 ```
 
 The installer handles:
@@ -143,7 +143,7 @@ For custom builds or development:
 
 ```bash
 # Clone repository
-git clone https://github.com/simpleflo/conduit.git
+git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git
 cd conduit
 
 # Install Go dependencies
