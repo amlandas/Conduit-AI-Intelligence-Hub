@@ -661,15 +661,43 @@ install_ollama() {
     fi
 
     info "Installing Ollama..."
-    curl -fsSL https://ollama.com/install.sh | sh
+
+    case $OS in
+        darwin)
+            # macOS: Use Homebrew or download app
+            if command_exists brew; then
+                info "Installing Ollama via Homebrew..."
+                brew install ollama
+            else
+                error "Homebrew not found. Please install Ollama manually:"
+                echo "  Visit: https://ollama.com/download/mac"
+                echo "  Or install Homebrew and try again"
+                return 1
+            fi
+            ;;
+        linux)
+            # Linux: Use official install script
+            curl -fsSL https://ollama.com/install.sh | sh
+            ;;
+        *)
+            error "Unsupported operating system for Ollama: $OS"
+            return 1
+            ;;
+    esac
 
     success "Ollama installed"
 
     # Start Ollama
     info "Starting Ollama service..."
     if [[ "$OS" == "darwin" ]]; then
-        ollama serve &>/dev/null &
+        # On macOS, use brew services if available, otherwise start manually
+        if command_exists brew; then
+            brew services start ollama 2>/dev/null || ollama serve &>/dev/null &
+        else
+            ollama serve &>/dev/null &
+        fi
     else
+        # On Linux, enable and start systemd service
         sudo systemctl enable ollama 2>/dev/null || true
         sudo systemctl start ollama 2>/dev/null || ollama serve &>/dev/null &
     fi
@@ -681,6 +709,9 @@ install_ollama() {
         success "Ollama is running"
     else
         warn "Ollama may not be running. Start manually with: ollama serve"
+        if [[ "$OS" == "darwin" ]] && command_exists brew; then
+            info "Or start as service: brew services start ollama"
+        fi
     fi
 
     # Pull the model
