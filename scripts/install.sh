@@ -11,7 +11,7 @@
 # 6. Verifies the installation
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/simpleflo/conduit/main/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
 #
 # Or with options:
 #   curl -fsSL ... | bash -s -- --install-dir ~/.local/bin --no-service
@@ -333,11 +333,11 @@ build_conduit() {
     echo "Step 3: Build Conduit"
     echo "──────────────────────────────────────────────────────────────"
 
-    local REPO_URL="https://github.com/simpleflo/conduit.git"
+    local REPO_URL="https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git"
     local BUILD_DIR=$(mktemp -d)
 
     # Check if we're already in the conduit repo
-    if [[ -f "go.mod" ]] && grep -q "github.com/simpleflo/conduit" go.mod 2>/dev/null; then
+    if [[ -f "go.mod" ]] && grep -q "module conduit" go.mod 2>/dev/null; then
         info "Building from current directory..."
         BUILD_DIR="."
     else
@@ -839,7 +839,7 @@ print_completion() {
         echo ""
     fi
 
-    echo "Documentation: https://github.com/simpleflo/conduit"
+    echo "Documentation: https://github.com/amlandas/Conduit-AI-Intelligence-Hub"
     echo ""
 }
 
