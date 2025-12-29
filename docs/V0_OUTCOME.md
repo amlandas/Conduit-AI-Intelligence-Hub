@@ -20,20 +20,30 @@ Conduit V0 is the foundational release of the AI Intelligence Hub - a local-firs
 
 ## Implemented Features
 
-### 1. Installation & Setup (`internal/installer/`, `scripts/`)
+### 1. Installation & Setup (`scripts/`)
 
 | Feature | Description | Status |
 |---------|-------------|--------|
 | One-Click Installer | Bash script for automated installation | Complete |
 | Dependency Detection | Checks for Go, Git, Docker/Podman, Ollama | Complete |
 | Dependency Installation | Installs missing dependencies interactively | Complete |
+| Interactive Runtime Selection | User choice between Docker/Podman with platform recommendations | Complete |
+| Interactive AI Provider Selection | Choice between Ollama (local) and Anthropic API (cloud) | Complete |
+| Platform-Specific Handling | macOS (Homebrew) and Linux-specific installation paths | Complete |
+| PATH Configuration | Automatic shell detection and PATH setup with duplicate checking | Complete |
 | Daemon Service Setup | launchd (macOS) / systemd (Linux) integration | Complete |
 | AI Model Setup | Downloads default Ollama model (qwen2.5-coder:7b) | Complete |
-| Uninstall Wizard | Complete removal with data cleanup options | Complete |
+| Uninstall Wizard | Complete removal with smart dependency management | Complete |
+| stdin Redirection Pattern | Support for `curl \| bash` execution with `/dev/tty` | Complete |
 
 **Installation Command**:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
+```
+
+**Uninstallation Command**:
+```bash
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
 ```
 
 **Service Management**:
@@ -42,6 +52,21 @@ curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hu
 - `conduit service stop` - Stop the daemon
 - `conduit service status` - Check service status
 - `conduit service remove` - Remove the service
+
+**Installation Features**:
+- **Interactive Menus**: Clear choices for container runtime (Docker/Podman) and AI provider (Ollama/Anthropic)
+- **Platform Detection**: Automatically detects macOS or Linux and adjusts installation methods
+- **Smart Defaults**: Recommends Podman for Linux, Docker for macOS
+- **Error Recovery**: Graceful handling of missing dependencies with clear guidance
+- **Service Verification**: Validates daemon, runtime, and Ollama are running after installation
+
+**Uninstallation Features**:
+- **Smart Runtime Detection**: Reads Conduit config to identify which runtime (Docker/Podman) was actually used
+- **Selective Removal**: Only removes the container runtime that Conduit was using
+- **Model-Specific Detection**: Identifies and offers to remove qwen2.5-coder:7b model specifically
+- **Graceful Errors**: Continues with remaining components if one fails to uninstall
+- **Shell Config Cleanup**: Removes PATH entries and creates backups of modified shell configs
+- **Interactive Prompts**: User control over each component removal (service, binaries, data, dependencies)
 
 ### 2. Daemon Core (`internal/daemon/`)
 
@@ -274,7 +299,8 @@ conduit/
 │   └── models/               # Shared types
 │       └── errors.go
 ├── scripts/
-│   └── install.sh            # One-click installation script
+│   ├── install.sh            # One-click installation script
+│   └── uninstall.sh          # Complete uninstallation script
 ├── tests/
 │   └── integration/          # Integration tests
 ├── docs/                     # Documentation
@@ -296,6 +322,52 @@ conduit/
 | `rs/zerolog` | v1.34.0 | Structured logging |
 | `spf13/cobra` | v1.10.2 | CLI framework |
 | `spf13/viper` | v1.21.0 | Configuration management |
+
+---
+
+## Bug Fixes & Improvements
+
+During user testing, several critical bugs were identified and resolved:
+
+### Installation Script Fixes
+
+1. **Repository URL Fix** (Bug #1)
+   - **Issue**: Installation failed with "repository not found" error
+   - **Cause**: Script referenced placeholder URL `simpleflo/conduit` instead of actual repository
+   - **Fix**: Updated to `amlandas/Conduit-AI-Intelligence-Hub`
+
+2. **PATH Recognition Fix** (Bug #2)
+   - **Issue**: Commands not recognized after installation on macOS
+   - **Cause**: PATH not properly updated in current shell session
+   - **Fix**: Added duplicate checking, prominent warnings, and clear instructions to source shell config or restart terminal
+
+3. **Interactive Input Fix** (Bug #3)
+   - **Issue**: Installer exited without accepting user input during interactive prompts
+   - **Cause**: When running via `curl | bash`, stdin is the pipe, not the terminal
+   - **Fix**: Redirected all `read` commands to use `/dev/tty` instead of stdin
+   - **Code Pattern**: `read -r -p "$prompt" response </dev/tty`
+
+4. **macOS Ollama Installation Fix** (Bug #4)
+   - **Issue**: Ollama installation failed on macOS with "Linux only" error
+   - **Cause**: Official Ollama script only supports Linux
+   - **Fix**: Platform-specific installation using Homebrew for macOS, official script for Linux
+
+### UX Enhancements
+
+1. **Interactive Menus**: Added user-friendly menus for:
+   - Container runtime selection (Docker vs Podman)
+   - AI provider selection (Ollama vs Anthropic API)
+   - Platform-specific recommendations shown for each choice
+
+2. **Service Status Clarity**: Improved status reporting to distinguish between:
+   - "not installed"
+   - "not running"
+   - "running"
+
+3. **Smart Uninstallation**:
+   - Detects which runtime Conduit actually used (from config file)
+   - Only offers to remove the runtime that was in use
+   - Specifically identifies qwen2.5-coder:7b model instead of generic "models"
 
 ---
 

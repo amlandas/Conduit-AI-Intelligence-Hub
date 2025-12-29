@@ -133,6 +133,10 @@ conduit/
 │       ├── lifecycle_integration_test.go
 │       └── kb_integration_test.go
 │
+├── scripts/                  # Installation and utility scripts
+│   ├── install.sh            # One-click installation script
+│   └── uninstall.sh          # Complete uninstallation script
+│
 ├── docs/                     # Documentation
 │   ├── V0_OUTCOME.md         # Implementation summary
 │   ├── USER_GUIDE.md         # User documentation
@@ -257,6 +261,54 @@ ok  internal/store
 ok  pkg/models
 ok  tests/integration
 ```
+
+---
+
+## Installation Scripts (`scripts/`)
+
+### install.sh
+
+One-click installation script with comprehensive UX improvements:
+
+**Key Implementation Details**:
+- **stdin Redirection**: Uses `/dev/tty` for all interactive prompts to support `curl | bash` execution
+  ```bash
+  read -r -p "$prompt" response </dev/tty
+  ```
+- **Platform-Specific Installation**:
+  - macOS: Uses Homebrew for Ollama installation
+  - Linux: Uses official Ollama install script
+- **Interactive Menus**:
+  - Container runtime selection (Docker/Podman with platform-specific recommendations)
+  - AI provider selection (Ollama local vs Anthropic API)
+- **PATH Configuration**: Automatically detects shell and adds PATH with duplicate checking
+- **Service Integration**: Sets up launchd (macOS) or systemd (Linux) services
+
+**Features**:
+- Dependency detection and installation (Go, Git, Docker/Podman, Ollama)
+- Build from source with FTS5 support
+- Service installation and startup verification
+- Model download (qwen2.5-coder:7b for Ollama)
+
+### uninstall.sh
+
+Complete uninstallation script with smart dependency management:
+
+**Key Implementation Details**:
+- **Smart Runtime Detection**: Reads `~/.conduit/conduit.yaml` to determine which runtime Conduit used
+  ```bash
+  RUNTIME=$(grep "preferred:" "$CONDUIT_HOME/conduit.yaml" | awk '{print $2}')
+  ```
+- **Graceful Error Handling**: Uses `|| true` pattern to continue on errors
+- **Selective Dependency Removal**: Only removes Docker OR Podman (whichever Conduit used)
+- **Specific Model Detection**: Identifies qwen2.5-coder:7b model specifically
+- **Shell Config Cleanup**: Removes PATH entries with backup creation
+
+**Features**:
+- Interactive prompts for each component (service, binaries, data, dependencies)
+- Process termination with user consent
+- Backup creation for shell configurations
+- Continues on errors to clean up remaining components
 
 ---
 
