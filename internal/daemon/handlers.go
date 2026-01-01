@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -485,6 +486,7 @@ func (d *Daemon) handleSyncKBSource(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleKBSearch searches the knowledge base.
+// Supports modes: "hybrid" (default), "semantic", "fts5"
 func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -492,14 +494,131 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := d.kbSearcher.Search(r.Context(), query, d.kbSearchOpts(r))
-	if err != nil {
-		d.logger.Error().Err(err).Msg("search failed")
-		writeError(w, http.StatusInternalServerError, "E_INTERNAL", "search failed")
-		return
+	mode := r.URL.Query().Get("mode")
+	if mode == "" {
+		mode = "hybrid" // Default to hybrid
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	ctx := r.Context()
+
+	switch mode {
+	case "semantic":
+		// Force semantic search only
+		if d.kbSemantic == nil {
+			writeError(w, http.StatusServiceUnavailable, "E_SEMANTIC_UNAVAILABLE",
+				"semantic search unavailable: Qdrant or Ollama not running")
+			return
+		}
+		result, err := d.kbSemantic.Search(ctx, query, d.kbSemanticOpts(r))
+		if err != nil {
+			d.logger.Error().Err(err).Msg("semantic search failed")
+			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "semantic search failed")
+			return
+		}
+		writeJSON(w, http.StatusOK, d.convertSemanticResult(result, "semantic"))
+
+	case "fts5":
+		// Force FTS5 keyword search only
+		result, err := d.kbSearcher.Search(ctx, query, d.kbSearchOpts(r))
+		if err != nil {
+			d.logger.Error().Err(err).Msg("fts5 search failed")
+			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "fts5 search failed")
+			return
+		}
+		// Add search_mode to response
+		resp := map[string]interface{}{
+			"results":     result.Results,
+			"total_hits":  result.TotalHits,
+			"query":       result.Query,
+			"search_time": result.SearchTime,
+			"search_mode": "fts5",
+		}
+		writeJSON(w, http.StatusOK, resp)
+
+	case "hybrid":
+		fallthrough
+	default:
+		// Hybrid: try semantic first, fallback to FTS5
+		if d.kbSemantic != nil {
+			result, err := d.kbSemantic.Search(ctx, query, d.kbSemanticOpts(r))
+			if err == nil && len(result.Results) > 0 {
+				writeJSON(w, http.StatusOK, d.convertSemanticResult(result, "semantic"))
+				return
+			}
+			if err != nil {
+				d.logger.Debug().Err(err).Msg("semantic search failed, falling back to FTS5")
+			}
+		}
+
+		// Fallback to FTS5
+		result, err := d.kbSearcher.Search(ctx, query, d.kbSearchOpts(r))
+		if err != nil {
+			d.logger.Error().Err(err).Msg("fts5 search failed")
+			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "search failed")
+			return
+		}
+		resp := map[string]interface{}{
+			"results":     result.Results,
+			"total_hits":  result.TotalHits,
+			"query":       result.Query,
+			"search_time": result.SearchTime,
+			"search_mode": "fts5",
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+// kbSemanticOpts parses semantic search options from request.
+func (d *Daemon) kbSemanticOpts(r *http.Request) kb.SemanticSearchOptions {
+	opts := kb.SemanticSearchOptions{
+		Limit:      10,
+		MinScore:   0.3,
+		ContextLen: 300,
+	}
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
+			opts.Limit = limit
+		}
+	}
+
+	if offsetStr := r.URL.Query().Get("offset"); offsetStr != "" {
+		if offset, err := strconv.Atoi(offsetStr); err == nil && offset >= 0 {
+			opts.Offset = offset
+		}
+	}
+
+	if sourceID := r.URL.Query().Get("source_id"); sourceID != "" {
+		opts.SourceIDs = []string{sourceID}
+	}
+
+	return opts
+}
+
+// convertSemanticResult converts semantic search results to a common response format.
+func (d *Daemon) convertSemanticResult(result *kb.SemanticSearchResult, mode string) map[string]interface{} {
+	// Convert semantic hits to common format
+	results := make([]map[string]interface{}, len(result.Results))
+	for i, hit := range result.Results {
+		results[i] = map[string]interface{}{
+			"document_id": hit.DocumentID,
+			"chunk_id":    hit.ChunkID,
+			"path":        hit.Path,
+			"title":       hit.Title,
+			"snippet":     hit.Snippet,
+			"score":       hit.Score,
+			"confidence":  hit.Confidence,
+			"metadata":    hit.Metadata,
+		}
+	}
+
+	return map[string]interface{}{
+		"results":     results,
+		"total_hits":  result.TotalHits,
+		"query":       result.Query,
+		"search_time": result.SearchTime,
+		"search_mode": mode,
+	}
 }
 
 // Helper functions
@@ -542,6 +661,40 @@ func (d *Daemon) kbSearchOpts(r *http.Request) kb.SearchOptions {
 	}
 
 	return opts
+}
+
+// handleKBMigrate migrates existing FTS-indexed documents to vector search.
+func (d *Daemon) handleKBMigrate(w http.ResponseWriter, r *http.Request) {
+	if d.kbSemantic == nil {
+		writeError(w, http.StatusServiceUnavailable, "E_SEMANTIC_UNAVAILABLE",
+			"semantic search unavailable: Qdrant or Ollama not running")
+		return
+	}
+
+	// Use background context to avoid cancellation when HTTP client times out
+	// Migration is a long-running operation that should complete even if client disconnects
+	ctx := context.Background()
+
+	// Run migration
+	var migratedCount int
+	progressFn := func(current, total int) {
+		migratedCount = current
+		d.logger.Info().
+			Int("current", current).
+			Int("total", total).
+			Msg("migration progress")
+	}
+
+	if err := d.kbSemantic.MigrateFromFTS(ctx, progressFn); err != nil {
+		d.logger.Error().Err(err).Msg("migration failed")
+		writeError(w, http.StatusInternalServerError, "E_MIGRATION_FAILED", err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":   "completed",
+		"migrated": migratedCount,
+	})
 }
 
 // Version information (set at build time)

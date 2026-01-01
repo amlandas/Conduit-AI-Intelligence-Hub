@@ -45,6 +45,10 @@ type client struct {
 }
 
 func newClient(socketPath string) *client {
+	return newClientWithTimeout(socketPath, 30*time.Second)
+}
+
+func newClientWithTimeout(socketPath string, timeout time.Duration) *client {
 	return &client{
 		httpClient: &http.Client{
 			Transport: &http.Transport{
@@ -52,7 +56,7 @@ func newClient(socketPath string) *client {
 					return net.Dial("unix", socketPath)
 				},
 			},
-			Timeout: 30 * time.Second,
+			Timeout: timeout,
 		},
 		baseURL: "http://localhost",
 	}
@@ -1228,6 +1232,7 @@ Examples:
 	cmd.AddCommand(kbSearchCmd())
 	cmd.AddCommand(kbSyncCmd())
 	cmd.AddCommand(kbStatsCmd())
+	cmd.AddCommand(kbMigrateCmd())
 
 	return cmd
 }
@@ -1470,12 +1475,13 @@ Examples:
 			}
 			sources := resp.Sources
 
-			// Find matching source by name or ID
+			// Find matching source by name, ID, or path
 			var matchedSource map[string]interface{}
 			for _, src := range sources {
 				srcID, _ := src["source_id"].(string)
 				srcName, _ := src["name"].(string)
-				if srcID == nameOrID || srcName == nameOrID {
+				srcPath, _ := src["path"].(string)
+				if srcID == nameOrID || srcName == nameOrID || srcPath == nameOrID {
 					matchedSource = src
 					break
 				}
@@ -1516,15 +1522,38 @@ Examples:
 }
 
 func kbSearchCmd() *cobra.Command {
-	return &cobra.Command{
+	var semantic, fts5 bool
+
+	cmd := &cobra.Command{
 		Use:   "search <query>",
 		Short: "Search the knowledge base",
-		Args:  cobra.ExactArgs(1),
+		Long: `Search the knowledge base using hybrid, semantic, or keyword search.
+
+By default, hybrid search is used which tries semantic search first
+(if Qdrant and Ollama are available) and falls back to FTS5 keyword search.
+
+Examples:
+  conduit kb search "how does authentication work"    # Hybrid (default)
+  conduit kb search "authentication" --semantic       # Force semantic only
+  conduit kb search "class AuthProvider" --fts5       # Force keyword only`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
 			c := newClient(socketPath)
 
-			data, err := c.get("/api/v1/kb/search?q=" + url.QueryEscape(query))
+			// Determine search mode
+			mode := "hybrid"
+			if semantic && fts5 {
+				return fmt.Errorf("cannot use both --semantic and --fts5 flags")
+			}
+			if semantic {
+				mode = "semantic"
+			} else if fts5 {
+				mode = "fts5"
+			}
+
+			apiURL := fmt.Sprintf("/api/v1/kb/search?q=%s&mode=%s", url.QueryEscape(query), mode)
+			data, err := c.get(apiURL)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
 			}
@@ -1533,20 +1562,45 @@ func kbSearchCmd() *cobra.Command {
 			json.Unmarshal(data, &resp)
 
 			results, _ := resp["results"].([]interface{})
+			searchMode, _ := resp["search_mode"].(string)
+
 			if len(results) == 0 {
 				fmt.Printf("No results found for: %s\n", query)
 				return nil
 			}
 
-			fmt.Printf("Found %v results for: %s\n\n", resp["total_hits"], query)
+			// Show search mode indicator
+			modeLabel := ""
+			switch searchMode {
+			case "semantic":
+				modeLabel = " [semantic]"
+			case "fts5":
+				modeLabel = " [keyword]"
+			}
+
+			fmt.Printf("Found %v results for: %s%s\n\n", resp["total_hits"], query, modeLabel)
 			for _, r := range results {
 				result := r.(map[string]interface{})
-				fmt.Printf("• %s\n  %s\n\n", result["path"], result["snippet"])
+				path, _ := result["path"].(string)
+				snippet, _ := result["snippet"].(string)
+
+				// Show confidence for semantic results
+				confidence, hasConfidence := result["confidence"].(string)
+				if hasConfidence && confidence != "" {
+					fmt.Printf("• %s [%s]\n  %s\n\n", path, confidence, snippet)
+				} else {
+					fmt.Printf("• %s\n  %s\n\n", path, snippet)
+				}
 			}
 
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&semantic, "semantic", false, "Force semantic search (requires Qdrant + Ollama)")
+	cmd.Flags().BoolVar(&fts5, "fts5", false, "Force FTS5 keyword search")
+
+	return cmd
 }
 
 func kbSyncCmd() *cobra.Command {
@@ -1658,6 +1712,53 @@ Examples:
 				fmt.Printf("✓ Sync complete: %d added, %d updated, %d deleted\n",
 					totalAdded, totalUpdated, totalDeleted)
 			}
+
+			return nil
+		},
+	}
+}
+
+func kbMigrateCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "migrate",
+		Short: "Migrate FTS documents to vector search",
+		Long: `Migrate existing FTS5-indexed documents to the vector search index.
+
+This is required to enable semantic search for documents that were indexed
+before semantic search was enabled. New documents are automatically indexed
+in both FTS5 and vector search.
+
+Requires Qdrant and Ollama to be running.
+
+Examples:
+  conduit kb migrate`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Use a longer timeout for migration (10 minutes)
+			c := newClientWithTimeout(socketPath, 10*time.Minute)
+
+			fmt.Println("Migrating documents to vector search...")
+			fmt.Println("This may take a while for large knowledge bases.")
+			fmt.Println()
+
+			data, err := c.post("/api/v1/kb/migrate", nil)
+			if err != nil {
+				return fmt.Errorf("migration failed: %w", err)
+			}
+
+			var result map[string]interface{}
+			json.Unmarshal(data, &result)
+
+			if errData, ok := result["error"]; ok {
+				errMap := errData.(map[string]interface{})
+				return fmt.Errorf("%s", errMap["message"])
+			}
+
+			migratedVal, ok := result["migrated"]
+			if !ok || migratedVal == nil {
+				return fmt.Errorf("unexpected response: missing 'migrated' field")
+			}
+			migrated := int(migratedVal.(float64))
+			fmt.Printf("✓ Migration complete: %d documents migrated to vector search\n", migrated)
 
 			return nil
 		},

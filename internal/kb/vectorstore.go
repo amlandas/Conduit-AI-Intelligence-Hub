@@ -2,14 +2,26 @@ package kb
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/qdrant/go-client/qdrant"
 	"github.com/rs/zerolog"
 	"github.com/simpleflo/conduit/internal/observability"
 )
+
+// chunkIDToUUID converts a chunk ID string to a deterministic UUID v5.
+// This allows us to use string chunk IDs internally while Qdrant requires UUIDs.
+func chunkIDToUUID(chunkID string) string {
+	// Use a fixed namespace UUID for conduit chunk IDs
+	namespace := uuid.MustParse("6ba7b810-9dad-11d1-80b4-00c04fd430c8") // DNS namespace
+	// Create a deterministic UUID from the chunk ID
+	hash := sha256.Sum256([]byte(chunkID))
+	return uuid.NewSHA1(namespace, hash[:]).String()
+}
 
 const (
 	// DefaultQdrantHost is the default Qdrant gRPC endpoint.
@@ -194,6 +206,7 @@ func (vs *VectorStore) UpsertBatch(ctx context.Context, points []VectorPoint) er
 	for i, p := range points {
 		payload := map[string]any{
 			"document_id": p.DocumentID,
+			"chunk_id":    p.ID, // Store original chunk ID for retrieval
 			"chunk_index": p.ChunkIndex,
 			"path":        p.Path,
 			"title":       p.Title,
@@ -204,8 +217,11 @@ func (vs *VectorStore) UpsertBatch(ctx context.Context, points []VectorPoint) er
 			payload[k] = v
 		}
 
+		// Convert chunk ID to UUID for Qdrant (which requires UUID format)
+		pointUUID := chunkIDToUUID(p.ID)
+
 		qdrantPoints[i] = &qdrant.PointStruct{
-			Id:      qdrant.NewID(p.ID),
+			Id:      qdrant.NewID(pointUUID),
 			Vectors: qdrant.NewVectors(p.Vector...),
 			Payload: qdrant.NewValueMap(payload),
 		}

@@ -39,6 +39,17 @@ func NewSourceManager(db *sql.DB) *SourceManager {
 	}
 }
 
+// SetSemanticSearcher enables semantic search for the source manager's indexer.
+// This must be called after NewSourceManager to enable vector-based search.
+func (sm *SourceManager) SetSemanticSearcher(semantic *SemanticSearcher) {
+	sm.indexer.SetSemanticSearcher(semantic)
+}
+
+// Indexer returns the source manager's indexer.
+func (sm *SourceManager) Indexer() *Indexer {
+	return sm.indexer
+}
+
 // Add adds a new source folder.
 func (sm *SourceManager) Add(ctx context.Context, req AddSourceRequest) (*Source, error) {
 	// Validate path exists

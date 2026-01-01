@@ -37,6 +37,7 @@ type Daemon struct {
 	kbSource     *kb.SourceManager
 	kbSearcher   *kb.Searcher
 	kbIndexer    *kb.Indexer
+	kbSemantic   *kb.SemanticSearcher // Optional: nil if Qdrant/Ollama unavailable
 
 	// State
 	mu        sync.RWMutex
@@ -70,14 +71,46 @@ func New(cfg *config.Config) (*Daemon, error) {
 	kbSearcher := kb.NewSearcher(st.DB())
 	kbIndexer := kb.NewIndexer(st.DB())
 
+	// Try to initialize semantic search (optional - graceful if unavailable)
+	var kbSemantic *kb.SemanticSearcher
+	semanticCfg := kb.SemanticSearchConfig{
+		EmbeddingConfig: kb.EmbeddingConfig{
+			OllamaHost: "http://localhost:11434",
+			Model:      "nomic-embed-text",
+			Dimension:  768,
+			BatchSize:  10,
+		},
+		VectorStoreConfig: kb.VectorStoreConfig{
+			Host:           "localhost",
+			Port:           6334, // gRPC port
+			CollectionName: "conduit_kb",
+			Dimension:      768,
+			BatchSize:      100,
+		},
+	}
+	logger := observability.Logger("daemon")
+
+	kbSemantic, err = kb.NewSemanticSearcher(st.DB(), semanticCfg)
+	if err != nil {
+		logger.Warn().Err(err).Msg("semantic search unavailable, falling back to FTS5 only")
+		kbSemantic = nil
+	} else {
+		// Wire semantic search into both indexers for new documents
+		// The SourceManager has its own internal indexer that does the actual syncing
+		kbSource.SetSemanticSearcher(kbSemantic)
+		kbIndexer.SetSemanticSearcher(kbSemantic)
+		logger.Info().Msg("semantic search enabled")
+	}
+
 	d := &Daemon{
 		cfg:        cfg,
 		store:      st,
-		logger:     observability.Logger("daemon"),
+		logger:     logger,
 		adapters:   adapterRegistry,
 		kbSource:   kbSource,
 		kbSearcher: kbSearcher,
 		kbIndexer:  kbIndexer,
+		kbSemantic: kbSemantic,
 		shutdownCh: make(chan struct{}),
 	}
 
@@ -137,6 +170,7 @@ func (d *Daemon) setupRouter() {
 				r.Post("/{sourceID}/sync", d.handleSyncKBSource)
 			})
 			r.Get("/search", d.handleKBSearch)
+			r.Post("/migrate", d.handleKBMigrate)
 		})
 
 		// Status endpoint
