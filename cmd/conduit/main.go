@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -1441,31 +1442,55 @@ func kbRemoveCmd() *cobra.Command {
 	var force bool
 
 	cmd := &cobra.Command{
-		Use:   "remove <source-id>",
+		Use:   "remove <name-or-id>",
 		Short: "Remove a knowledge base source",
 		Long: `Remove a knowledge base source and all its indexed documents.
 
-Use 'conduit kb list' to see source IDs.
+Use 'conduit kb list' to see source names.
 
 Examples:
-  conduit kb remove abc123-def456
-  conduit kb remove abc123 --force`,
+  conduit kb remove "User Files"
+  conduit kb remove test --force`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sourceID := args[0]
+			nameOrID := args[0]
 
-			// Get source info first
+			// Get all sources to find by name or ID
 			c := newClient(socketPath)
-			data, err := c.get("/api/v1/kb/sources/" + sourceID)
+			data, err := c.get("/api/v1/kb/sources")
 			if err != nil {
-				return fmt.Errorf("source not found: %w", err)
+				return fmt.Errorf("failed to list sources: %w", err)
 			}
 
-			var source map[string]interface{}
-			json.Unmarshal(data, &source)
+			var resp struct {
+				Sources []map[string]interface{} `json:"sources"`
+			}
+			if err := json.Unmarshal(data, &resp); err != nil {
+				return fmt.Errorf("failed to parse sources: %w", err)
+			}
+			sources := resp.Sources
 
-			sourceName := source["name"].(string)
-			docCount := int(source["doc_count"].(float64))
+			// Find matching source by name or ID
+			var matchedSource map[string]interface{}
+			for _, src := range sources {
+				srcID, _ := src["source_id"].(string)
+				srcName, _ := src["name"].(string)
+				if srcID == nameOrID || srcName == nameOrID {
+					matchedSource = src
+					break
+				}
+			}
+
+			if matchedSource == nil {
+				return fmt.Errorf("source not found: %s\nUse 'conduit kb list' to see available sources", nameOrID)
+			}
+
+			sourceID, _ := matchedSource["source_id"].(string)
+			sourceName, _ := matchedSource["name"].(string)
+			docCount := 0
+			if dc, ok := matchedSource["doc_count"].(float64); ok {
+				docCount = int(dc)
+			}
 
 			if !force && docCount > 0 {
 				fmt.Printf("Source '%s' has %d indexed documents.\n", sourceName, docCount)
@@ -1499,7 +1524,7 @@ func kbSearchCmd() *cobra.Command {
 			query := args[0]
 			c := newClient(socketPath)
 
-			data, err := c.get("/api/v1/kb/search?q=" + query)
+			data, err := c.get("/api/v1/kb/search?q=" + url.QueryEscape(query))
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
 			}
