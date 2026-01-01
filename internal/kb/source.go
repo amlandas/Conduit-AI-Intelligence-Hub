@@ -191,6 +191,9 @@ func (sm *SourceManager) List(ctx context.Context) ([]*Source, error) {
 		json.Unmarshal([]byte(patterns), &src.Patterns)
 		json.Unmarshal([]byte(excludes), &src.Excludes)
 
+		// Normalize patterns to ensure they have * prefix (fixes corrupted data)
+		src.Patterns = normalizePatterns(src.Patterns)
+
 		if lastSync.Valid {
 			src.LastSync, _ = time.Parse("2006-01-02 15:04:05", lastSync.String)
 		}
@@ -239,6 +242,9 @@ func (sm *SourceManager) Get(ctx context.Context, sourceID string) (*Source, err
 
 	json.Unmarshal([]byte(patterns), &src.Patterns)
 	json.Unmarshal([]byte(excludes), &src.Excludes)
+
+	// Normalize patterns to ensure they have * prefix (fixes corrupted data)
+	src.Patterns = normalizePatterns(src.Patterns)
 
 	if lastSync.Valid {
 		src.LastSync, _ = time.Parse("2006-01-02 15:04:05", lastSync.String)
@@ -574,4 +580,21 @@ func extractFirstLine(content string) string {
 		}
 	}
 	return ""
+}
+
+// normalizePatterns fixes patterns that are missing the * prefix.
+// This handles corrupted database data where patterns like "*.pdf" were
+// stored as ".pdf" (likely due to JSON serialization issues).
+func normalizePatterns(patterns []string) []string {
+	normalized := make([]string, len(patterns))
+	for i, p := range patterns {
+		// If pattern starts with . but not *, add the * prefix
+		// e.g., ".pdf" -> "*.pdf", ".md" -> "*.md"
+		if strings.HasPrefix(p, ".") && !strings.HasPrefix(p, "*") {
+			normalized[i] = "*" + p
+		} else {
+			normalized[i] = p
+		}
+	}
+	return normalized
 }
