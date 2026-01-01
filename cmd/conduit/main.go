@@ -532,25 +532,43 @@ func installCmd() *cobra.Command {
 	var provider string
 	var skipBuild bool
 	var dryRun bool
+	var documentTools bool
 
 	cmd := &cobra.Command{
-		Use:   "install <url>",
-		Short: "Install an MCP server from a GitHub URL",
-		Long: `Install an MCP server by providing a GitHub repository URL.
+		Use:   "install [url]",
+		Short: "Install an MCP server or document extraction tools",
+		Long: `Install an MCP server by providing a GitHub repository URL,
+or install document extraction tools using the --document-tools flag.
 
-Conduit will:
+For MCP server installation, Conduit will:
 1. Clone the repository
 2. Analyze the code using AI to understand how to build and run it
 3. Generate a Docker container configuration
 4. Build the container
 5. Optionally add it to your AI clients (Claude Code, etc.)
 
+For document tools installation (--document-tools):
+Installs pdftotext, antiword, unrtf for indexing PDF, DOC, and RTF files.
+
 Examples:
   conduit install https://github.com/7nohe/local-mcp-server-sample
   conduit install github.com/modelcontextprotocol/servers/src/filesystem
-  conduit install https://github.com/user/mcp-server --name "My Server"`,
-		Args: cobra.ExactArgs(1),
+  conduit install https://github.com/user/mcp-server --name "My Server"
+  conduit install --document-tools`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Handle --document-tools flag
+			if documentTools {
+				inst := installer.New(false)
+				_, err := inst.InstallDocumentToolsOnly(cmd.Context())
+				return err
+			}
+
+			// Require URL for MCP server installation
+			if len(args) == 0 {
+				return fmt.Errorf("URL required for MCP server installation. Use --document-tools to install document extraction tools")
+			}
+
 			repoURL := args[0]
 			return runInstall(cmd.Context(), repoURL, name, provider, skipBuild, dryRun)
 		},
@@ -560,6 +578,7 @@ Examples:
 	cmd.Flags().StringVar(&provider, "provider", "", "AI provider to use: ollama (default) or anthropic")
 	cmd.Flags().BoolVar(&skipBuild, "skip-build", false, "Skip Docker build (just analyze)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be done without doing it")
+	cmd.Flags().BoolVar(&documentTools, "document-tools", false, "Install document extraction tools (pdftotext, antiword, unrtf)")
 
 	return cmd
 }
@@ -1635,7 +1654,8 @@ Checks:
   - Database accessibility
   - AI provider configuration
   - Client configurations
-  - Knowledge base status`,
+  - Knowledge base status
+  - Document extraction tools (PDF, DOC, RTF, DOCX, ODT)`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fmt.Println("╔══════════════════════════════════════════════════════════════╗")
 			fmt.Println("║                   Conduit Diagnostics                        ║")
@@ -1828,6 +1848,33 @@ Checks:
 						fmt.Println("   Add with: conduit kb add <path>")
 					}
 				}
+			}
+
+			// Check document extraction tools
+			fmt.Println()
+			fmt.Println("📄 Document Extraction Tools")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			toolStatus := kb.GetToolStatus()
+			missingTools := 0
+			for _, tool := range toolStatus {
+				if tool.Available {
+					if verbose && tool.Path != "" {
+						fmt.Printf("✓ %s (%s)\n", tool.Name, tool.Path)
+					} else {
+						fmt.Printf("✓ %s\n", tool.Name)
+					}
+				} else {
+					fmt.Printf("○ %s (not installed)\n", tool.Name)
+					missingTools++
+				}
+			}
+
+			if missingTools > 0 {
+				fmt.Println()
+				fmt.Println("   Some document formats may not be indexed.")
+				fmt.Println("   Install missing tools: conduit install --document-tools")
+				warnings++
 			}
 
 			// Summary

@@ -177,6 +177,66 @@ command_exists() {
     command -v "$1" >/dev/null 2>&1
 }
 
+# Ensure Homebrew is installed (macOS)
+ensure_homebrew() {
+    if [[ "$OS" != "darwin" ]]; then
+        return 0
+    fi
+
+    if command_exists brew; then
+        success "Homebrew is installed"
+        return 0
+    fi
+
+    echo ""
+    echo "Homebrew Package Manager"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Homebrew is the recommended package manager for macOS."
+    echo "It will be used to install dependencies like Go, Ollama, and document tools."
+    echo ""
+
+    if ! confirm "Install Homebrew now?"; then
+        warn "Some dependencies may need to be installed manually without Homebrew"
+        return 1
+    fi
+
+    # Check for curl or wget
+    if command_exists curl; then
+        info "Installing Homebrew via curl..."
+        /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+    elif command_exists wget; then
+        info "Installing Homebrew via wget..."
+        /bin/bash -c "$(wget -qO- https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)" </dev/tty
+    else
+        error "Neither curl nor wget is available."
+        echo ""
+        echo "Please install Homebrew manually:"
+        echo "  1. Install curl: Use Xcode Command Line Tools"
+        echo "  2. Run: xcode-select --install"
+        echo "  3. Then retry this installer"
+        echo ""
+        echo "Or install Homebrew manually:"
+        echo "  Visit: https://brew.sh"
+        return 1
+    fi
+
+    # Add Homebrew to PATH for this session (Apple Silicon vs Intel)
+    if [[ -f "/opt/homebrew/bin/brew" ]]; then
+        eval "$(/opt/homebrew/bin/brew shellenv)"
+    elif [[ -f "/usr/local/bin/brew" ]]; then
+        eval "$(/usr/local/bin/brew shellenv)"
+    fi
+
+    if command_exists brew; then
+        success "Homebrew installed successfully"
+        return 0
+    else
+        error "Homebrew installation may have failed"
+        return 1
+    fi
+}
+
 # Prompt for confirmation
 confirm() {
     local prompt="$1"
@@ -452,6 +512,9 @@ install_dependencies() {
 
     # Choose and install AI provider
     choose_ai_provider
+
+    # Install document extraction tools
+    install_document_tools
 }
 
 # Install container runtime (Docker or Podman)
@@ -724,6 +787,193 @@ install_ollama() {
     fi
 }
 
+# Install document extraction tools
+install_document_tools() {
+    echo ""
+    echo "Step 5b: Document Extraction Tools"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Conduit's Knowledge Base can index various document formats."
+    echo "Some formats require external tools for text extraction."
+    echo ""
+    echo "Formats and required tools:"
+    echo "  • PDF files (.pdf)     → pdftotext (from poppler)"
+    echo "  • Word docs (.doc)     → textutil (macOS) or antiword (Linux)"
+    echo "  • RTF files (.rtf)     → textutil (macOS) or unrtf (Linux)"
+    echo "  • DOCX/ODT files       → No tools needed (native support)"
+    echo ""
+
+    if ! confirm "Install document extraction tools?"; then
+        warn "Skipping document tools. Some document formats may not be indexable."
+        return 0
+    fi
+
+    local TOOLS_INSTALLED=0
+    local TOOLS_FAILED=0
+
+    case $OS in
+        darwin)
+            install_document_tools_macos
+            ;;
+        linux)
+            install_document_tools_linux
+            ;;
+        *)
+            warn "Document tools installation not supported on $OS"
+            echo "Please install manually:"
+            echo "  - pdftotext (poppler-utils)"
+            echo "  - antiword (for .doc files)"
+            echo "  - unrtf (for .rtf files)"
+            ;;
+    esac
+}
+
+# Install document tools on macOS
+install_document_tools_macos() {
+    # macOS has textutil built-in for DOC/RTF, just need poppler for PDF
+
+    # Check for textutil (should always be present)
+    if command_exists textutil; then
+        success "textutil: available (built-in, handles .doc and .rtf)"
+    else
+        warn "textutil: not found (unusual for macOS)"
+    fi
+
+    # Install poppler for pdftotext
+    if command_exists pdftotext; then
+        success "pdftotext: already installed"
+    else
+        info "Installing poppler (for PDF text extraction)..."
+        if command_exists brew; then
+            if brew install poppler 2>&1; then
+                success "poppler installed (provides pdftotext)"
+            else
+                error "Failed to install poppler"
+                echo "  Install manually: brew install poppler"
+            fi
+        else
+            warn "Homebrew not available. Cannot install poppler automatically."
+            echo "  Install Homebrew first, then run: brew install poppler"
+            echo "  Or download from: https://poppler.freedesktop.org/"
+        fi
+    fi
+
+    # Optional: Install antiword as alternative for .doc
+    if ! command_exists antiword; then
+        if command_exists brew; then
+            info "Installing antiword (alternative .doc extractor)..."
+            brew install antiword 2>&1 && success "antiword installed" || warn "antiword install failed (optional)"
+        fi
+    else
+        success "antiword: already installed"
+    fi
+
+    # Optional: Install unrtf as alternative for .rtf
+    if ! command_exists unrtf; then
+        if command_exists brew; then
+            info "Installing unrtf (alternative .rtf extractor)..."
+            brew install unrtf 2>&1 && success "unrtf installed" || warn "unrtf install failed (optional)"
+        fi
+    else
+        success "unrtf: already installed"
+    fi
+}
+
+# Install document tools on Linux
+install_document_tools_linux() {
+    local PKG_MANAGER=""
+    local PKG_INSTALL=""
+
+    # Detect package manager
+    if command_exists apt-get; then
+        PKG_MANAGER="apt"
+        PKG_INSTALL="sudo apt-get install -y"
+        sudo apt-get update -qq
+    elif command_exists dnf; then
+        PKG_MANAGER="dnf"
+        PKG_INSTALL="sudo dnf install -y"
+    elif command_exists yum; then
+        PKG_MANAGER="yum"
+        PKG_INSTALL="sudo yum install -y"
+    elif command_exists pacman; then
+        PKG_MANAGER="pacman"
+        PKG_INSTALL="sudo pacman -S --noconfirm"
+    elif command_exists zypper; then
+        PKG_MANAGER="zypper"
+        PKG_INSTALL="sudo zypper install -y"
+    else
+        warn "Could not detect package manager"
+        echo "Please install manually:"
+        echo "  - poppler-utils (for pdftotext)"
+        echo "  - antiword (for .doc files)"
+        echo "  - unrtf (for .rtf files)"
+        return 1
+    fi
+
+    info "Using package manager: $PKG_MANAGER"
+
+    # Install poppler-utils (pdftotext)
+    if command_exists pdftotext; then
+        success "pdftotext: already installed"
+    else
+        info "Installing poppler-utils..."
+        case $PKG_MANAGER in
+            apt)
+                $PKG_INSTALL poppler-utils && success "poppler-utils installed" || error "Failed to install poppler-utils"
+                ;;
+            dnf|yum)
+                $PKG_INSTALL poppler-utils && success "poppler-utils installed" || error "Failed to install poppler-utils"
+                ;;
+            pacman)
+                $PKG_INSTALL poppler && success "poppler installed" || error "Failed to install poppler"
+                ;;
+            zypper)
+                $PKG_INSTALL poppler-tools && success "poppler-tools installed" || error "Failed to install poppler-tools"
+                ;;
+        esac
+    fi
+
+    # Install antiword (for .doc)
+    if command_exists antiword; then
+        success "antiword: already installed"
+    else
+        info "Installing antiword..."
+        case $PKG_MANAGER in
+            apt|dnf|yum)
+                $PKG_INSTALL antiword && success "antiword installed" || warn "antiword install failed (optional)"
+                ;;
+            pacman)
+                # antiword is in AUR, skip for now
+                warn "antiword not in official repos (available in AUR)"
+                ;;
+            zypper)
+                $PKG_INSTALL antiword && success "antiword installed" || warn "antiword install failed (optional)"
+                ;;
+        esac
+    fi
+
+    # Install unrtf (for .rtf)
+    if command_exists unrtf; then
+        success "unrtf: already installed"
+    else
+        info "Installing unrtf..."
+        case $PKG_MANAGER in
+            apt)
+                $PKG_INSTALL unrtf && success "unrtf installed" || warn "unrtf install failed (optional)"
+                ;;
+            dnf|yum)
+                $PKG_INSTALL unrtf && success "unrtf installed" || warn "unrtf install failed (optional)"
+                ;;
+            pacman)
+                $PKG_INSTALL unrtf && success "unrtf installed" || warn "unrtf install failed (optional)"
+                ;;
+            zypper)
+                $PKG_INSTALL unrtf && success "unrtf installed" || warn "unrtf install failed (optional)"
+                ;;
+        esac
+    fi
+}
+
 # Setup daemon as a service
 setup_service() {
     if [[ "$INSTALL_SERVICE" != "true" ]]; then
@@ -981,6 +1231,33 @@ verify_installation() {
         info "AI provider: not configured (will use defaults)"
     fi
 
+    # Check document tools
+    echo ""
+    echo "Document Extraction Tools:"
+    if command_exists pdftotext; then
+        success "  PDF:  pdftotext available"
+    else
+        warn "  PDF:  pdftotext not installed (PDF files won't be indexed)"
+    fi
+
+    if [[ "$OS" == "darwin" ]] && command_exists textutil; then
+        success "  DOC:  textutil available (built-in)"
+        success "  RTF:  textutil available (built-in)"
+    else
+        if command_exists antiword; then
+            success "  DOC:  antiword available"
+        else
+            warn "  DOC:  no extractor (.doc files won't be indexed)"
+        fi
+        if command_exists unrtf; then
+            success "  RTF:  unrtf available"
+        else
+            warn "  RTF:  no extractor (.rtf files won't be indexed)"
+        fi
+    fi
+    success "  DOCX: native support"
+    success "  ODT:  native support"
+
     echo ""
 
     if [[ "$ALL_GOOD" == "true" ]]; then
@@ -1053,6 +1330,11 @@ main() {
     if ! confirm "Proceed with installation?"; then
         echo "Installation cancelled."
         exit 0
+    fi
+
+    # Ensure Homebrew is available on macOS (used for most dependencies)
+    if [[ "$OS" == "darwin" ]]; then
+        ensure_homebrew
     fi
 
     install_git

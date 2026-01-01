@@ -126,9 +126,19 @@ type IngestionJob struct {
 
 // Default patterns for common file types.
 var DefaultPatterns = []string{
+	// Documentation
 	"*.md", "*.txt", "*.rst",
+	// Code
 	"*.go", "*.py", "*.js", "*.ts", "*.java", "*.rs", "*.rb",
-	"*.json", "*.yaml", "*.yml",
+	"*.c", "*.cpp", "*.h", "*.hpp", "*.cs", "*.swift", "*.kt",
+	"*.sh", "*.bash", "*.zsh", "*.fish", "*.ps1", "*.bat", "*.cmd",
+	// Config
+	"*.json", "*.yaml", "*.yml", "*.xml", "*.jsonld", "*.toml", "*.ini", "*.cfg",
+	// Data
+	"*.csv", "*.tsv",
+	// Documents (require external tools for text extraction)
+	"*.pdf",
+	"*.doc", "*.docx", "*.odt", "*.rtf",
 }
 
 // Default excludes for common directories.

@@ -25,8 +25,9 @@ Conduit V0 is the foundational release of the AI Intelligence Hub - a local-firs
 | Feature | Description | Status |
 |---------|-------------|--------|
 | One-Click Installer | Bash script for automated installation | Complete |
-| Dependency Detection | Checks for Go, Git, Docker/Podman, Ollama | Complete |
+| Dependency Detection | Checks for Go, Git, Docker/Podman, Ollama, document tools | Complete |
 | Dependency Installation | Installs missing dependencies interactively | Complete |
+| Document Tools Installation | Installs pdftotext, antiword, unrtf for document indexing | Complete |
 | Interactive Runtime Selection | User choice between Docker/Podman with platform recommendations | Complete |
 | Interactive AI Provider Selection | Choice between Ollama (local) and Anthropic API (cloud) | Complete |
 | Platform-Specific Handling | macOS (Homebrew) and Linux-specific installation paths | Complete |
@@ -166,10 +167,26 @@ CREATED → AUDITING → INSTALLED → STARTING → RUNNING
 | Component | Description | Status |
 |-----------|-------------|--------|
 | Document Indexer | Full-text indexing with FTS5 | Complete |
+| Document Extractors | Multi-format text extraction (PDF, DOC, DOCX, ODT, RTF) | Complete |
 | Chunker | Configurable text chunking | Complete |
 | Searcher | BM25 ranked search | Complete |
 | Source Manager | Directory/file source management | Complete |
 | MCP Server | KB exposed as MCP tool | Complete |
+
+**Supported Document Formats**:
+- Text: `.md`, `.txt`, `.rst`
+- Code: `.go`, `.py`, `.js`, `.ts`, `.java`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt`
+- Scripts: `.sh`, `.bash`, `.zsh`, `.fish`, `.ps1`, `.bat`, `.cmd`
+- Config: `.json`, `.yaml`, `.yml`, `.xml`, `.jsonld`, `.toml`, `.ini`, `.cfg`
+- Data: `.csv`, `.tsv`
+- Documents: `.pdf`, `.doc`, `.docx`, `.odt`, `.rtf`
+
+**Document Extraction Tools**:
+- `pdftotext` (poppler) - PDF text extraction
+- `textutil` (macOS built-in) - DOC/RTF extraction
+- `antiword` (Linux/Windows) - DOC extraction
+- `unrtf` (Linux) - RTF extraction
+- Native Go - DOCX and ODT (ZIP+XML parsing)
 
 **Search Capabilities**:
 - Full-text search with SQLite FTS5
@@ -300,6 +317,8 @@ conduit/
 │   │   ├── searcher.go
 │   │   ├── chunker.go
 │   │   ├── source.go
+│   │   ├── extractors.go     # Document format extractors
+│   │   ├── types.go          # Types and default patterns
 │   │   └── mcp.go
 │   ├── lifecycle/            # Instance lifecycle
 │   │   ├── manager.go
@@ -318,7 +337,8 @@ conduit/
 │   └── models/               # Shared types
 │       └── errors.go
 ├── scripts/
-│   ├── install.sh            # One-click installation script
+│   ├── install.sh            # One-click installation script (macOS/Linux)
+│   ├── install-windows.ps1   # Windows installation script (PowerShell)
 │   └── uninstall.sh          # Complete uninstallation script
 ├── tests/
 │   └── integration/          # Integration tests
@@ -399,7 +419,7 @@ During user testing, several critical bugs were identified and resolved:
 5. **No Web UI**: CLI only
 6. **No Automatic Updates**: Manual update process (one-click reinstall available)
 7. **Single User**: No multi-tenancy support
-8. **Windows Support**: Installation script supports macOS and Linux only
+8. **Windows Support**: PowerShell installation script available, but less tested than macOS/Linux
 
 ---
 

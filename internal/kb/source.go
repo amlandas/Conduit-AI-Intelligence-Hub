@@ -21,19 +21,21 @@ import (
 
 // SourceManager manages KB source folders.
 type SourceManager struct {
-	db       *sql.DB
-	indexer  *Indexer
-	chunker  *Chunker
-	logger   zerolog.Logger
+	db         *sql.DB
+	indexer    *Indexer
+	chunker    *Chunker
+	extractors *ExtractorRegistry
+	logger     zerolog.Logger
 }
 
 // NewSourceManager creates a new source manager.
 func NewSourceManager(db *sql.DB) *SourceManager {
 	return &SourceManager{
-		db:      db,
-		indexer: NewIndexer(db),
-		chunker: NewChunker(),
-		logger:  observability.Logger("kb.source"),
+		db:         db,
+		indexer:    NewIndexer(db),
+		chunker:    NewChunker(),
+		extractors: NewExtractorRegistry(),
+		logger:     observability.Logger("kb.source"),
 	}
 }
 
@@ -420,21 +422,23 @@ func (sm *SourceManager) matchesPatterns(filename string, patterns []string) boo
 	return false
 }
 
-// readFile reads a file and extracts metadata.
+// readFile reads a file and extracts text content.
 func (sm *SourceManager) readFile(path string) (string, *FileMetadata, error) {
 	info, err := os.Stat(path)
 	if err != nil {
 		return "", nil, err
 	}
 
-	// Skip large files
-	if info.Size() > 10*1024*1024 { // 10MB
-		return "", nil, fmt.Errorf("file too large: %d bytes", info.Size())
+	// Skip large files (50MB limit for binary documents like PDFs)
+	maxSize := int64(50 * 1024 * 1024)
+	if info.Size() > maxSize {
+		return "", nil, fmt.Errorf("file too large: %d bytes (max %d)", info.Size(), maxSize)
 	}
 
-	content, err := os.ReadFile(path)
+	// Use extractors to get text content
+	content, err := sm.extractors.Extract(path)
 	if err != nil {
-		return "", nil, err
+		return "", nil, fmt.Errorf("extract content: %w", err)
 	}
 
 	metadata := &FileMetadata{
@@ -447,37 +451,75 @@ func (sm *SourceManager) readFile(path string) (string, *FileMetadata, error) {
 
 	// Extract title from markdown
 	if strings.HasSuffix(path, ".md") {
-		if title := extractMarkdownTitle(string(content)); title != "" {
+		if title := extractMarkdownTitle(content); title != "" {
 			metadata.Title = title
 		}
 	}
 
-	return string(content), metadata, nil
+	// Extract title from PDF (first non-empty line often)
+	if strings.HasSuffix(strings.ToLower(path), ".pdf") {
+		if title := extractFirstLine(content); title != "" {
+			metadata.Title = title
+		}
+	}
+
+	return content, metadata, nil
 }
 
 // detectMimeType returns the MIME type based on extension.
 func (sm *SourceManager) detectMimeType(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
-	switch ext {
-	case ".md":
-		return "text/markdown"
-	case ".txt":
-		return "text/plain"
-	case ".go":
-		return "text/x-go"
-	case ".py":
-		return "text/x-python"
-	case ".js":
-		return "text/javascript"
-	case ".ts":
-		return "text/typescript"
-	case ".json":
-		return "application/json"
-	case ".yaml", ".yml":
-		return "text/x-yaml"
-	default:
-		return "text/plain"
+	mimeTypes := map[string]string{
+		// Text/Documentation
+		".md":   "text/markdown",
+		".txt":  "text/plain",
+		".rst":  "text/x-rst",
+		// Code
+		".go":    "text/x-go",
+		".py":    "text/x-python",
+		".js":    "text/javascript",
+		".ts":    "text/typescript",
+		".java":  "text/x-java",
+		".rs":    "text/x-rust",
+		".rb":    "text/x-ruby",
+		".c":     "text/x-c",
+		".cpp":   "text/x-c++",
+		".h":     "text/x-c",
+		".hpp":   "text/x-c++",
+		".cs":    "text/x-csharp",
+		".swift": "text/x-swift",
+		".kt":    "text/x-kotlin",
+		".sh":    "text/x-shellscript",
+		".bash":  "text/x-shellscript",
+		".zsh":   "text/x-shellscript",
+		".fish":  "text/x-shellscript",
+		".ps1":   "text/x-powershell",
+		".bat":   "text/x-batch",
+		".cmd":   "text/x-batch",
+		// Config
+		".json":   "application/json",
+		".jsonld": "application/ld+json",
+		".yaml":   "text/x-yaml",
+		".yml":    "text/x-yaml",
+		".xml":    "application/xml",
+		".toml":   "text/x-toml",
+		".ini":    "text/x-ini",
+		".cfg":    "text/x-ini",
+		// Data
+		".csv": "text/csv",
+		".tsv": "text/tab-separated-values",
+		// Documents
+		".pdf":  "application/pdf",
+		".doc":  "application/msword",
+		".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+		".odt":  "application/vnd.oasis.opendocument.text",
+		".rtf":  "application/rtf",
 	}
+
+	if mimeType, ok := mimeTypes[ext]; ok {
+		return mimeType
+	}
+	return "text/plain"
 }
 
 // hashContent returns a SHA256 hash of content.
@@ -514,6 +556,18 @@ func extractMarkdownTitle(content string) string {
 		line = strings.TrimSpace(line)
 		if strings.HasPrefix(line, "# ") {
 			return strings.TrimPrefix(line, "# ")
+		}
+	}
+	return ""
+}
+
+// extractFirstLine extracts the first non-empty line from content.
+func extractFirstLine(content string) string {
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" && len(line) > 3 && len(line) < 200 {
+			return line
 		}
 	}
 	return ""

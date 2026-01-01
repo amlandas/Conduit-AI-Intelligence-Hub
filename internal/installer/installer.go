@@ -79,6 +79,13 @@ func (i *Installer) CheckAndInstallAll(ctx context.Context) ([]InstallResult, er
 		fmt.Println()
 	}
 
+	// Step 4: Document Extraction Tools
+	fmt.Println("Step 4: Document Extraction Tools")
+	fmt.Println("──────────────────────────────────────────────────────────────")
+	docToolResults := i.installDocumentTools(ctx)
+	results = append(results, docToolResults...)
+	fmt.Println()
+
 	// Summary
 	i.printSummary(results)
 
@@ -622,6 +629,380 @@ func (i *Installer) pullOllamaModel(ctx context.Context, model string) InstallRe
 		Installed:  true,
 		Message:    fmt.Sprintf("Model %s installed", model),
 	}
+}
+
+// installDocumentTools installs document extraction tools.
+func (i *Installer) installDocumentTools(ctx context.Context) []InstallResult {
+	var results []InstallResult
+
+	fmt.Println("Document extraction tools enable indexing of PDF, DOC, and RTF files")
+	fmt.Println("in the knowledge base. DOCX and ODT are supported natively.")
+	fmt.Println()
+
+	// Check existing tools
+	tools := i.checkDocumentTools()
+
+	allInstalled := true
+	for _, tool := range tools {
+		if tool.Available {
+			fmt.Printf("✓ %s is already installed\n", tool.Name)
+		} else {
+			fmt.Printf("○ %s is not installed\n", tool.Name)
+			allInstalled = false
+		}
+	}
+
+	if allInstalled {
+		fmt.Println()
+		fmt.Println("All document extraction tools are already installed.")
+		for _, tool := range tools {
+			results = append(results, InstallResult{
+				Dependency:    tool.Name,
+				AlreadyExists: true,
+				Message:       "Already installed",
+			})
+		}
+		return results
+	}
+
+	fmt.Println()
+	fmt.Println("  [1] Install missing document tools (Recommended)")
+	fmt.Println("  [2] Skip (some document formats won't be indexed)")
+	fmt.Println()
+
+	choice := i.prompt("Choice [1/2]: ")
+
+	if choice != "1" {
+		fmt.Println("Skipping document tools installation.")
+		for _, tool := range tools {
+			if !tool.Available {
+				results = append(results, InstallResult{
+					Dependency: tool.Name,
+					Skipped:    true,
+					Message:    "User skipped installation",
+				})
+			}
+		}
+		return results
+	}
+
+	// Install based on OS
+	switch runtime.GOOS {
+	case "darwin":
+		return i.installDocumentToolsMacOS(ctx)
+	case "linux":
+		return i.installDocumentToolsLinux(ctx)
+	case "windows":
+		return i.installDocumentToolsWindows(ctx)
+	default:
+		fmt.Printf("Document tool installation not supported on %s.\n", runtime.GOOS)
+		return []InstallResult{{
+			Dependency: "Document Tools",
+			Skipped:    true,
+			Message:    fmt.Sprintf("Not supported on %s", runtime.GOOS),
+		}}
+	}
+}
+
+// DocumentTool represents a document extraction tool's status.
+type DocumentTool struct {
+	Name      string
+	Available bool
+}
+
+// checkDocumentTools checks which document tools are available.
+func (i *Installer) checkDocumentTools() []DocumentTool {
+	var tools []DocumentTool
+
+	// pdftotext (for PDF)
+	tools = append(tools, DocumentTool{
+		Name:      "pdftotext (PDF)",
+		Available: i.commandExists("pdftotext"),
+	})
+
+	// DOC extraction
+	if runtime.GOOS == "darwin" {
+		// textutil is built-in on macOS
+		tools = append(tools, DocumentTool{
+			Name:      "textutil (DOC/RTF)",
+			Available: true, // Always available on macOS
+		})
+	} else {
+		// antiword for other platforms
+		tools = append(tools, DocumentTool{
+			Name:      "antiword (DOC)",
+			Available: i.commandExists("antiword"),
+		})
+		// unrtf for RTF
+		tools = append(tools, DocumentTool{
+			Name:      "unrtf (RTF)",
+			Available: i.commandExists("unrtf"),
+		})
+	}
+
+	return tools
+}
+
+// installDocumentToolsMacOS installs document tools on macOS using Homebrew.
+func (i *Installer) installDocumentToolsMacOS(ctx context.Context) []InstallResult {
+	var results []InstallResult
+
+	// Check Homebrew
+	if !i.commandExists("brew") {
+		fmt.Println("Homebrew is required to install document tools on macOS.")
+		fmt.Println("Install Homebrew first: https://brew.sh")
+
+		if i.confirmAction("Install Homebrew now?") {
+			if err := i.runShellCommand(ctx, `/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"`); err != nil {
+				return []InstallResult{{
+					Dependency: "Document Tools",
+					Error:      fmt.Errorf("failed to install Homebrew: %w", err),
+				}}
+			}
+		} else {
+			return []InstallResult{{
+				Dependency: "Document Tools",
+				Skipped:    true,
+				Message:    "Homebrew required but not installed",
+			}}
+		}
+	}
+
+	// Install poppler (provides pdftotext)
+	if !i.commandExists("pdftotext") {
+		fmt.Println()
+		fmt.Println("Installing poppler (pdftotext)...")
+		if err := i.runCommand(ctx, "brew", "install", "poppler"); err != nil {
+			results = append(results, InstallResult{
+				Dependency: "pdftotext",
+				Error:      err,
+			})
+		} else {
+			fmt.Println("✓ pdftotext installed")
+			results = append(results, InstallResult{
+				Dependency: "pdftotext",
+				Installed:  true,
+			})
+		}
+	} else {
+		results = append(results, InstallResult{
+			Dependency:    "pdftotext",
+			AlreadyExists: true,
+		})
+	}
+
+	// textutil is built-in on macOS
+	fmt.Println("✓ textutil (DOC/RTF) is built-in on macOS")
+	results = append(results, InstallResult{
+		Dependency:    "textutil",
+		AlreadyExists: true,
+		Message:       "Built-in on macOS",
+	})
+
+	return results
+}
+
+// installDocumentToolsLinux installs document tools on Linux.
+func (i *Installer) installDocumentToolsLinux(ctx context.Context) []InstallResult {
+	var results []InstallResult
+
+	distro := i.detectLinuxDistro()
+
+	var packages []string
+	var installCmd []string
+
+	switch distro {
+	case "ubuntu", "debian":
+		packages = []string{"poppler-utils", "antiword", "unrtf"}
+		installCmd = []string{"sudo", "apt-get", "install", "-y"}
+	case "fedora", "rhel", "centos":
+		packages = []string{"poppler-utils", "antiword", "unrtf"}
+		installCmd = []string{"sudo", "dnf", "install", "-y"}
+	case "arch":
+		packages = []string{"poppler", "antiword", "unrtf"}
+		installCmd = []string{"sudo", "pacman", "-S", "--noconfirm"}
+	default:
+		fmt.Printf("Unsupported Linux distribution: %s\n", distro)
+		fmt.Println("Please install manually: poppler-utils antiword unrtf")
+		return []InstallResult{{
+			Dependency: "Document Tools",
+			Skipped:    true,
+			Message:    "Manual installation required",
+		}}
+	}
+
+	// Build list of packages to install
+	var toInstall []string
+	if !i.commandExists("pdftotext") {
+		toInstall = append(toInstall, packages[0])
+	}
+	if !i.commandExists("antiword") {
+		toInstall = append(toInstall, packages[1])
+	}
+	if !i.commandExists("unrtf") {
+		toInstall = append(toInstall, packages[2])
+	}
+
+	if len(toInstall) == 0 {
+		fmt.Println("All document tools are already installed.")
+		return results
+	}
+
+	fmt.Printf("Installing: %s\n", strings.Join(toInstall, " "))
+	fullCmd := append(installCmd, toInstall...)
+
+	if !i.confirmAction("Proceed with installation?") {
+		return []InstallResult{{
+			Dependency: "Document Tools",
+			Skipped:    true,
+			Message:    "User cancelled",
+		}}
+	}
+
+	if err := i.runCommand(ctx, fullCmd[0], fullCmd[1:]...); err != nil {
+		return []InstallResult{{
+			Dependency: "Document Tools",
+			Error:      err,
+		}}
+	}
+
+	// Verify and report
+	for _, pkg := range toInstall {
+		var toolName string
+		switch pkg {
+		case "poppler-utils", "poppler":
+			toolName = "pdftotext"
+		case "antiword":
+			toolName = "antiword"
+		case "unrtf":
+			toolName = "unrtf"
+		}
+
+		if i.commandExists(toolName) {
+			fmt.Printf("✓ %s installed\n", toolName)
+			results = append(results, InstallResult{
+				Dependency: toolName,
+				Installed:  true,
+			})
+		} else {
+			results = append(results, InstallResult{
+				Dependency: toolName,
+				Error:      fmt.Errorf("command not found after installation"),
+			})
+		}
+	}
+
+	return results
+}
+
+// installDocumentToolsWindows provides guidance for Windows users.
+func (i *Installer) installDocumentToolsWindows(ctx context.Context) []InstallResult {
+	var results []InstallResult
+
+	fmt.Println()
+	fmt.Println("On Windows, document tools can be installed using Chocolatey.")
+	fmt.Println()
+
+	// Check if Chocolatey is available
+	if i.commandExists("choco") {
+		fmt.Println("Chocolatey is installed. Installing document tools...")
+
+		// Install poppler (pdftotext) and antiword
+		packages := []string{"poppler", "antiword"}
+		for _, pkg := range packages {
+			fmt.Printf("Installing %s...\n", pkg)
+			if err := i.runCommand(ctx, "choco", "install", "-y", pkg); err != nil {
+				results = append(results, InstallResult{
+					Dependency: pkg,
+					Error:      err,
+				})
+			} else {
+				results = append(results, InstallResult{
+					Dependency: pkg,
+					Installed:  true,
+				})
+			}
+		}
+		return results
+	}
+
+	// Chocolatey not installed - provide manual instructions
+	fmt.Println("Chocolatey is not installed.")
+	fmt.Println()
+	fmt.Println("Option 1: Install Chocolatey, then run:")
+	fmt.Println("  choco install poppler antiword")
+	fmt.Println()
+	fmt.Println("Option 2: Manual installation:")
+	fmt.Println("  • pdftotext: https://github.com/oschwartz10612/poppler-windows/releases")
+	fmt.Println("  • antiword:  https://antiword.sourceforge.net/")
+	fmt.Println()
+
+	if i.confirmAction("Install Chocolatey now?") {
+		fmt.Println("Installing Chocolatey...")
+		chocoInstall := `Set-ExecutionPolicy Bypass -Scope Process -Force; [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.ServicePointManager]::SecurityProtocol -bor 3072; iex ((New-Object System.Net.WebClient).DownloadString('https://community.chocolatey.org/install.ps1'))`
+
+		cmd := exec.CommandContext(ctx, "powershell", "-Command", chocoInstall)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+
+		if err := cmd.Run(); err != nil {
+			return []InstallResult{{
+				Dependency: "Chocolatey",
+				Error:      err,
+			}}
+		}
+
+		fmt.Println("✓ Chocolatey installed. Installing document tools...")
+		return i.installDocumentToolsWindows(ctx)
+	}
+
+	return []InstallResult{{
+		Dependency: "Document Tools",
+		Skipped:    true,
+		Message:    "Manual installation required",
+	}}
+}
+
+// InstallDocumentToolsOnly installs only document extraction tools.
+// This is used by the --document-tools flag.
+func (i *Installer) InstallDocumentToolsOnly(ctx context.Context) ([]InstallResult, error) {
+	fmt.Println()
+	fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+	fmt.Println("║           Document Extraction Tools Installer                ║")
+	fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+	fmt.Println()
+
+	results := i.installDocumentTools(ctx)
+	fmt.Println()
+
+	// Print summary
+	fmt.Println("══════════════════════════════════════════════════════════════")
+	fmt.Println("                    Installation Summary                       ")
+	fmt.Println("══════════════════════════════════════════════════════════════")
+	fmt.Println()
+
+	for _, r := range results {
+		status := "✓"
+		statusText := "Installed"
+
+		if r.AlreadyExists {
+			statusText = "Already installed"
+		} else if r.Skipped {
+			status = "○"
+			statusText = "Skipped"
+		} else if r.Error != nil {
+			status = "✗"
+			statusText = fmt.Sprintf("Failed: %v", r.Error)
+		}
+
+		fmt.Printf("  %s %s: %s\n", status, r.Dependency, statusText)
+	}
+
+	fmt.Println()
+	fmt.Println("Run 'conduit doctor' to verify all tools are working correctly.")
+	fmt.Println()
+
+	return results, nil
 }
 
 // Helper methods

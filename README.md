@@ -13,6 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hu
 The installer will:
 - Detect your OS and architecture
 - Install any missing dependencies (Go, Git, Docker/Podman, Ollama)
+- Install document extraction tools (pdftotext, antiword, unrtf)
 - Build and install Conduit
 - Set up the daemon as a background service
 - Pull the default AI model (qwen2.5-coder:7b)
@@ -48,7 +49,7 @@ conduit status
 - **Policy Engine**: Permission evaluation, sensitive path protection, network controls
 - **Lifecycle Manager**: Connector instance state machine, health monitoring
 - **Client Adapters**: Claude Code, Cursor, VS Code, Gemini CLI injection
-- **Knowledge Base**: Document indexing, full-text search with FTS5, MCP server
+- **Knowledge Base**: Document indexing with multi-format support, full-text search with FTS5, MCP server
 - **AI Integration**: Local AI with Ollama for intelligent code analysis
 - **CLI**: Complete command set for all operations
 
@@ -61,6 +62,11 @@ The installer handles these automatically, but for reference:
 - SQLite 3.35+ with FTS5 extension (included in Go build)
 - Podman 4.0+ (recommended) or Docker 20.10+ (for running connectors)
 - Ollama (for local AI features)
+- Document extraction tools (for KB indexing):
+  - pdftotext (poppler) - for PDF files
+  - textutil (macOS) / antiword (Linux/Windows) - for DOC files
+  - textutil (macOS) / unrtf (Linux) - for RTF files
+  - DOCX and ODT are supported natively without external tools
 
 ## Manual Installation
 
@@ -144,6 +150,7 @@ conduit/
 ```bash
 conduit setup                 # Interactive setup wizard
 conduit install-deps          # Install runtime dependencies
+conduit install --document-tools  # Install document extraction tools
 conduit doctor                # Run diagnostics
 conduit uninstall             # Uninstall Conduit
 ```
@@ -182,6 +189,14 @@ conduit kb sync               # Sync all sources
 conduit kb search <query>     # Search indexed documents
 conduit kb stats              # Show KB statistics
 ```
+
+**Supported Document Formats:**
+- Text: `.md`, `.txt`, `.rst`
+- Code: `.go`, `.py`, `.js`, `.ts`, `.java`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt`
+- Scripts: `.sh`, `.bash`, `.zsh`, `.fish`, `.ps1`, `.bat`, `.cmd`
+- Config: `.json`, `.yaml`, `.yml`, `.xml`, `.jsonld`, `.toml`, `.ini`, `.cfg`
+- Data: `.csv`, `.tsv`
+- Documents: `.pdf`, `.doc`, `.docx`, `.odt`, `.rtf`
 
 ### System
 ```bash

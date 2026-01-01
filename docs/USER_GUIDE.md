@@ -58,6 +58,7 @@ curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hu
 The installer automatically:
 - Detects your operating system and architecture
 - Installs missing dependencies (Go, Git, Docker/Podman, Ollama)
+- Installs document extraction tools (pdftotext, antiword, unrtf)
 - Builds and installs Conduit binaries
 - Sets up the daemon as a background service
 - Downloads the default AI model (qwen2.5-coder:7b)
@@ -402,7 +403,29 @@ Your AI client will automatically detect the new MCP server.
 
 ## Knowledge Base
 
-The Knowledge Base allows you to index documents for AI-powered search.
+The Knowledge Base allows you to index documents for AI-powered search. It supports a wide variety of document formats.
+
+### Supported Document Formats
+
+| Category | Extensions |
+|----------|------------|
+| Text | `.md`, `.txt`, `.rst` |
+| Code | `.go`, `.py`, `.js`, `.ts`, `.java`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt` |
+| Scripts | `.sh`, `.bash`, `.zsh`, `.fish`, `.ps1`, `.bat`, `.cmd` |
+| Config | `.json`, `.yaml`, `.yml`, `.xml`, `.jsonld`, `.toml`, `.ini`, `.cfg` |
+| Data | `.csv`, `.tsv` |
+| Documents | `.pdf`, `.doc`, `.docx`, `.odt`, `.rtf` |
+
+**Note**: PDF, DOC, and RTF files require external extraction tools (installed automatically). DOCX and ODT files are supported natively without external tools.
+
+### Installing Document Extraction Tools
+
+If document tools weren't installed during initial setup:
+
+```bash
+# Install document extraction tools
+conduit install --document-tools
+```
 
 ### Adding a Document Source
 
@@ -622,6 +645,7 @@ make build  # Uses -tags "fts5" automatically
 |---------|-------------|
 | `conduit setup` | Run interactive setup wizard |
 | `conduit install-deps` | Install runtime dependencies |
+| `conduit install --document-tools` | Install document extraction tools |
 | `conduit doctor` | Run diagnostics |
 | `conduit uninstall` | Uninstall Conduit completely |
 
