@@ -2,13 +2,15 @@ package kb
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/simpleflo/conduit/internal/observability"
 	"github.com/rs/zerolog"
+	"github.com/simpleflo/conduit/internal/observability"
 )
 
 // Indexer manages document indexing in SQLite with FTS5.
@@ -52,14 +54,16 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 		return fmt.Errorf("insert document: %w", err)
 	}
 
-	// Insert chunks
-	for _, chunk := range chunks {
+	// Insert chunks with unique IDs that include document context
+	for i, chunk := range chunks {
+		// Generate unique chunk ID that includes document ID to avoid collisions
+		uniqueChunkID := idx.generateUniqueChunkID(doc.DocumentID, chunk.Content, i)
 		chunkMetaJSON, _ := json.Marshal(chunk.Metadata)
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO kb_chunks
 			(chunk_id, document_id, chunk_index, content, start_char, end_char, metadata)
 			VALUES (?, ?, ?, ?, ?, ?, ?)
-		`, chunk.ChunkID, doc.DocumentID, chunk.Index, chunk.Content,
+		`, uniqueChunkID, doc.DocumentID, chunk.Index, chunk.Content,
 			chunk.StartChar, chunk.EndChar, string(chunkMetaJSON))
 
 		if err != nil {
@@ -73,14 +77,14 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 				(SELECT rowid FROM kb_chunks WHERE chunk_id = ?),
 				?, ?, ?, ?, ?
 			)
-		`, chunk.ChunkID, doc.DocumentID, chunk.ChunkID, chunk.Content, doc.Title, doc.Path)
+		`, uniqueChunkID, doc.DocumentID, uniqueChunkID, chunk.Content, doc.Title, doc.Path)
 
 		if err != nil {
 			// Try alternative insert without rowid reference
 			_, err = tx.ExecContext(ctx, `
 				INSERT INTO kb_fts (document_id, chunk_id, content, title, path)
 				VALUES (?, ?, ?, ?, ?)
-			`, doc.DocumentID, chunk.ChunkID, chunk.Content, doc.Title, doc.Path)
+			`, doc.DocumentID, uniqueChunkID, chunk.Content, doc.Title, doc.Path)
 			if err != nil {
 				return fmt.Errorf("insert FTS %d: %w", chunk.Index, err)
 			}
@@ -286,4 +290,14 @@ func (idx *Indexer) Rebuild(ctx context.Context) error {
 
 	idx.logger.Info().Msg("FTS index rebuilt")
 	return nil
+}
+
+// generateUniqueChunkID generates a globally unique chunk ID by including
+// the document ID in the hash. This prevents collisions when identical
+// content exists in multiple documents.
+func (idx *Indexer) generateUniqueChunkID(documentID, content string, index int) string {
+	// Combine document ID, content, and index to ensure uniqueness
+	data := fmt.Sprintf("%s:%d:%s", documentID, index, content)
+	h := sha256.Sum256([]byte(data))
+	return "chunk_" + hex.EncodeToString(h[:8])
 }

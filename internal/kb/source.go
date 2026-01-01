@@ -307,14 +307,17 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 			return nil
 		}
 
+		sm.logger.Info().Str("path", path).Msg("file matched pattern")
 		processedFiles[path] = true
 
 		// Read file content
 		content, metadata, err := sm.readFile(path)
 		if err != nil {
+			sm.logger.Error().Err(err).Str("path", path).Msg("failed to read file")
 			result.Errors = append(result.Errors, SyncError{Path: path, Message: err.Error()})
 			return nil
 		}
+		sm.logger.Info().Str("path", path).Int("content_len", len(content)).Msg("file read successfully")
 
 		// Calculate hash
 		hash := sm.hashContent(content)
@@ -325,7 +328,6 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 			// No change
 			return nil
 		}
-
 		// Create document
 		doc := &Document{
 			DocumentID: sm.documentID(path),
@@ -348,6 +350,7 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 
 		// Index document
 		if err := sm.indexer.Index(ctx, doc, chunks); err != nil {
+			sm.logger.Error().Err(err).Str("path", path).Msg("failed to index document")
 			result.Errors = append(result.Errors, SyncError{Path: path, Message: err.Error()})
 			return nil
 		}
