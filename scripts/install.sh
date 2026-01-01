@@ -1063,6 +1063,20 @@ setup_launchd_service() {
 
     mkdir -p "$HOME/Library/LaunchAgents"
 
+    # Stop any existing daemon completely
+    info "Stopping any existing daemon..."
+    launchctl stop com.simpleflo.conduit 2>/dev/null || true
+    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+
+    # Kill any lingering daemon processes (in case started manually)
+    pkill -f "conduit-daemon" 2>/dev/null || true
+    sleep 1
+
+    # Remove old socket to ensure clean start
+    rm -f "${CONDUIT_HOME}/conduit.sock" 2>/dev/null || true
+
+    # Create new plist with correct paths
+    info "Creating launchd service configuration..."
     cat > "$PLIST_PATH" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -1092,15 +1106,22 @@ setup_launchd_service() {
 </plist>
 EOF
 
-    # Load the service
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    # Verify plist was created correctly
+    if grep -q "${INSTALL_DIR}/conduit-daemon" "$PLIST_PATH"; then
+        success "Plist created with daemon path: ${INSTALL_DIR}/conduit-daemon"
+    else
+        error "Plist creation failed - daemon path not set correctly"
+        cat "$PLIST_PATH"
+        exit 1
+    fi
+
+    # Load and start the service
+    info "Loading and starting daemon service..."
     launchctl load "$PLIST_PATH"
+    launchctl start com.simpleflo.conduit
 
     success "Conduit daemon installed as launchd service"
     info "Service will start automatically on login"
-
-    # Start now
-    launchctl start com.simpleflo.conduit 2>/dev/null || true
 }
 
 # Setup systemd service (Linux)
@@ -1109,6 +1130,19 @@ setup_systemd_service() {
 
     mkdir -p "$HOME/.config/systemd/user"
 
+    # Stop any existing daemon completely
+    info "Stopping any existing daemon..."
+    systemctl --user stop conduit 2>/dev/null || true
+
+    # Kill any lingering daemon processes (in case started manually)
+    pkill -f "conduit-daemon" 2>/dev/null || true
+    sleep 1
+
+    # Remove old socket to ensure clean start
+    rm -f "${CONDUIT_HOME}/conduit.sock" 2>/dev/null || true
+
+    # Create new service file
+    info "Creating systemd service configuration..."
     cat > "$SERVICE_PATH" << EOF
 [Unit]
 Description=Conduit AI Intelligence Hub Daemon
@@ -1125,7 +1159,17 @@ Environment=HOME=${HOME}
 WantedBy=default.target
 EOF
 
-    # Reload and enable
+    # Verify service file was created correctly
+    if grep -q "${INSTALL_DIR}/conduit-daemon" "$SERVICE_PATH"; then
+        success "Service file created with daemon path: ${INSTALL_DIR}/conduit-daemon"
+    else
+        error "Service file creation failed - daemon path not set correctly"
+        cat "$SERVICE_PATH"
+        exit 1
+    fi
+
+    # Reload, enable and start
+    info "Loading and starting daemon service..."
     systemctl --user daemon-reload
     systemctl --user enable conduit
     systemctl --user start conduit
