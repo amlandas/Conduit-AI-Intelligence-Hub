@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -25,6 +26,7 @@ import (
 	"github.com/simpleflo/conduit/internal/config"
 	"github.com/simpleflo/conduit/internal/installer"
 	"github.com/simpleflo/conduit/internal/kb"
+	containerRuntime "github.com/simpleflo/conduit/internal/runtime"
 	"github.com/simpleflo/conduit/internal/store"
 )
 
@@ -119,14 +121,15 @@ VS Code, Gemini CLI, and more.`,
 	rootCmd.AddCommand(startCmd())
 	rootCmd.AddCommand(stopCmd())
 	rootCmd.AddCommand(removeCmd())
-	rootCmd.AddCommand(bindCmd())
-	rootCmd.AddCommand(unbindCmd())
-	rootCmd.AddCommand(clientsCmd())
+	rootCmd.AddCommand(logsCmd())
+	rootCmd.AddCommand(clientCmd())
 	rootCmd.AddCommand(kbCmd())
 	rootCmd.AddCommand(mcpCmd())
 	rootCmd.AddCommand(doctorCmd())
 	rootCmd.AddCommand(uninstallCmd())
 	rootCmd.AddCommand(serviceCmd())
+	rootCmd.AddCommand(configCmd())
+	rootCmd.AddCommand(backupCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -718,21 +721,90 @@ func runInstall(ctx context.Context, repoURL, customName, providerOverride strin
 	imageName := fmt.Sprintf("conduit-mcp-%s", fetchResult.RepoName)
 	fmt.Printf("   Image name: %s\n", imageName)
 
-	// TODO: Implement actual Docker build
-	fmt.Println("   ⏳ Docker build not yet implemented")
+	// Select container runtime (prefer Podman)
+	selector := containerRuntime.NewSelector(cfg.Runtime.Preferred)
+	provider, err := selector.Select(ctx)
+	if err != nil {
+		fmt.Println()
+		fmt.Println("⚠️  No container runtime available")
+		fmt.Println("   Install Podman or Docker to build containers automatically.")
+		fmt.Println()
+		fmt.Println("📋 Manual Build Steps")
+		fmt.Println("──────────────────────────────────────────────────────────────")
+		fmt.Printf("1. Build: cd %s && docker build -f Dockerfile.conduit -t %s .\n", fetchResult.LocalPath, imageName)
+		return nil
+	}
+
+	fmt.Printf("   Runtime: %s\n", provider.Name())
 	fmt.Println()
 
-	// Step 5: Show next steps
-	fmt.Println("📋 Next Steps")
-	fmt.Println("──────────────────────────────────────────────────────────────")
-	fmt.Println("1. Build the container manually:")
-	fmt.Printf("   cd %s && docker build -f Dockerfile.conduit -t %s .\n", fetchResult.LocalPath, imageName)
+	// Build the container
+	buildOpts := containerRuntime.BuildOptions{
+		ContextDir:     fetchResult.LocalPath,
+		DockerfilePath: dockerfilePath,
+		ImageName:      imageName,
+		NoCache:        false,
+		Progress: func(line string) {
+			// Show build progress
+			if line != "" {
+				fmt.Printf("   %s\n", line)
+			}
+		},
+	}
+
+	if err := provider.Build(ctx, buildOpts); err != nil {
+		fmt.Printf("   ❌ Build failed: %v\n", err)
+		fmt.Println()
+		fmt.Println("📋 Try building manually:")
+		fmt.Printf("   cd %s && %s build -f Dockerfile.conduit -t %s .\n",
+			fetchResult.LocalPath, provider.Name(), imageName)
+		return fmt.Errorf("container build failed: %w", err)
+	}
+
 	fmt.Println()
-	fmt.Println("2. Add to Claude Code (~/.claude.json or claude_desktop_config.json):")
+	fmt.Println("✓ Container built successfully!")
+	fmt.Println()
+
+	// Step 5: Create instance in daemon (if daemon is running)
+	c := newClient(socketPath)
+	instanceReq := map[string]interface{}{
+		"package_id":      fmt.Sprintf("github.com/%s/%s", fetchResult.Owner, fetchResult.RepoName),
+		"package_version": "latest",
+		"display_name":    customName,
+		"image_ref":       imageName,
+		"config":          map[string]string{},
+	}
+	if customName == "" {
+		instanceReq["display_name"] = fetchResult.RepoName
+	}
+
+	data, err := c.post("/api/v1/instances", instanceReq)
+	if err != nil {
+		fmt.Println("⚠️  Could not register with daemon (is it running?)")
+		fmt.Println("   Run 'conduit service start' to start the daemon")
+	} else {
+		var resp map[string]interface{}
+		json.Unmarshal(data, &resp)
+		if instanceID, ok := resp["instance_id"].(string); ok {
+			fmt.Printf("✓ Instance registered: %s\n", instanceID)
+			fmt.Println()
+			fmt.Println("📋 Next Steps")
+			fmt.Println("──────────────────────────────────────────────────────────────")
+			fmt.Printf("1. Bind to Claude Code: conduit client bind %s --client claude-code\n", instanceID)
+			fmt.Println("2. Restart Claude Code")
+			fmt.Println("3. Run /mcp in Claude Code to verify")
+			return nil
+		}
+	}
+
+	// Fallback: Show manual configuration steps
+	fmt.Println()
+	fmt.Println("📋 Add to Claude Code (~/.claude.json or claude_desktop_config.json):")
+	runtimeName := provider.Name()
 	mcpConfig := map[string]interface{}{
 		"mcpServers": map[string]interface{}{
 			fetchResult.RepoName: map[string]interface{}{
-				"command": "docker",
+				"command": runtimeName,
 				"args":    []string{"run", "-i", "--rm", imageName},
 			},
 		},
@@ -740,7 +812,7 @@ func runInstall(ctx context.Context, repoURL, customName, providerOverride strin
 	mcpJSON, _ := json.MarshalIndent(mcpConfig, "   ", "  ")
 	fmt.Printf("   %s\n", mcpJSON)
 	fmt.Println()
-	fmt.Println("3. Restart Claude Code and run /mcp to verify")
+	fmt.Println("Then restart Claude Code and run /mcp to verify")
 
 	return nil
 }
@@ -855,53 +927,36 @@ func removeCmd() *cobra.Command {
 	}
 }
 
-// bindCmd binds an instance to a client
-func bindCmd() *cobra.Command {
-	var clients string
-	var scope string
-
+// clientCmd is the parent command for AI client operations
+func clientCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "bind <instance-id>",
-		Short: "Bind a connector to AI clients",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			instanceID := args[0]
-			fmt.Printf("Binding %s to clients: %s (scope: %s)\n", instanceID, clients, scope)
+		Use:   "client",
+		Short: "Manage AI client connections",
+		Long: `Manage connections between Conduit and AI clients.
 
-			// TODO: Parse client list and create bindings
-			fmt.Println("Binding not yet implemented")
-			return nil
-		},
+Supported clients:
+  - claude-code: Claude Code CLI
+  - cursor: Cursor IDE
+  - vscode: VS Code with MCP extension
+  - gemini-cli: Gemini CLI
+
+Examples:
+  conduit client list
+  conduit client bind my-server --client claude-code
+  conduit client unbind my-server --client claude-code`,
 	}
 
-	cmd.Flags().StringVar(&clients, "clients", "claude-code", "Comma-separated list of clients")
-	cmd.Flags().StringVar(&scope, "scope", "project", "Binding scope: project, user, workspace")
+	cmd.AddCommand(clientListCmd())
+	cmd.AddCommand(clientBindCmd())
+	cmd.AddCommand(clientUnbindCmd())
+	cmd.AddCommand(clientBindingsCmd())
 
 	return cmd
 }
 
-// unbindCmd removes a binding
-func unbindCmd() *cobra.Command {
+func clientListCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "unbind <instance-id> <client-id>",
-		Short: "Unbind a connector from a client",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
-			instanceID := args[0]
-			clientID := args[1]
-
-			fmt.Printf("Unbinding %s from %s\n", instanceID, clientID)
-			// TODO: Implement unbinding
-			fmt.Println("Unbinding not yet implemented")
-			return nil
-		},
-	}
-}
-
-// clientsCmd lists available clients
-func clientsCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "clients",
+		Use:   "list",
 		Short: "List available AI clients",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClient(socketPath)
@@ -914,18 +969,213 @@ func clientsCmd() *cobra.Command {
 			json.Unmarshal(data, &resp)
 
 			clients, _ := resp["clients"].([]interface{})
+
+			fmt.Println("Detected AI Clients")
+			fmt.Println("═══════════════════════════════════════════════════════")
 			fmt.Printf("%-15s %-20s %-10s %s\n", "CLIENT", "NAME", "INSTALLED", "NOTES")
+			fmt.Println("───────────────────────────────────────────────────────")
+
 			for _, cl := range clients {
-				c := cl.(map[string]interface{})
+				client := cl.(map[string]interface{})
 				installed := "No"
-				if b, ok := c["installed"].(bool); ok && b {
+				if b, ok := client["installed"].(bool); ok && b {
 					installed = "Yes"
 				}
+				notes := ""
+				if n, ok := client["notes"].(string); ok {
+					notes = n
+				}
 				fmt.Printf("%-15s %-20s %-10s %s\n",
-					c["client_id"],
-					c["display_name"],
+					client["client_id"],
+					client["display_name"],
 					installed,
-					c["notes"],
+					notes,
+				)
+			}
+
+			return nil
+		},
+	}
+}
+
+func clientBindCmd() *cobra.Command {
+	var clientID string
+	var scope string
+
+	cmd := &cobra.Command{
+		Use:   "bind <instance-id>",
+		Short: "Bind a connector instance to an AI client",
+		Long: `Bind a connector instance to an AI client.
+
+This injects the MCP server configuration into the client's config file,
+allowing the AI client to access the connector.
+
+Examples:
+  conduit client bind my-server --client claude-code
+  conduit client bind abc123 --client cursor --scope user`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instanceID := args[0]
+
+			if clientID == "" {
+				clientID = "claude-code" // Default
+			}
+
+			c := newClient(socketPath)
+
+			// Create binding request
+			req := map[string]interface{}{
+				"instance_id": instanceID,
+				"client_id":   clientID,
+				"scope":       scope,
+			}
+
+			data, err := c.post("/api/v1/bindings", req)
+			if err != nil {
+				return fmt.Errorf("bind failed: %w", err)
+			}
+
+			var resp map[string]interface{}
+			json.Unmarshal(data, &resp)
+
+			if errData, ok := resp["error"]; ok {
+				errMap := errData.(map[string]interface{})
+				return fmt.Errorf("%s", errMap["message"])
+			}
+
+			bindingID := resp["binding_id"].(string)
+
+			fmt.Printf("✓ Bound instance %s to %s\n", instanceID, clientID)
+			fmt.Printf("  Binding ID: %s\n", bindingID)
+			fmt.Printf("  Scope: %s\n", scope)
+			fmt.Println()
+			fmt.Printf("Restart %s for the binding to take effect.\n", clientID)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&clientID, "client", "c", "claude-code", "Client to bind to")
+	cmd.Flags().StringVarP(&scope, "scope", "s", "project", "Binding scope: project, user, workspace")
+
+	return cmd
+}
+
+func clientUnbindCmd() *cobra.Command {
+	var clientID string
+
+	cmd := &cobra.Command{
+		Use:   "unbind <instance-id>",
+		Short: "Unbind a connector instance from an AI client",
+		Long: `Unbind a connector instance from an AI client.
+
+This removes the MCP server configuration from the client's config file.
+
+Examples:
+  conduit client unbind my-server --client claude-code
+  conduit client unbind abc123 --client cursor`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instanceID := args[0]
+
+			if clientID == "" {
+				clientID = "claude-code"
+			}
+
+			c := newClient(socketPath)
+
+			// Find the binding
+			data, err := c.get("/api/v1/bindings")
+			if err != nil {
+				return fmt.Errorf("list bindings: %w", err)
+			}
+
+			var resp map[string]interface{}
+			json.Unmarshal(data, &resp)
+
+			bindings, _ := resp["bindings"].([]interface{})
+			var bindingID string
+
+			for _, b := range bindings {
+				binding := b.(map[string]interface{})
+				if binding["instance_id"] == instanceID && binding["client_id"] == clientID {
+					bindingID = binding["binding_id"].(string)
+					break
+				}
+			}
+
+			if bindingID == "" {
+				return fmt.Errorf("no binding found for instance %s and client %s", instanceID, clientID)
+			}
+
+			// Delete the binding
+			if err := c.delete("/api/v1/bindings/" + bindingID); err != nil {
+				return fmt.Errorf("unbind failed: %w", err)
+			}
+
+			fmt.Printf("✓ Unbound instance %s from %s\n", instanceID, clientID)
+			fmt.Println()
+			fmt.Printf("Restart %s for the change to take effect.\n", clientID)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&clientID, "client", "c", "claude-code", "Client to unbind from")
+
+	return cmd
+}
+
+func clientBindingsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "bindings [instance-id]",
+		Short: "List bindings for an instance or all bindings",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClient(socketPath)
+
+			data, err := c.get("/api/v1/bindings")
+			if err != nil {
+				return fmt.Errorf("list bindings: %w", err)
+			}
+
+			var resp map[string]interface{}
+			json.Unmarshal(data, &resp)
+
+			bindings, _ := resp["bindings"].([]interface{})
+
+			if len(bindings) == 0 {
+				fmt.Println("No bindings configured")
+				return nil
+			}
+
+			// Filter by instance if provided
+			var filterInstance string
+			if len(args) > 0 {
+				filterInstance = args[0]
+			}
+
+			fmt.Println("Client Bindings")
+			fmt.Println("═══════════════════════════════════════════════════════")
+			fmt.Printf("%-12s %-15s %-12s %-10s\n", "BINDING", "CLIENT", "INSTANCE", "SCOPE")
+			fmt.Println("───────────────────────────────────────────────────────")
+
+			for _, b := range bindings {
+				binding := b.(map[string]interface{})
+				instanceID := binding["instance_id"].(string)
+
+				if filterInstance != "" && !strings.HasPrefix(instanceID, filterInstance) {
+					continue
+				}
+
+				bindingID := binding["binding_id"].(string)
+				clientID := binding["client_id"].(string)
+				scope := binding["scope"].(string)
+
+				fmt.Printf("%-12s %-15s %-12s %-10s\n",
+					truncate(bindingID, 12),
+					clientID,
+					truncate(instanceID, 12),
+					scope,
 				)
 			}
 
@@ -939,6 +1189,17 @@ func kbCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "kb",
 		Short: "Knowledge base operations",
+		Long: `Manage the Conduit knowledge base.
+
+The knowledge base indexes your documents for AI-powered search,
+allowing AI clients to find relevant information quickly.
+
+Examples:
+  conduit kb add ./docs --name "My Docs"
+  conduit kb list
+  conduit kb sync
+  conduit kb search "authentication"
+  conduit kb stats`,
 	}
 
 	cmd.AddCommand(kbAddCmd())
@@ -946,29 +1207,177 @@ func kbCmd() *cobra.Command {
 	cmd.AddCommand(kbRemoveCmd())
 	cmd.AddCommand(kbSearchCmd())
 	cmd.AddCommand(kbSyncCmd())
+	cmd.AddCommand(kbStatsCmd())
 
 	return cmd
+}
+
+func kbStatsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stats",
+		Short: "Show knowledge base statistics",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClient(socketPath)
+
+			// Get all sources
+			data, err := c.get("/api/v1/kb/sources")
+			if err != nil {
+				return fmt.Errorf("get sources: %w", err)
+			}
+
+			var resp map[string]interface{}
+			json.Unmarshal(data, &resp)
+
+			sources, _ := resp["sources"].([]interface{})
+
+			totalDocs := 0
+			totalChunks := 0
+			var totalSize int64 = 0
+
+			fmt.Println("Knowledge Base Statistics")
+			fmt.Println("═════════════════════════════════════════")
+
+			if len(sources) == 0 {
+				fmt.Println("No sources configured")
+				return nil
+			}
+
+			for _, src := range sources {
+				source := src.(map[string]interface{})
+				docCount := int(source["doc_count"].(float64))
+				chunkCount := int(source["chunk_count"].(float64))
+				sizeBytes := int64(source["size_bytes"].(float64))
+
+				totalDocs += docCount
+				totalChunks += chunkCount
+				totalSize += sizeBytes
+			}
+
+			fmt.Printf("Sources:     %d\n", len(sources))
+			fmt.Printf("Documents:   %d\n", totalDocs)
+			fmt.Printf("Chunks:      %d\n", totalChunks)
+			fmt.Printf("Total Size:  %s\n", formatBytes(totalSize))
+			fmt.Println()
+			fmt.Println("By Source:")
+			fmt.Println("─────────────────────────────────────────")
+			fmt.Printf("%-20s %-8s %-8s %s\n", "NAME", "DOCS", "CHUNKS", "SIZE")
+
+			for _, src := range sources {
+				source := src.(map[string]interface{})
+				name := source["name"].(string)
+				docCount := int(source["doc_count"].(float64))
+				chunkCount := int(source["chunk_count"].(float64))
+				sizeBytes := int64(source["size_bytes"].(float64))
+
+				fmt.Printf("%-20s %-8d %-8d %s\n",
+					truncate(name, 20), docCount, chunkCount, formatBytes(sizeBytes))
+			}
+
+			return nil
+		},
+	}
+}
+
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func kbAddCmd() *cobra.Command {
 	var name string
 	var patterns string
+	var excludes string
+	var syncMode string
 
 	cmd := &cobra.Command{
 		Use:   "add <path>",
 		Short: "Add a folder to the knowledge base",
-		Args:  cobra.ExactArgs(1),
+		Long: `Add a folder to the knowledge base for document indexing.
+
+The folder will be scanned for matching files which are then indexed
+for full-text search. By default, common text and code files are indexed.
+
+Examples:
+  conduit kb add ./docs --name "Project Docs"
+  conduit kb add /path/to/notes --patterns "*.md,*.txt"
+  conduit kb add ./src --excludes "node_modules,dist"`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			path := args[0]
-			fmt.Printf("Adding %s to knowledge base as '%s'\n", path, name)
-			// TODO: Implement KB add
-			fmt.Println("KB add not yet implemented")
+			sourcePath := args[0]
+
+			// Resolve to absolute path
+			absPath, err := filepath.Abs(sourcePath)
+			if err != nil {
+				return fmt.Errorf("resolve path: %w", err)
+			}
+
+			// Check path exists
+			info, err := os.Stat(absPath)
+			if err != nil {
+				return fmt.Errorf("path not accessible: %w", err)
+			}
+			if !info.IsDir() {
+				return fmt.Errorf("path is not a directory: %s", absPath)
+			}
+
+			// Build request
+			req := map[string]interface{}{
+				"path": absPath,
+			}
+			if name != "" {
+				req["name"] = name
+			} else {
+				req["name"] = filepath.Base(absPath)
+			}
+			if patterns != "" {
+				req["patterns"] = strings.Split(patterns, ",")
+			}
+			if excludes != "" {
+				req["excludes"] = strings.Split(excludes, ",")
+			}
+			if syncMode != "" {
+				req["sync_mode"] = syncMode
+			}
+
+			c := newClient(socketPath)
+			data, err := c.post("/api/v1/kb/sources", req)
+			if err != nil {
+				return fmt.Errorf("add source: %w", err)
+			}
+
+			var resp map[string]interface{}
+			json.Unmarshal(data, &resp)
+
+			if errData, ok := resp["error"]; ok {
+				errMap := errData.(map[string]interface{})
+				return fmt.Errorf("%s", errMap["message"])
+			}
+
+			sourceID := resp["source_id"].(string)
+			sourceName := resp["name"].(string)
+
+			fmt.Printf("✓ Added source: %s\n", sourceName)
+			fmt.Printf("  ID:   %s\n", sourceID)
+			fmt.Printf("  Path: %s\n", absPath)
+			fmt.Println()
+			fmt.Println("Run 'conduit kb sync' to index documents")
+
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&name, "name", "", "Display name for the source")
-	cmd.Flags().StringVar(&patterns, "patterns", "*.md,*.txt", "File patterns to index")
+	cmd.Flags().StringVar(&patterns, "patterns", "", "File patterns to index (comma-separated, e.g., '*.md,*.txt')")
+	cmd.Flags().StringVar(&excludes, "excludes", "", "Directories to exclude (comma-separated, e.g., 'node_modules,dist')")
+	cmd.Flags().StringVar(&syncMode, "sync", "manual", "Sync mode: manual or auto")
 
 	return cmd
 }
@@ -1010,18 +1419,56 @@ func kbListCmd() *cobra.Command {
 }
 
 func kbRemoveCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "remove <source-name>",
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "remove <source-id>",
 		Short: "Remove a knowledge base source",
-		Args:  cobra.ExactArgs(1),
+		Long: `Remove a knowledge base source and all its indexed documents.
+
+Use 'conduit kb list' to see source IDs.
+
+Examples:
+  conduit kb remove abc123-def456
+  conduit kb remove abc123 --force`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			sourceName := args[0]
-			fmt.Printf("Removing KB source: %s\n", sourceName)
-			// TODO: Implement KB remove
-			fmt.Println("KB remove not yet implemented")
+			sourceID := args[0]
+
+			// Get source info first
+			c := newClient(socketPath)
+			data, err := c.get("/api/v1/kb/sources/" + sourceID)
+			if err != nil {
+				return fmt.Errorf("source not found: %w", err)
+			}
+
+			var source map[string]interface{}
+			json.Unmarshal(data, &source)
+
+			sourceName := source["name"].(string)
+			docCount := int(source["doc_count"].(float64))
+
+			if !force && docCount > 0 {
+				fmt.Printf("Source '%s' has %d indexed documents.\n", sourceName, docCount)
+				if !confirmAction("Remove source and all documents?") {
+					fmt.Println("Cancelled")
+					return nil
+				}
+			}
+
+			// Delete the source
+			if err := c.delete("/api/v1/kb/sources/" + sourceID); err != nil {
+				return fmt.Errorf("remove source: %w", err)
+			}
+
+			fmt.Printf("✓ Removed source: %s (%d documents)\n", sourceName, docCount)
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation")
+
+	return cmd
 }
 
 func kbSearchCmd() *cobra.Command {
@@ -1060,16 +1507,114 @@ func kbSearchCmd() *cobra.Command {
 
 func kbSyncCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "sync [source-name]",
+		Use:   "sync [source-id]",
 		Short: "Sync knowledge base sources",
+		Long: `Synchronize knowledge base sources to index new and updated documents.
+
+If a source ID is provided, only that source is synced.
+If no source ID is provided, all sources are synced.
+
+Examples:
+  conduit kb sync                    # Sync all sources
+  conduit kb sync abc123-def456      # Sync specific source`,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClient(socketPath)
+
 			if len(args) > 0 {
-				fmt.Printf("Syncing KB source: %s\n", args[0])
+				// Sync specific source
+				sourceID := args[0]
+
+				fmt.Printf("Syncing source: %s\n", sourceID)
+				data, err := c.post("/api/v1/kb/sources/"+sourceID+"/sync", nil)
+				if err != nil {
+					return fmt.Errorf("sync failed: %w", err)
+				}
+
+				var result map[string]interface{}
+				json.Unmarshal(data, &result)
+
+				if errData, ok := result["error"]; ok {
+					errMap := errData.(map[string]interface{})
+					return fmt.Errorf("%s", errMap["message"])
+				}
+
+				added := int(result["added"].(float64))
+				updated := int(result["updated"].(float64))
+				deleted := int(result["deleted"].(float64))
+
+				fmt.Printf("✓ Sync complete\n")
+				fmt.Printf("  Added:   %d documents\n", added)
+				fmt.Printf("  Updated: %d documents\n", updated)
+				fmt.Printf("  Deleted: %d documents\n", deleted)
+
+				if errors, ok := result["errors"].([]interface{}); ok && len(errors) > 0 {
+					fmt.Printf("  Errors:  %d\n", len(errors))
+					for _, e := range errors {
+						errInfo := e.(map[string]interface{})
+						fmt.Printf("    - %s: %s\n", errInfo["path"], errInfo["message"])
+					}
+				}
 			} else {
-				fmt.Println("Syncing all KB sources")
+				// Sync all sources
+				fmt.Println("Syncing all sources...")
+
+				// Get list of sources
+				data, err := c.get("/api/v1/kb/sources")
+				if err != nil {
+					return fmt.Errorf("list sources: %w", err)
+				}
+
+				var resp map[string]interface{}
+				json.Unmarshal(data, &resp)
+
+				sources, _ := resp["sources"].([]interface{})
+				if len(sources) == 0 {
+					fmt.Println("No sources to sync")
+					return nil
+				}
+
+				totalAdded := 0
+				totalUpdated := 0
+				totalDeleted := 0
+
+				for _, src := range sources {
+					source := src.(map[string]interface{})
+					sourceID := source["source_id"].(string)
+					sourceName := source["name"].(string)
+
+					fmt.Printf("  Syncing: %s... ", sourceName)
+
+					syncData, err := c.post("/api/v1/kb/sources/"+sourceID+"/sync", nil)
+					if err != nil {
+						fmt.Printf("ERROR: %v\n", err)
+						continue
+					}
+
+					var result map[string]interface{}
+					json.Unmarshal(syncData, &result)
+
+					if errData, ok := result["error"]; ok {
+						errMap := errData.(map[string]interface{})
+						fmt.Printf("ERROR: %s\n", errMap["message"])
+						continue
+					}
+
+					added := int(result["added"].(float64))
+					updated := int(result["updated"].(float64))
+					deleted := int(result["deleted"].(float64))
+
+					totalAdded += added
+					totalUpdated += updated
+					totalDeleted += deleted
+
+					fmt.Printf("done (+%d/~%d/-%d)\n", added, updated, deleted)
+				}
+
+				fmt.Println()
+				fmt.Printf("✓ Sync complete: %d added, %d updated, %d deleted\n",
+					totalAdded, totalUpdated, totalDeleted)
 			}
-			// TODO: Implement KB sync
-			fmt.Println("KB sync not yet implemented")
+
 			return nil
 		},
 	}
@@ -1077,33 +1622,234 @@ func kbSyncCmd() *cobra.Command {
 
 // doctorCmd diagnoses issues
 func doctorCmd() *cobra.Command {
-	return &cobra.Command{
+	var verbose bool
+
+	cmd := &cobra.Command{
 		Use:   "doctor",
 		Short: "Diagnose Conduit issues",
+		Long: `Run comprehensive diagnostics on the Conduit installation.
+
+Checks:
+  - Daemon connectivity and health
+  - Container runtime availability (Podman/Docker)
+  - Database accessibility
+  - AI provider configuration
+  - Client configurations
+  - Knowledge base status`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Println("Running Conduit diagnostics...")
+			fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+			fmt.Println("║                   Conduit Diagnostics                        ║")
+			fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+			fmt.Println()
+
+			issues := 0
+			warnings := 0
+
+			// Load configuration
+			cfg, cfgErr := config.Load()
+			if cfgErr != nil {
+				fmt.Println("❌ Configuration")
+				fmt.Printf("   Error loading config: %v\n", cfgErr)
+				issues++
+			} else {
+				fmt.Println("✓ Configuration loaded")
+				if verbose {
+					fmt.Printf("   Data dir: %s\n", cfg.DataDir)
+					fmt.Printf("   Socket:   %s\n", cfg.SocketPath)
+				}
+			}
 
 			// Check daemon connectivity
+			fmt.Println()
+			fmt.Println("📡 Daemon Status")
+			fmt.Println("────────────────────────────────────────────────────────")
+
 			c := newClient(socketPath)
-			_, err := c.get("/api/v1/health")
+			healthData, err := c.get("/api/v1/health")
 			if err != nil {
 				fmt.Println("❌ Daemon not running or unreachable")
 				fmt.Printf("   Socket: %s\n", socketPath)
-				fmt.Println("   Try: conduit-daemon --foreground")
+				fmt.Println("   Try: conduit service start")
+				issues++
 			} else {
-				fmt.Println("✓ Daemon is running")
+				var health map[string]interface{}
+				json.Unmarshal(healthData, &health)
+
+				if health["status"] == "healthy" {
+					fmt.Println("✓ Daemon is running and healthy")
+				} else {
+					fmt.Println("⚠️  Daemon is running but unhealthy")
+					warnings++
+				}
+
+				// Get status info
+				statusData, _ := c.get("/api/v1/status")
+				var status map[string]interface{}
+				json.Unmarshal(statusData, &status)
+
+				if daemon, ok := status["daemon"].(map[string]interface{}); ok {
+					if verbose {
+						fmt.Printf("   Version: %s\n", daemon["version"])
+						fmt.Printf("   Uptime:  %s\n", daemon["uptime"])
+					}
+				}
+
+				if instances, ok := status["instances"].(map[string]interface{}); ok {
+					total := int(instances["total"].(float64))
+					fmt.Printf("   Instances: %d\n", total)
+				}
 			}
 
-			// Check runtime (placeholder)
-			fmt.Println("⏳ Container runtime check not yet implemented")
+			// Check container runtime
+			fmt.Println()
+			fmt.Println("🐳 Container Runtime")
+			fmt.Println("────────────────────────────────────────────────────────")
 
-			// Check clients (placeholder)
-			fmt.Println("⏳ Client detection not yet implemented")
+			ctx := cmd.Context()
+			selector := containerRuntime.NewSelector("")
+			runtimes := selector.DetectAll(ctx)
 
-			fmt.Println("\nDiagnostics complete")
+			anyAvailable := false
+			for _, rt := range runtimes {
+				if rt.Available {
+					anyAvailable = true
+					status := "✓"
+					if rt.Preferred {
+						status = "✓ (preferred)"
+					}
+					fmt.Printf("%s %s %s\n", status, rt.Name, rt.Version)
+				} else {
+					fmt.Printf("○ %s (not installed)\n", rt.Name)
+				}
+			}
+
+			if !anyAvailable {
+				fmt.Println("❌ No container runtime available")
+				fmt.Println("   Install Podman or Docker to run MCP servers")
+				issues++
+			}
+
+			// Check database
+			fmt.Println()
+			fmt.Println("💾 Database")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			if cfg != nil {
+				dbPath := cfg.DatabasePath()
+				if info, err := os.Stat(dbPath); err == nil {
+					fmt.Println("✓ Database exists")
+					if verbose {
+						fmt.Printf("   Path: %s\n", dbPath)
+						fmt.Printf("   Size: %s\n", formatBytes(info.Size()))
+					}
+				} else {
+					fmt.Println("○ Database not yet created")
+					fmt.Println("   Will be created on first use")
+				}
+			}
+
+			// Check AI provider
+			fmt.Println()
+			fmt.Println("🤖 AI Provider")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			if cfg != nil {
+				fmt.Printf("   Provider: %s\n", cfg.AI.Provider)
+				fmt.Printf("   Model:    %s\n", cfg.AI.Model)
+
+				if cfg.AI.Provider == "ollama" {
+					// Check if Ollama is running
+					if checkOllamaRunning() {
+						fmt.Println("✓ Ollama is running")
+					} else {
+						if checkCommand("ollama", "--version") {
+							fmt.Println("⚠️  Ollama is installed but not running")
+							fmt.Println("   Start with: ollama serve")
+							warnings++
+						} else {
+							fmt.Println("❌ Ollama not installed")
+							fmt.Println("   Install from: https://ollama.ai")
+							issues++
+						}
+					}
+				} else if cfg.AI.Provider == "anthropic" {
+					if os.Getenv("ANTHROPIC_API_KEY") != "" {
+						fmt.Println("✓ ANTHROPIC_API_KEY is set")
+					} else {
+						fmt.Println("❌ ANTHROPIC_API_KEY not set")
+						issues++
+					}
+				}
+			}
+
+			// Check AI clients
+			fmt.Println()
+			fmt.Println("🔗 AI Clients")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			homeDir, _ := os.UserHomeDir()
+
+			clients := []struct {
+				name       string
+				configPath string
+			}{
+				{"Claude Code", filepath.Join(homeDir, ".claude.json")},
+				{"Cursor", filepath.Join(homeDir, ".cursor", "mcp.json")},
+				{"VS Code", filepath.Join(homeDir, ".vscode", "mcp.json")},
+				{"Gemini CLI", filepath.Join(homeDir, ".gemini", "mcp.json")},
+			}
+
+			for _, client := range clients {
+				if _, err := os.Stat(client.configPath); err == nil {
+					fmt.Printf("✓ %s configured\n", client.name)
+					if verbose {
+						fmt.Printf("   Config: %s\n", client.configPath)
+					}
+				} else {
+					fmt.Printf("○ %s (not configured)\n", client.name)
+				}
+			}
+
+			// Check knowledge base
+			fmt.Println()
+			fmt.Println("📚 Knowledge Base")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			if c != nil {
+				kbData, err := c.get("/api/v1/kb/sources")
+				if err == nil {
+					var resp map[string]interface{}
+					json.Unmarshal(kbData, &resp)
+					sources, _ := resp["sources"].([]interface{})
+					if len(sources) > 0 {
+						fmt.Printf("✓ %d sources configured\n", len(sources))
+					} else {
+						fmt.Println("○ No sources configured")
+						fmt.Println("   Add with: conduit kb add <path>")
+					}
+				}
+			}
+
+			// Summary
+			fmt.Println()
+			fmt.Println("════════════════════════════════════════════════════════")
+
+			if issues == 0 && warnings == 0 {
+				fmt.Println("✓ All checks passed! Conduit is ready to use.")
+			} else if issues == 0 {
+				fmt.Printf("⚠️  %d warning(s), but Conduit should work.\n", warnings)
+			} else {
+				fmt.Printf("❌ %d issue(s) found, %d warning(s).\n", issues, warnings)
+				fmt.Println("   Fix the issues above and run 'conduit doctor' again.")
+			}
+
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed information")
+
+	return cmd
 }
 
 func truncate(s string, max int) string {
@@ -1134,10 +1880,87 @@ func mcpStdioCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stdio",
 		Short: "Run MCP server over stdio",
+		Long: `Proxy an MCP server over stdio.
+
+This command runs a containerized MCP server with stdin/stdout attached,
+allowing AI clients to communicate with it via the MCP protocol.
+
+Example usage in AI client config:
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "conduit",
+      "args": ["mcp", "stdio", "--instance", "abc123"]
+    }
+  }
+}`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Fprintf(os.Stderr, "MCP stdio server for instance %s\n", instanceID)
-			fmt.Fprintf(os.Stderr, "Not yet implemented - connector proxy coming soon\n")
-			return nil
+			ctx := cmd.Context()
+
+			// Get instance info from daemon
+			c := newClient(socketPath)
+			data, err := c.get("/api/v1/instances/" + instanceID)
+			if err != nil {
+				return fmt.Errorf("instance not found: %w", err)
+			}
+
+			var instance map[string]interface{}
+			if err := json.Unmarshal(data, &instance); err != nil {
+				return fmt.Errorf("parse instance: %w", err)
+			}
+
+			// Get image reference
+			imageRef, ok := instance["image_ref"].(string)
+			if !ok || imageRef == "" {
+				return fmt.Errorf("instance has no image reference")
+			}
+
+			// Get configuration
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			// Select runtime
+			selector := containerRuntime.NewSelector(cfg.Runtime.Preferred)
+			provider, err := selector.Select(ctx)
+			if err != nil {
+				return fmt.Errorf("no container runtime: %w", err)
+			}
+
+			// Build container spec for interactive run
+			spec := containerRuntime.ContainerSpec{
+				Name:  fmt.Sprintf("conduit-mcp-%s-%d", instanceID[:8], time.Now().Unix()),
+				Image: imageRef,
+				Stdin: true,
+				Security: containerRuntime.SecuritySpec{
+					NoNewPrivileges: true,
+					DropCapabilities: []string{"ALL"},
+				},
+				Network: containerRuntime.NetworkSpec{
+					Mode: "none", // No network by default for security
+				},
+			}
+
+			// Apply any instance-specific config
+			if envMap, ok := instance["env"].(map[string]interface{}); ok {
+				spec.Env = make(map[string]string)
+				for k, v := range envMap {
+					if str, ok := v.(string); ok {
+						spec.Env[k] = str
+					}
+				}
+			}
+
+			// Add instance labels
+			spec.Labels = map[string]string{
+				"conduit.instance_id": instanceID,
+				"conduit.mcp.stdio":   "true",
+			}
+
+			// Run the container interactively
+			// This will connect stdin/stdout directly to the container
+			return provider.RunInteractive(ctx, spec)
 		},
 	}
 
@@ -1195,6 +2018,334 @@ Example MCP client configuration:
 			return server.Run(ctx)
 		},
 	}
+}
+
+// logsCmd shows instance logs
+func logsCmd() *cobra.Command {
+	var follow bool
+	var tail int
+	var since string
+
+	cmd := &cobra.Command{
+		Use:   "logs <instance-id>",
+		Short: "Show connector instance logs",
+		Long: `Display logs from a connector instance.
+
+Shows both container runtime logs and stored application logs.
+Use --follow to stream logs in real-time.
+
+Examples:
+  conduit logs my-server
+  conduit logs abc123 --tail 100
+  conduit logs abc123 --follow
+  conduit logs abc123 --since 1h`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instanceID := args[0]
+
+			// Get instance info from daemon
+			c := newClient(socketPath)
+			data, err := c.get("/api/v1/instances/" + instanceID)
+			if err != nil {
+				return fmt.Errorf("instance not found: %w", err)
+			}
+
+			var instance map[string]interface{}
+			json.Unmarshal(data, &instance)
+
+			// Check if instance has a container ID
+			containerID, hasContainer := instance["container_id"].(string)
+			status := instance["status"].(string)
+
+			fmt.Printf("Logs for instance: %s (status: %s)\n", instanceID, status)
+			fmt.Println("═══════════════════════════════════════════════════════")
+
+			// If container is running, get container logs
+			if hasContainer && containerID != "" && (status == "running" || status == "stopped") {
+				fmt.Println("\n📦 Container Logs:")
+				fmt.Println("───────────────────────────────────────────────────────")
+
+				// Build log command
+				runtime := detectContainerRuntime()
+				if runtime == "" {
+					fmt.Println("  (No container runtime detected)")
+				} else {
+					logArgs := []string{"logs"}
+					if tail > 0 {
+						logArgs = append(logArgs, "--tail", strconv.Itoa(tail))
+					}
+					if since != "" {
+						logArgs = append(logArgs, "--since", since)
+					}
+					if follow {
+						logArgs = append(logArgs, "-f")
+					}
+					logArgs = append(logArgs, containerID)
+
+					logCmd := exec.CommandContext(cmd.Context(), runtime, logArgs...)
+					logCmd.Stdout = os.Stdout
+					logCmd.Stderr = os.Stderr
+
+					if err := logCmd.Run(); err != nil {
+						fmt.Printf("  (Container logs unavailable: %v)\n", err)
+					}
+				}
+			} else {
+				fmt.Println("\n  (No container running for this instance)")
+			}
+
+			// Show stored logs from data directory
+			homeDir, _ := os.UserHomeDir()
+			logPath := filepath.Join(homeDir, ".conduit", "logs", instanceID+".log")
+			if info, err := os.Stat(logPath); err == nil && !info.IsDir() {
+				fmt.Println("\n📄 Stored Logs:")
+				fmt.Println("───────────────────────────────────────────────────────")
+
+				// Read and display stored logs
+				logFile, err := os.Open(logPath)
+				if err != nil {
+					fmt.Printf("  (Could not read stored logs: %v)\n", err)
+				} else {
+					defer logFile.Close()
+
+					// If tail is specified, only show last N lines
+					if tail > 0 {
+						lines := readLastNLines(logFile, tail)
+						for _, line := range lines {
+							fmt.Println(line)
+						}
+					} else {
+						io.Copy(os.Stdout, logFile)
+					}
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
+	cmd.Flags().IntVarP(&tail, "tail", "n", 0, "Number of lines to show from the end")
+	cmd.Flags().StringVar(&since, "since", "", "Show logs since timestamp (e.g., '1h', '2024-01-01')")
+
+	return cmd
+}
+
+// detectContainerRuntime finds the available container runtime
+func detectContainerRuntime() string {
+	if _, err := exec.LookPath("podman"); err == nil {
+		return "podman"
+	}
+	if _, err := exec.LookPath("docker"); err == nil {
+		return "docker"
+	}
+	return ""
+}
+
+// readLastNLines reads the last N lines from a file
+func readLastNLines(f *os.File, n int) []string {
+	scanner := bufio.NewScanner(f)
+	var lines []string
+
+	for scanner.Scan() {
+		lines = append(lines, scanner.Text())
+		if len(lines) > n {
+			lines = lines[1:]
+		}
+	}
+
+	return lines
+}
+
+// configCmd shows configuration
+func configCmd() *cobra.Command {
+	var showAll bool
+
+	cmd := &cobra.Command{
+		Use:   "config",
+		Short: "Show Conduit configuration",
+		Long: `Display the current Conduit configuration.
+
+Shows configuration loaded from:
+  - ~/.conduit/conduit.yaml
+  - /etc/conduit/conduit.yaml
+  - Environment variables (CONDUIT_*)
+
+Examples:
+  conduit config
+  conduit config --all`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			fmt.Println("Conduit Configuration")
+			fmt.Println("═══════════════════════════════════════════════════════")
+
+			fmt.Println("\n📁 Paths:")
+			fmt.Printf("  Data Directory:  %s\n", cfg.DataDir)
+			fmt.Printf("  Socket Path:     %s\n", cfg.SocketPath)
+			fmt.Printf("  Database Path:   %s\n", cfg.DatabasePath())
+			fmt.Printf("  Log Path:        %s\n", cfg.LogPath())
+			fmt.Printf("  Backups Dir:     %s\n", cfg.BackupsDir())
+
+			fmt.Println("\n📝 Logging:")
+			fmt.Printf("  Log Level:       %s\n", cfg.LogLevel)
+			fmt.Printf("  Log Format:      %s\n", cfg.LogFormat)
+
+			fmt.Println("\n🤖 AI Configuration:")
+			fmt.Printf("  Provider:        %s\n", cfg.AI.Provider)
+			fmt.Printf("  Model:           %s\n", cfg.AI.Model)
+			fmt.Printf("  Endpoint:        %s\n", cfg.AI.Endpoint)
+			fmt.Printf("  Timeout:         %d seconds\n", cfg.AI.TimeoutSeconds)
+			fmt.Printf("  Confidence:      %.0f%%\n", cfg.AI.ConfidenceThreshold*100)
+
+			fmt.Println("\n🐳 Runtime:")
+			fmt.Printf("  Preferred:       %s\n", cfg.Runtime.Preferred)
+			fmt.Printf("  Pull Timeout:    %s\n", cfg.Runtime.PullTimeout)
+			fmt.Printf("  Start Timeout:   %s\n", cfg.Runtime.StartTimeout)
+			fmt.Printf("  Stop Timeout:    %s\n", cfg.Runtime.StopTimeout)
+
+			if showAll {
+				fmt.Println("\n📚 Knowledge Base:")
+				fmt.Printf("  Workers:         %d\n", cfg.KB.Workers)
+				fmt.Printf("  Max File Size:   %s\n", formatBytes(cfg.KB.MaxFileSize))
+				fmt.Printf("  Chunk Size:      %d\n", cfg.KB.ChunkSize)
+				fmt.Printf("  Chunk Overlap:   %d\n", cfg.KB.ChunkOverlap)
+
+				fmt.Println("\n🔒 Policy:")
+				fmt.Printf("  Network Egress:  %v\n", cfg.Policy.AllowNetworkEgress)
+				fmt.Println("  Forbidden Paths:")
+				for _, p := range cfg.Policy.ForbiddenPaths {
+					fmt.Printf("    - %s\n", p)
+				}
+				fmt.Println("  Warn Paths:")
+				for _, p := range cfg.Policy.WarnPaths {
+					fmt.Printf("    - %s\n", p)
+				}
+
+				fmt.Println("\n⚙️ API:")
+				fmt.Printf("  Read Timeout:    %s\n", cfg.API.ReadTimeout)
+				fmt.Printf("  Write Timeout:   %s\n", cfg.API.WriteTimeout)
+				fmt.Printf("  Idle Timeout:    %s\n", cfg.API.IdleTimeout)
+			}
+
+			// Show config file location
+			homeDir, _ := os.UserHomeDir()
+			configPath := filepath.Join(homeDir, ".conduit", "conduit.yaml")
+			if _, err := os.Stat(configPath); err == nil {
+				fmt.Printf("\n📄 Config File: %s\n", configPath)
+			} else {
+				fmt.Println("\n📄 Config File: (using defaults, no config file found)")
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Show all configuration options")
+
+	return cmd
+}
+
+// backupCmd creates a backup of Conduit data
+func backupCmd() *cobra.Command {
+	var outputPath string
+
+	cmd := &cobra.Command{
+		Use:   "backup",
+		Short: "Create a backup of Conduit data",
+		Long: `Create a complete backup of the Conduit data directory.
+
+The backup includes:
+  - Database (conduit.db)
+  - Configuration (conduit.yaml)
+  - Knowledge base data
+  - Connector configurations
+
+The backup is saved as a compressed tar.gz archive.
+
+Examples:
+  conduit backup
+  conduit backup --output ~/backups/conduit-backup.tar.gz`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			// Ensure backups directory exists
+			if err := os.MkdirAll(cfg.BackupsDir(), 0700); err != nil {
+				return fmt.Errorf("create backups directory: %w", err)
+			}
+
+			// Determine output path
+			if outputPath == "" {
+				timestamp := time.Now().Format("20060102-150405")
+				outputPath = filepath.Join(cfg.BackupsDir(), fmt.Sprintf("conduit-backup-%s.tar.gz", timestamp))
+			}
+
+			// Resolve to absolute path
+			absOutput, err := filepath.Abs(outputPath)
+			if err != nil {
+				return fmt.Errorf("resolve output path: %w", err)
+			}
+
+			fmt.Printf("Creating backup of %s\n", cfg.DataDir)
+			fmt.Printf("Output: %s\n", absOutput)
+			fmt.Println()
+
+			// Create the backup using tar
+			fmt.Println("📦 Backing up data directory...")
+
+			// Create output file
+			outFile, err := os.Create(absOutput)
+			if err != nil {
+				return fmt.Errorf("create backup file: %w", err)
+			}
+			defer outFile.Close()
+
+			// Use tar command for simplicity and better compatibility
+			tarCmd := exec.Command("tar", "-czf", "-", "-C", filepath.Dir(cfg.DataDir), filepath.Base(cfg.DataDir))
+			tarCmd.Stdout = outFile
+
+			var stderr bytes.Buffer
+			tarCmd.Stderr = &stderr
+
+			if err := tarCmd.Run(); err != nil {
+				return fmt.Errorf("create archive: %w (%s)", err, stderr.String())
+			}
+
+			// Get file size
+			info, _ := os.Stat(absOutput)
+			fmt.Printf("\n✓ Backup complete: %s (%s)\n", absOutput, formatBytes(info.Size()))
+
+			// Show what was backed up
+			fmt.Println("\nContents:")
+			listCmd := exec.Command("tar", "-tzf", absOutput)
+			listOut, _ := listCmd.Output()
+			lines := strings.Split(string(listOut), "\n")
+			shown := 0
+			for _, line := range lines {
+				if line != "" && shown < 10 {
+					fmt.Printf("  %s\n", line)
+					shown++
+				}
+			}
+			if len(lines) > 10 {
+				fmt.Printf("  ... and %d more files\n", len(lines)-10)
+			}
+
+			fmt.Println("\nTo restore, extract the archive to ~/.conduit")
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&outputPath, "output", "o", "", "Output path for backup file")
+
+	return cmd
 }
 
 // uninstallCmd removes Conduit

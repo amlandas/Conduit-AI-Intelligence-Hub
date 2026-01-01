@@ -186,8 +186,16 @@ conduit kb stats              # Show KB statistics
 ### System
 ```bash
 conduit status                # Show daemon status
-conduit config show           # Show configuration
-conduit backup                # Backup data
+conduit config                # Show configuration
+conduit config --all          # Show full configuration
+conduit backup                # Backup data directory
+conduit doctor                # Run comprehensive diagnostics
+```
+
+### MCP Operations
+```bash
+conduit mcp kb                # Run knowledge base MCP server
+conduit mcp stdio --instance <id>  # Run MCP server over stdio
 ```
 
 ## Architecture

@@ -94,12 +94,21 @@ curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hu
 | Docker Support | Fallback support | Complete |
 | Container Lifecycle | Run, stop, remove, status operations | Complete |
 | Image Management | Pull, inspect, list images | Complete |
+| Image Building | Build containers from Dockerfile with streaming output | Complete |
+| Interactive Mode | Run containers with stdin/stdout for MCP stdio | Complete |
+| Log Streaming | Stream container logs in real-time | Complete |
 
 **Security Defaults**:
 - Read-only root filesystem
 - All capabilities dropped
 - No new privileges flag
 - Network isolation (default: none)
+
+**Build Features**:
+- Supports Dockerfile or custom path
+- Streaming build output with progress callback
+- Build arguments and no-cache options
+- Automatic runtime selection (Podman preferred)
 
 ### 4. Policy Engine (`internal/policy/`)
 
@@ -192,11 +201,21 @@ CREATED → AUDITING → INSTALLED → STARTING → RUNNING
 | Command Group | Commands | Status |
 |---------------|----------|--------|
 | Setup | `setup`, `install-deps`, `doctor`, `uninstall` | Complete |
-| Service | `install`, `start`, `stop`, `status`, `remove` | Complete |
+| Service | `service install`, `service start`, `service stop`, `service status`, `service remove` | Complete |
 | Instance | `install`, `list`, `start`, `stop`, `remove`, `logs` | Complete |
-| Client | `list`, `bind`, `unbind` | Complete |
-| Knowledge Base | `add`, `list`, `sync`, `search`, `stats` | Complete |
-| System | `status`, `config show`, `backup` | Complete |
+| Client | `client list`, `client bind`, `client unbind`, `client bindings` | Complete |
+| Knowledge Base | `kb add`, `kb list`, `kb sync`, `kb search`, `kb stats`, `kb remove` | Complete |
+| MCP | `mcp stdio`, `mcp kb` | Complete |
+| System | `status`, `config`, `backup` | Complete |
+
+**CLI Commands in Detail**:
+- `conduit install <url>` - AI-powered MCP server installation with Docker/Podman build
+- `conduit logs <instance>` - View container and stored logs with `--follow`, `--tail`
+- `conduit config` - Display configuration with `--all` for full details
+- `conduit backup` - Create tar.gz backup of data directory
+- `conduit doctor` - Comprehensive diagnostics with verbose mode
+- `conduit mcp stdio --instance <id>` - Run MCP server over stdio for AI client integration
+- `conduit mcp kb` - Run knowledge base MCP server
 
 ### 10. Observability (`internal/observability/`)
 

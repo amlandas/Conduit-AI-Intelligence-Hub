@@ -1,10 +1,13 @@
 package runtime
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -56,6 +59,81 @@ func (p *DockerProvider) Available(ctx context.Context) bool {
 
 	_, err := p.Version(ctx)
 	return err == nil
+}
+
+// Build builds a container image from a Dockerfile.
+func (p *DockerProvider) Build(ctx context.Context, opts BuildOptions) error {
+	args := []string{"build"}
+
+	// Dockerfile path
+	if opts.DockerfilePath != "" {
+		args = append(args, "-f", opts.DockerfilePath)
+	}
+
+	// Image name/tag
+	if opts.ImageName != "" {
+		args = append(args, "-t", opts.ImageName)
+	}
+
+	// Build args
+	for k, v := range opts.BuildArgs {
+		args = append(args, "--build-arg", fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// No cache
+	if opts.NoCache {
+		args = append(args, "--no-cache")
+	}
+
+	// Context directory
+	args = append(args, opts.ContextDir)
+
+	p.logger.Info().
+		Str("image", opts.ImageName).
+		Str("context", opts.ContextDir).
+		Msg("building image")
+
+	// Run build with streaming output
+	cmd := exec.CommandContext(ctx, p.executable, args...)
+	cmd.Dir = opts.ContextDir
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return fmt.Errorf("create stdout pipe: %w", err)
+	}
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		return fmt.Errorf("create stderr pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start build: %w", err)
+	}
+
+	// Stream output
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		for scanner.Scan() {
+			if opts.Progress != nil {
+				opts.Progress(scanner.Text())
+			}
+		}
+	}()
+	go func() {
+		scanner := bufio.NewScanner(stderr)
+		for scanner.Scan() {
+			if opts.Progress != nil {
+				opts.Progress(scanner.Text())
+			}
+		}
+	}()
+
+	if err := cmd.Wait(); err != nil {
+		return fmt.Errorf("build failed: %w", err)
+	}
+
+	p.logger.Info().Str("image", opts.ImageName).Msg("image built successfully")
+	return nil
 }
 
 // Pull downloads a container image.
@@ -348,4 +426,103 @@ func (p *DockerProvider) run(ctx context.Context, args ...string) (string, error
 	}
 
 	return stdout.String(), nil
+}
+
+// RunInteractive runs a container with stdin/stdout attached for MCP stdio communication.
+func (p *DockerProvider) RunInteractive(ctx context.Context, spec ContainerSpec) error {
+	args := []string{"run", "--rm", "-i"}
+
+	// Container name
+	if spec.Name != "" {
+		args = append(args, "--name", spec.Name)
+	}
+
+	// Security options
+	if spec.Security.ReadOnlyRootfs {
+		args = append(args, "--read-only")
+	}
+	if spec.Security.NoNewPrivileges {
+		args = append(args, "--security-opt=no-new-privileges")
+	}
+	for _, cap := range spec.Security.DropCapabilities {
+		args = append(args, "--cap-drop="+cap)
+	}
+
+	// Network
+	switch spec.Network.Mode {
+	case "none":
+		args = append(args, "--network=none")
+	case "bridge":
+		args = append(args, "--network=bridge")
+	case "host":
+		args = append(args, "--network=host")
+	default:
+		args = append(args, "--network=none")
+	}
+
+	// Mounts
+	for _, m := range spec.Mounts {
+		opt := fmt.Sprintf("%s:%s", m.Source, m.Target)
+		if m.ReadOnly {
+			opt += ":ro"
+		}
+		args = append(args, "-v", opt)
+	}
+
+	// Environment
+	for k, v := range spec.Env {
+		args = append(args, "-e", fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// Labels
+	args = append(args, "--label", "conduit.managed=true")
+	for k, v := range spec.Labels {
+		args = append(args, "--label", fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// Working directory
+	if spec.WorkingDir != "" {
+		args = append(args, "-w", spec.WorkingDir)
+	}
+
+	// Entrypoint
+	if len(spec.Entrypoint) > 0 {
+		args = append(args, "--entrypoint", spec.Entrypoint[0])
+	}
+
+	// Image
+	args = append(args, spec.Image)
+
+	// Command
+	args = append(args, spec.Command...)
+
+	p.logger.Info().
+		Str("name", spec.Name).
+		Str("image", spec.Image).
+		Msg("running interactive container")
+
+	cmd := exec.CommandContext(ctx, p.executable, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	return cmd.Run()
+}
+
+// StreamLogs streams container logs to a writer.
+func (p *DockerProvider) StreamLogs(ctx context.Context, containerID string, w io.Writer, opts LogOptions) error {
+	args := []string{"logs"}
+	if opts.Follow {
+		args = append(args, "-f")
+	}
+	if opts.Tail > 0 {
+		args = append(args, "--tail", strconv.Itoa(opts.Tail))
+	}
+	args = append(args, containerID)
+
+	cmd := exec.CommandContext(ctx, p.executable, args...)
+	cmd.Stdout = w
+	cmd.Stderr = w
+
+	return cmd.Run()
 }

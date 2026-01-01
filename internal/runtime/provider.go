@@ -26,6 +26,9 @@ type Provider interface {
 	// Available checks if the runtime is available and ready
 	Available(ctx context.Context) bool
 
+	// Build builds a container image from a Dockerfile
+	Build(ctx context.Context, opts BuildOptions) error
+
 	// Pull downloads a container image
 	Pull(ctx context.Context, image string, opts PullOptions) error
 
@@ -49,6 +52,19 @@ type Provider interface {
 
 	// Inspect returns detailed container information
 	Inspect(ctx context.Context, containerID string) (*ContainerInfo, error)
+
+	// RunInteractive runs a container with stdin/stdout attached (for MCP stdio)
+	RunInteractive(ctx context.Context, spec ContainerSpec) error
+}
+
+// BuildOptions configures image build behavior.
+type BuildOptions struct {
+	ContextDir     string            // Directory containing the build context
+	DockerfilePath string            // Path to Dockerfile (relative to ContextDir)
+	ImageName      string            // Name:tag for the built image
+	BuildArgs      map[string]string // Build-time variables
+	NoCache        bool              // Disable build cache
+	Progress       func(line string) // Progress callback
 }
 
 // PullOptions configures image pull behavior.
