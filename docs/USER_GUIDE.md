@@ -463,27 +463,57 @@ conduit install --document-tools
 
 ### Searching
 
+Conduit supports three search modes:
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| Hybrid (default) | none | Tries semantic first, falls back to keyword |
+| Semantic | `--semantic` | Vector-based search using AI embeddings |
+| Keyword | `--fts5` | Full-text keyword search using SQLite FTS5 |
+
 ```bash
-# Search indexed documents
+# Hybrid search (default) - best of both worlds
 ./bin/conduit kb search "how to configure authentication"
+
+# Semantic search - understands meaning, not just keywords
+./bin/conduit kb search "securing user login" --semantic
+
+# Keyword search - exact term matching
+./bin/conduit kb search "OAuth2 client" --fts5
 
 # Search with limit
 ./bin/conduit kb search "API endpoints" --limit 10
 ```
 
+**Semantic vs Keyword Search**:
+- **Semantic**: Finds documents based on meaning. "understanding text with computers" matches documents about "natural language processing" even without exact keyword matches.
+- **Keyword**: Fast, exact matching. Best for specific terms, function names, or code symbols.
+- **Hybrid**: Automatically uses semantic when available (Qdrant + Ollama running), falls back to keyword otherwise.
+
 **Search Output**:
 ```
-Results for "how to configure authentication" (3 hits):
+Results for "how to configure authentication" (3 hits) [semantic]
 
-1. [0.85] /docs/auth/setup.md
+• /docs/auth/setup.md [high]
    "...configure authentication using OAuth2. First, set up your client..."
 
-2. [0.72] /docs/security/overview.md
+• /docs/security/overview.md [medium]
    "...authentication mechanisms supported include JWT tokens and..."
 
-3. [0.68] /docs/api/auth-endpoints.md
+• /docs/api/auth-endpoints.md [medium]
    "...authentication endpoint accepts POST requests with..."
 ```
+
+### Migrating Existing Documents to Vector Search
+
+If you indexed documents before semantic search was enabled, migrate them:
+
+```bash
+# Migrate existing FTS documents to vector store
+./bin/conduit kb migrate
+```
+
+This generates embeddings for all existing documents. New documents are automatically indexed in both FTS5 and vector search.
 
 ### Viewing Statistics
 

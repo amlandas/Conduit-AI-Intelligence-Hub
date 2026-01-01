@@ -172,6 +172,10 @@ CREATED → AUDITING → INSTALLED → STARTING → RUNNING
 | Searcher | BM25 ranked search | Complete |
 | Source Manager | Directory/file source management | Complete |
 | MCP Server | KB exposed as MCP tool | Complete |
+| **Semantic Search** | Vector-based search with embeddings | Complete |
+| **Vector Store** | Qdrant integration for cosine similarity | Complete |
+| **Embedding Service** | Ollama nomic-embed-text (768-dim) | Complete |
+| **Hybrid Search** | Semantic + FTS5 with graceful fallback | Complete |
 
 **Supported Document Formats**:
 - Text: `.md`, `.txt`, `.rst`
@@ -193,6 +197,10 @@ CREATED → AUDITING → INSTALLED → STARTING → RUNNING
 - BM25 relevance ranking
 - Snippet extraction with highlighting
 - Source and document filtering
+- **Semantic search** with Qdrant vector database
+- **Hybrid search mode** (semantic + keyword fallback)
+- **Search mode flags**: `--semantic`, `--fts5`
+- **Migration command**: `conduit kb migrate` for existing documents
 
 ### 8. Data Store (`internal/store/`)
 
@@ -221,7 +229,7 @@ CREATED → AUDITING → INSTALLED → STARTING → RUNNING
 | Service | `service install`, `service start`, `service stop`, `service status`, `service remove` | Complete |
 | Instance | `install`, `list`, `start`, `stop`, `remove`, `logs` | Complete |
 | Client | `client list`, `client bind`, `client unbind`, `client bindings` | Complete |
-| Knowledge Base | `kb add`, `kb list`, `kb sync`, `kb search`, `kb stats`, `kb remove` | Complete |
+| Knowledge Base | `kb add`, `kb list`, `kb sync`, `kb search`, `kb stats`, `kb remove`, `kb migrate` | Complete |
 | MCP | `mcp stdio`, `mcp kb` | Complete |
 | System | `status`, `config`, `backup` | Complete |
 
@@ -319,6 +327,9 @@ conduit/
 │   │   ├── source.go
 │   │   ├── extractors.go     # Document format extractors
 │   │   ├── types.go          # Types and default patterns
+│   │   ├── embeddings.go     # Ollama embedding service
+│   │   ├── vectorstore.go    # Qdrant vector store
+│   │   ├── semantic_search.go # Hybrid search orchestration
 │   │   └── mcp.go
 │   ├── lifecycle/            # Instance lifecycle
 │   │   ├── manager.go
@@ -361,6 +372,8 @@ conduit/
 | `rs/zerolog` | v1.34.0 | Structured logging |
 | `spf13/cobra` | v1.10.2 | CLI framework |
 | `spf13/viper` | v1.21.0 | Configuration management |
+| `qdrant/go-client` | v1.14.0 | Qdrant vector database client |
+| `ollama/ollama` | v0.5.7 | Ollama API client for embeddings |
 
 ---
 

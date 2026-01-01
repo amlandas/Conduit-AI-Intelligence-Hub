@@ -160,11 +160,26 @@ strings $(which conduit-daemon) | grep -i fts5 | head -5
 
 ---
 
-## IMPLEMENTED: Vector Database + Semantic Search
+## IMPLEMENTED: Hybrid Search (Semantic + FTS5)
 
-**Status:** ✅ IMPLEMENTED (Commit 06093b7, January 1, 2026)
+**Status:** ✅ COMPLETE (Commits 06093b7, 37d7b42, January 1, 2026)
 
-**Decision:** Added Qdrant vector database alongside SQLite FTS5 for true semantic search capabilities.
+**Decision:** Implemented hybrid search with Qdrant vector database + SQLite FTS5 with graceful fallback.
+
+### Search Modes
+
+| Mode | Flag | Description |
+|------|------|-------------|
+| Hybrid (default) | none | Tries semantic first, falls back to FTS5 if unavailable |
+| Semantic | `--semantic` | Vector-based search only (requires Qdrant + Ollama) |
+| Keyword | `--fts5` | Full-text keyword search only (always available) |
+
+### Key Fixes Applied
+
+1. **SourceManager-Indexer Wiring** - SourceManager's internal indexer now receives SemanticSearcher
+2. **UUID Conversion for Qdrant** - Chunk IDs converted to UUID v5 format (Qdrant requires UUIDs)
+3. **Background Context for Migration** - Long-running operations use `context.Background()` to avoid HTTP timeouts
+4. **10-Minute Client Timeout** - Migration command uses extended timeout for large document sets
 
 ### Why This Change
 
@@ -249,9 +264,13 @@ strings $(which conduit-daemon) | grep -i fts5 | head -5
 | File | Status | Description |
 |------|--------|-------------|
 | `internal/kb/embeddings.go` | ✅ NEW | EmbeddingService for Ollama (768-dim vectors) |
-| `internal/kb/vectorstore.go` | ✅ NEW | VectorStore for Qdrant (cosine similarity) |
+| `internal/kb/vectorstore.go` | ✅ NEW | VectorStore for Qdrant (cosine similarity, UUID conversion) |
 | `internal/kb/semantic_search.go` | ✅ NEW | SemanticSearcher combining both |
 | `internal/kb/indexer.go` | ✅ MODIFIED | Added optional semantic indexing |
+| `internal/kb/source.go` | ✅ MODIFIED | Added `SetSemanticSearcher()` method |
+| `internal/daemon/daemon.go` | ✅ MODIFIED | Wire SemanticSearcher to SourceManager |
+| `internal/daemon/handlers.go` | ✅ MODIFIED | Added `handleKBMigrate` with background context |
+| `cmd/conduit/main.go` | ✅ MODIFIED | Added `kb migrate` command, `--semantic`/`--fts5` flags |
 | `scripts/install.sh` | ✅ MODIFIED | Added Qdrant and embedding model installation |
 | `go.mod` | ✅ MODIFIED | Added Qdrant and Ollama dependencies |
 
@@ -264,7 +283,13 @@ docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
 # Pull embedding model
 ollama pull nomic-embed-text
 
-# Semantic search is automatically enabled when both services are available
+# Search commands (semantic search automatically enabled when services available)
+conduit kb search "machine learning"           # Hybrid (default) - tries semantic, falls back to FTS5
+conduit kb search "NLP concepts" --semantic    # Force semantic only (requires Qdrant + Ollama)
+conduit kb search "deployment" --fts5          # Force keyword only (always available)
+
+# Migrate existing FTS documents to vector store
+conduit kb migrate                             # Adds embeddings to existing indexed documents
 ```
 
 ### Documents Updated

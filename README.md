@@ -200,9 +200,19 @@ conduit client unbind         # Unbind connector from client
 conduit kb add <path>         # Add document source
 conduit kb list               # List document sources
 conduit kb sync               # Sync all sources
-conduit kb search <query>     # Search indexed documents
+conduit kb search <query>     # Search documents (hybrid by default)
+conduit kb search <query> --semantic  # Force semantic search only
+conduit kb search <query> --fts5      # Force keyword search only
+conduit kb migrate            # Migrate existing docs to vector store
 conduit kb stats              # Show KB statistics
 ```
+
+**Search Modes:**
+- **Hybrid (default)**: Tries semantic search first, falls back to keyword search
+- **Semantic (`--semantic`)**: Vector-based search using embeddings (requires Qdrant + Ollama)
+- **Keyword (`--fts5`)**: Full-text keyword search using SQLite FTS5
+
+Semantic search understands meaning - "understanding text with computers" matches documents about "natural language processing" even without exact keyword matches.
 
 **Supported Document Formats:**
 - Text: `.md`, `.txt`, `.rst`
