@@ -17,6 +17,8 @@ The installer will:
 - Build and install Conduit
 - Set up the daemon as a background service
 - Pull the default AI model (qwen2.5-coder:7b)
+- Install Qdrant vector database (via Docker) for semantic search
+- Pull the embedding model (nomic-embed-text) for document vectorization
 - Verify the installation
 
 ### Installation Options
@@ -49,7 +51,10 @@ conduit status
 - **Policy Engine**: Permission evaluation, sensitive path protection, network controls
 - **Lifecycle Manager**: Connector instance state machine, health monitoring
 - **Client Adapters**: Claude Code, Cursor, VS Code, Gemini CLI injection
-- **Knowledge Base**: Document indexing with multi-format support, full-text search with FTS5, MCP server
+- **Knowledge Base**: Document indexing with multi-format support, MCP server
+  - **Semantic Search**: Find documents by meaning using Qdrant vector database + Ollama embeddings
+  - **Keyword Search**: Full-text search with SQLite FTS5 as fallback
+  - **RAG-Ready**: Perfect for AI client augmentation with ranked results + citations
 - **AI Integration**: Local AI with Ollama for intelligent code analysis
 - **CLI**: Complete command set for all operations
 
@@ -62,11 +67,20 @@ The installer handles these automatically, but for reference:
 - SQLite 3.35+ with FTS5 extension (included in Go build)
 - Podman 4.0+ (recommended) or Docker 20.10+ (for running connectors)
 - Ollama (for local AI features)
+- Qdrant (for semantic search - auto-installed via Docker)
 - Document extraction tools (for KB indexing):
   - pdftotext (poppler) - for PDF files
   - textutil (macOS) / antiword (Linux/Windows) - for DOC files
   - textutil (macOS) / unrtf (Linux) - for RTF files
   - DOCX and ODT are supported natively without external tools
+
+### Semantic Search Components
+
+For full semantic search capabilities:
+- **Qdrant**: Vector database running on localhost:6333 (auto-installed via Docker)
+- **nomic-embed-text**: Embedding model via Ollama (768 dimensions, auto-pulled)
+
+These are optional - Conduit falls back to keyword search (FTS5) if unavailable.
 
 ## Manual Installation
 
