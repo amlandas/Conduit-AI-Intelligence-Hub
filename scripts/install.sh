@@ -398,9 +398,43 @@ build_conduit() {
 
     local REPO_URL="https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git"
     local BUILD_DIR=$(mktemp -d)
+    local ORIGINAL_DIR=$(pwd)
+
+    # Check CGO prerequisites (required for SQLite FTS5)
+    info "Checking CGO prerequisites..."
+    if [[ "$OS" == "darwin" ]]; then
+        # macOS requires Xcode Command Line Tools for CGO
+        if ! xcode-select -p &>/dev/null; then
+            warn "Xcode Command Line Tools not found (required for CGO/FTS5)"
+            info "Installing Xcode Command Line Tools..."
+            xcode-select --install
+            echo ""
+            echo "Please complete the Xcode installation dialog, then run this script again."
+            exit 1
+        fi
+        success "Xcode Command Line Tools: installed"
+    else
+        # Linux requires gcc or clang
+        if ! command_exists gcc && ! command_exists clang; then
+            warn "C compiler not found (required for CGO/FTS5)"
+            info "Installing build essentials..."
+            case $DISTRO in
+                ubuntu|debian)
+                    sudo apt-get update && sudo apt-get install -y build-essential
+                    ;;
+                fedora|rhel|centos)
+                    sudo dnf groupinstall -y "Development Tools"
+                    ;;
+                arch)
+                    sudo pacman -S --noconfirm base-devel
+                    ;;
+            esac
+        fi
+        success "C compiler: available"
+    fi
 
     # Check if we're already in the conduit repo
-    if [[ -f "go.mod" ]] && grep -q "module conduit" go.mod 2>/dev/null; then
+    if [[ -f "go.mod" ]] && grep -q "simpleflo/conduit" go.mod 2>/dev/null; then
         info "Building from current directory..."
         BUILD_DIR="."
     else
@@ -409,24 +443,43 @@ build_conduit() {
         cd "$BUILD_DIR"
     fi
 
-    info "Building Conduit binaries..."
+    # Create install directory
+    mkdir -p "$INSTALL_DIR"
 
-    # Build with FTS5 support
-    CGO_ENABLED=1 go build -tags "fts5" -trimpath \
-        -ldflags "-X main.Version=$(git describe --tags --always 2>/dev/null || echo dev)" \
-        -o "$INSTALL_DIR/conduit" ./cmd/conduit
+    info "Building Conduit binaries with FTS5 support..."
+    info "  CGO_ENABLED=1 go build -tags \"fts5\" ..."
 
-    CGO_ENABLED=1 go build -tags "fts5" -trimpath \
+    # Build with FTS5 support - CLI
+    if ! CGO_ENABLED=1 go build -tags "fts5" -trimpath \
         -ldflags "-X main.Version=$(git describe --tags --always 2>/dev/null || echo dev)" \
-        -o "$INSTALL_DIR/conduit-daemon" ./cmd/conduit-daemon
+        -o "$INSTALL_DIR/conduit" ./cmd/conduit; then
+        error "Failed to build conduit CLI"
+        error "CGO may not be working. Check that you have a C compiler installed."
+        exit 1
+    fi
+
+    # Build with FTS5 support - Daemon
+    if ! CGO_ENABLED=1 go build -tags "fts5" -trimpath \
+        -ldflags "-X main.Version=$(git describe --tags --always 2>/dev/null || echo dev)" \
+        -o "$INSTALL_DIR/conduit-daemon" ./cmd/conduit-daemon; then
+        error "Failed to build conduit-daemon"
+        error "CGO may not be working. Check that you have a C compiler installed."
+        exit 1
+    fi
+
+    # Verify FTS5 is actually compiled in
+    info "Verifying FTS5 support..."
+    if "$INSTALL_DIR/conduit-daemon" --version &>/dev/null; then
+        success "Binary verification: OK"
+    fi
 
     # Cleanup if we cloned
     if [[ "$BUILD_DIR" != "." ]]; then
-        cd -
+        cd "$ORIGINAL_DIR"
         rm -rf "$BUILD_DIR"
     fi
 
-    success "Built conduit and conduit-daemon"
+    success "Built conduit and conduit-daemon with FTS5 support"
 }
 
 # Install binaries to PATH
