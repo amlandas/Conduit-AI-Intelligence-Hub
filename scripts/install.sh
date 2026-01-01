@@ -568,6 +568,14 @@ install_dependencies() {
 
     # Install document extraction tools
     install_document_tools
+
+    # Install Qdrant vector database for semantic search
+    install_qdrant
+
+    # Install embedding model for semantic search
+    if [[ "$AI_PROVIDER" == "ollama" ]]; then
+        install_embedding_model
+    fi
 }
 
 # Install container runtime (Docker or Podman)
@@ -837,6 +845,113 @@ install_ollama() {
         success "Model downloaded"
     else
         warn "Skipped model download. Download later with: ollama pull qwen2.5-coder:7b"
+    fi
+}
+
+# Install Qdrant vector database
+install_qdrant() {
+    echo ""
+    echo "Step 5c: Vector Database (Qdrant)"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Conduit uses Qdrant for semantic search capabilities."
+    echo "This enables finding documents by meaning, not just keywords."
+    echo ""
+
+    # Check if Qdrant is already running
+    if curl -s http://localhost:6333/collections >/dev/null 2>&1; then
+        success "Qdrant is already running on port 6333"
+        return 0
+    fi
+
+    # Check if Docker/Podman is available
+    local CONTAINER_CMD=""
+    if command_exists docker && docker info >/dev/null 2>&1; then
+        CONTAINER_CMD="docker"
+    elif command_exists podman && podman info >/dev/null 2>&1; then
+        CONTAINER_CMD="podman"
+    fi
+
+    if [[ -z "$CONTAINER_CMD" ]]; then
+        warn "No container runtime available. Skipping Qdrant installation."
+        echo "You can install Qdrant manually later:"
+        echo "  docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant"
+        echo ""
+        echo "Or download from: https://qdrant.tech/documentation/quick-start/"
+        return 1
+    fi
+
+    if ! confirm "Install Qdrant vector database via $CONTAINER_CMD?"; then
+        warn "Skipping Qdrant installation. Semantic search will not be available."
+        return 0
+    fi
+
+    info "Starting Qdrant container..."
+
+    # Create data directory for persistence
+    mkdir -p "${CONDUIT_HOME}/qdrant"
+
+    # Run Qdrant container
+    $CONTAINER_CMD run -d \
+        --name conduit-qdrant \
+        --restart unless-stopped \
+        -p 6333:6333 \
+        -p 6334:6334 \
+        -v "${CONDUIT_HOME}/qdrant:/qdrant/storage" \
+        qdrant/qdrant:latest
+
+    # Wait for Qdrant to be ready
+    local RETRIES=30
+    while [[ $RETRIES -gt 0 ]]; do
+        if curl -s http://localhost:6333/collections >/dev/null 2>&1; then
+            success "Qdrant is running"
+            return 0
+        fi
+        sleep 1
+        RETRIES=$((RETRIES - 1))
+    done
+
+    warn "Qdrant may not have started correctly. Check with: $CONTAINER_CMD logs conduit-qdrant"
+    return 1
+}
+
+# Install embedding model for semantic search
+install_embedding_model() {
+    echo ""
+    echo "Step 5d: Embedding Model"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Semantic search requires an embedding model to convert text to vectors."
+    echo "Conduit uses nomic-embed-text (768 dimensions, ~275MB)."
+    echo ""
+
+    # Check if Ollama is running
+    if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+        warn "Ollama is not running. Skipping embedding model installation."
+        echo "Start Ollama and run: ollama pull nomic-embed-text"
+        return 1
+    fi
+
+    # Check if model is already installed
+    if ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+        success "Embedding model (nomic-embed-text) already installed"
+        return 0
+    fi
+
+    if ! confirm "Download embedding model (nomic-embed-text, ~275MB)?"; then
+        warn "Skipping embedding model. Semantic search will not be available."
+        echo "Download later with: ollama pull nomic-embed-text"
+        return 0
+    fi
+
+    info "Downloading embedding model..."
+    ollama pull nomic-embed-text
+
+    if ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+        success "Embedding model installed"
+    else
+        warn "Embedding model installation may have failed"
+        echo "Try manually: ollama pull nomic-embed-text"
     fi
 }
 
@@ -1326,6 +1441,28 @@ verify_installation() {
         fi
     else
         info "AI provider: not configured (will use defaults)"
+    fi
+
+    # Check Qdrant vector database
+    echo ""
+    echo "Semantic Search Components:"
+    if curl -s http://localhost:6333/collections >/dev/null 2>&1; then
+        success "  Qdrant: running on port 6333"
+    else
+        warn "  Qdrant: not running"
+        info "  Start with: docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant"
+    fi
+
+    # Check embedding model
+    if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+        if ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+            success "  Embedding model: nomic-embed-text installed"
+        else
+            warn "  Embedding model: not installed"
+            info "  Pull with: ollama pull nomic-embed-text"
+        fi
+    else
+        warn "  Embedding model: Ollama not running (cannot check)"
     fi
 
     # Check document tools

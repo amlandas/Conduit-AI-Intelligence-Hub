@@ -13,10 +13,11 @@ import (
 	"github.com/simpleflo/conduit/internal/observability"
 )
 
-// Indexer manages document indexing in SQLite with FTS5.
+// Indexer manages document indexing in SQLite with FTS5 and optional vector search.
 type Indexer struct {
-	db     *sql.DB
-	logger zerolog.Logger
+	db       *sql.DB
+	semantic *SemanticSearcher
+	logger   zerolog.Logger
 }
 
 // NewIndexer creates a new indexer.
@@ -27,7 +28,20 @@ func NewIndexer(db *sql.DB) *Indexer {
 	}
 }
 
+// SetSemanticSearcher enables vector-based semantic search.
+// When set, documents will be indexed into both FTS5 and the vector store.
+func (idx *Indexer) SetSemanticSearcher(semantic *SemanticSearcher) {
+	idx.semantic = semantic
+	idx.logger.Info().Msg("semantic search enabled for indexer")
+}
+
+// HasSemanticSearch returns whether semantic search is enabled.
+func (idx *Indexer) HasSemanticSearch() bool {
+	return idx.semantic != nil
+}
+
 // Index indexes a document and its chunks.
+// If semantic search is enabled, it also generates and stores vector embeddings.
 func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) error {
 	tx, err := idx.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -54,10 +68,18 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 		return fmt.Errorf("insert document: %w", err)
 	}
 
+	// Create a copy of chunks with unique IDs for vector indexing
+	chunksWithIDs := make([]Chunk, len(chunks))
+
 	// Insert chunks with unique IDs that include document context
 	for i, chunk := range chunks {
 		// Generate unique chunk ID that includes document ID to avoid collisions
 		uniqueChunkID := idx.generateUniqueChunkID(doc.DocumentID, chunk.Content, i)
+
+		// Store chunk with ID for vector indexing
+		chunksWithIDs[i] = chunk
+		chunksWithIDs[i].ChunkID = uniqueChunkID
+
 		chunkMetaJSON, _ := json.Marshal(chunk.Metadata)
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO kb_chunks
@@ -95,16 +117,34 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 		return fmt.Errorf("commit: %w", err)
 	}
 
+	// Index vectors if semantic search is enabled
+	if idx.semantic != nil {
+		if err := idx.semantic.IndexDocument(ctx, doc, chunksWithIDs); err != nil {
+			// Log warning but don't fail - FTS indexing succeeded
+			idx.logger.Warn().
+				Err(err).
+				Str("document_id", doc.DocumentID).
+				Msg("vector indexing failed, falling back to FTS only")
+		} else {
+			idx.logger.Debug().
+				Str("document_id", doc.DocumentID).
+				Int("vectors", len(chunksWithIDs)).
+				Msg("indexed document vectors")
+		}
+	}
+
 	idx.logger.Debug().
 		Str("document_id", doc.DocumentID).
 		Str("path", doc.Path).
 		Int("chunks", len(chunks)).
+		Bool("semantic", idx.semantic != nil).
 		Msg("indexed document")
 
 	return nil
 }
 
 // Delete removes a document and its chunks from the index.
+// If semantic search is enabled, it also removes vector embeddings.
 func (idx *Indexer) Delete(ctx context.Context, documentID string) error {
 	tx, err := idx.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -116,7 +156,21 @@ func (idx *Indexer) Delete(ctx context.Context, documentID string) error {
 		return err
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	// Delete vectors if semantic search is enabled
+	if idx.semantic != nil {
+		if err := idx.semantic.DeleteDocument(ctx, documentID); err != nil {
+			idx.logger.Warn().
+				Err(err).
+				Str("document_id", documentID).
+				Msg("failed to delete document vectors")
+		}
+	}
+
+	return nil
 }
 
 // deleteInTx deletes a document within a transaction.
