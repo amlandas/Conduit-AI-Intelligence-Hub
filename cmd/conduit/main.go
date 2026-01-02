@@ -1660,18 +1660,24 @@ func kbSearchCmd() *cobra.Command {
 		Short: "Search the knowledge base",
 		Long: `Search the knowledge base using hybrid, semantic, or keyword search.
 
-By default, hybrid search is used which tries semantic search first
-(if Qdrant and Ollama are available) and falls back to FTS5 keyword search.
+By default, hybrid search uses RRF (Reciprocal Rank Fusion) to combine
+results from both semantic (vector) and lexical (FTS5) search. This gives
+the best of both worlds: semantic understanding AND exact phrase matching.
+
+The hybrid mode automatically detects:
+- Quoted phrases → prioritizes lexical exact matching
+- Proper nouns (e.g., "Oak Ridge") → boosts exact matches
+- Natural language → balances semantic and lexical
 
 Results are processed by default (merged chunks, filtered boilerplate).
 Use --raw to get unprocessed results.
 
 Examples:
-  conduit kb search "how does authentication work"    # Hybrid (default, processed)
+  conduit kb search "how does authentication work"    # Hybrid RRF (default)
+  conduit kb search "Oak Ridge laboratories"          # Auto-detects proper noun
   conduit kb search "authentication" --semantic       # Force semantic only
   conduit kb search "class AuthProvider" --fts5       # Force keyword only
-  conduit kb search "query" --raw                     # Raw chunks without processing
-  conduit kb search "query" --context 2               # Include 2 adjacent chunks`,
+  conduit kb search "query" --raw                     # Raw chunks without processing`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
@@ -1718,8 +1724,12 @@ Examples:
 			switch searchMode {
 			case "semantic":
 				modeLabel = " [semantic]"
-			case "fts5":
+			case "fts5", "lexical":
 				modeLabel = " [keyword]"
+			case "fusion":
+				modeLabel = " [hybrid RRF]"
+			case "auto":
+				modeLabel = " [hybrid]"
 			}
 
 			// Check if results are processed (merged)

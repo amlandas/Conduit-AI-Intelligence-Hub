@@ -38,6 +38,7 @@ type Daemon struct {
 	kbSearcher   *kb.Searcher
 	kbIndexer    *kb.Indexer
 	kbSemantic   *kb.SemanticSearcher // Optional: nil if Qdrant/Ollama unavailable
+	kbHybrid     *kb.HybridSearcher   // Combines FTS5 and semantic search
 
 	// State
 	mu        sync.RWMutex
@@ -102,6 +103,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 		logger.Info().Msg("semantic search enabled")
 	}
 
+	// Create hybrid searcher (always available - falls back to FTS5 if semantic unavailable)
+	kbHybrid := kb.NewHybridSearcher(kbSearcher, kbSemantic)
+
 	d := &Daemon{
 		cfg:        cfg,
 		store:      st,
@@ -111,6 +115,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		kbSearcher: kbSearcher,
 		kbIndexer:  kbIndexer,
 		kbSemantic: kbSemantic,
+		kbHybrid:   kbHybrid,
 		shutdownCh: make(chan struct{}),
 	}
 

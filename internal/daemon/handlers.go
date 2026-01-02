@@ -550,42 +550,80 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 	case "hybrid":
 		fallthrough
 	default:
-		// Hybrid: try semantic first, fallback to FTS5
-		if d.kbSemantic != nil {
-			result, err := d.kbSemantic.Search(ctx, query, d.kbSemanticOpts(r))
-			if err == nil && len(result.Results) > 0 {
-				if rawResults {
-					writeJSON(w, http.StatusOK, d.convertSemanticResult(result, "semantic"))
-				} else {
-					writeJSON(w, http.StatusOK, d.processSemanticResult(result, "semantic"))
-				}
-				return
-			}
-			if err != nil {
-				d.logger.Debug().Err(err).Msg("semantic search failed, falling back to FTS5")
-			}
-		}
-
-		// Fallback to FTS5
-		result, err := d.kbSearcher.Search(ctx, query, d.kbSearchOpts(r))
+		// True hybrid search using RRF (Reciprocal Rank Fusion)
+		hybridOpts := d.kbHybridOpts(r)
+		result, err := d.kbHybrid.Search(ctx, query, hybridOpts)
 		if err != nil {
-			d.logger.Error().Err(err).Msg("fts5 search failed")
-			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "search failed")
+			d.logger.Error().Err(err).Msg("hybrid search failed")
+			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "hybrid search failed")
 			return
 		}
+
 		if rawResults {
 			resp := map[string]interface{}{
-				"results":     result.Results,
-				"total_hits":  result.TotalHits,
-				"query":       result.Query,
-				"search_time": result.SearchTime,
-				"search_mode": "fts5",
-				"processed":   false,
+				"results":        result.Results,
+				"total_hits":     result.TotalHits,
+				"query":          result.Query,
+				"search_time":    result.SearchTime,
+				"search_mode":    string(result.Mode),
+				"fts_hits":       result.FTSHits,
+				"semantic_hits":  result.SemanticHits,
+				"query_analysis": result.QueryAnalysis,
+				"processed":      false,
 			}
 			writeJSON(w, http.StatusOK, resp)
 		} else {
-			writeJSON(w, http.StatusOK, d.processFTS5Result(result, "fts5"))
+			writeJSON(w, http.StatusOK, d.processHybridResult(result))
 		}
+	}
+}
+
+// kbHybridOpts parses hybrid search options from request.
+func (d *Daemon) kbHybridOpts(r *http.Request) kb.HybridSearchOptions {
+	opts := kb.HybridSearchOptions{
+		Limit:          10,
+		Mode:           kb.HybridModeAuto,
+		SemanticWeight: 0.5,
+		RRFConstant:    60,
+	}
+
+	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
+		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
+			opts.Limit = limit
+		}
+	}
+
+	if modeStr := r.URL.Query().Get("hybrid_mode"); modeStr != "" {
+		switch modeStr {
+		case "fusion":
+			opts.Mode = kb.HybridModeFusion
+		case "semantic":
+			opts.Mode = kb.HybridModeSemantic
+		case "lexical":
+			opts.Mode = kb.HybridModeLexical
+		default:
+			opts.Mode = kb.HybridModeAuto
+		}
+	}
+
+	return opts
+}
+
+// processHybridResult processes hybrid search results for cleaner output.
+func (d *Daemon) processHybridResult(result *kb.HybridSearchResult) map[string]interface{} {
+	processor := kb.NewResultProcessor()
+	processed := processor.ProcessResults(result.Results)
+
+	return map[string]interface{}{
+		"results":        processed,
+		"total_hits":     result.TotalHits,
+		"query":          result.Query,
+		"search_time":    result.SearchTime,
+		"search_mode":    string(result.Mode),
+		"fts_hits":       result.FTSHits,
+		"semantic_hits":  result.SemanticHits,
+		"query_analysis": result.QueryAnalysis,
+		"processed":      true,
 	}
 }
 

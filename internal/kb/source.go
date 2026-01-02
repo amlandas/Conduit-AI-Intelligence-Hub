@@ -24,6 +24,7 @@ type SourceManager struct {
 	db         *sql.DB
 	indexer    *Indexer
 	chunker    *Chunker
+	cleaner    *ContentCleaner
 	extractors *ExtractorRegistry
 	logger     zerolog.Logger
 }
@@ -34,6 +35,7 @@ func NewSourceManager(db *sql.DB) *SourceManager {
 		db:         db,
 		indexer:    NewIndexer(db),
 		chunker:    NewChunker(),
+		cleaner:    NewContentCleaner(),
 		extractors: NewExtractorRegistry(),
 		logger:     observability.Logger("kb.source"),
 	}
@@ -336,7 +338,27 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 		}
 		sm.logger.Info().Str("path", path).Int("content_len", len(content)).Msg("file read successfully")
 
-		// Calculate hash
+		// Clean content BEFORE chunking and embedding
+		// This removes boilerplate, fixes OCR errors, and normalizes text
+		contentType := DetectContentType(path)
+		originalLen := len(content)
+		content = sm.cleaner.Clean(content, contentType)
+
+		// For PDFs, also detect and remove repeated headers/footers
+		if contentType == ContentTypePDF {
+			content = sm.cleaner.DetectRepeatedHeaders(content)
+		}
+
+		if len(content) != originalLen {
+			sm.logger.Debug().
+				Str("path", path).
+				Int("original_len", originalLen).
+				Int("cleaned_len", len(content)).
+				Msg("content cleaned")
+		}
+
+		// Calculate hash of CLEANED content
+		// This ensures boilerplate changes don't trigger re-indexing
 		hash := sm.hashContent(content)
 
 		// Check if document needs update
