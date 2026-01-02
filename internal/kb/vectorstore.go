@@ -128,6 +128,19 @@ func NewVectorStore(cfg VectorStoreConfig) (*VectorStore, error) {
 		logger:         observability.Logger("kb.vectorstore"),
 	}
 
+	// Verify connection works before returning
+	// This catches gRPC connection failures early rather than during sync
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if _, err := client.ListCollections(ctx); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("failed to connect to Qdrant gRPC (port %d): %w", cfg.Port, err)
+	}
+	store.logger.Info().
+		Str("host", cfg.Host).
+		Int("port", cfg.Port).
+		Msg("connected to Qdrant gRPC")
+
 	return store, nil
 }
 
