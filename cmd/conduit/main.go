@@ -98,6 +98,16 @@ func (c *client) delete(path string) error {
 	return nil
 }
 
+func (c *client) deleteWithResponse(path string) ([]byte, error) {
+	req, _ := http.NewRequest(http.MethodDelete, c.baseURL+path, nil)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	return io.ReadAll(resp.Body)
+}
+
 var socketPath string
 
 func main() {
@@ -1694,12 +1704,23 @@ Examples:
 				}
 			}
 
-			// Delete the source
-			if err := c.delete("/api/v1/kb/sources/" + sourceID); err != nil {
+			// Delete the source and get deletion statistics
+			respBytes, err := c.deleteWithResponse("/api/v1/kb/sources/" + sourceID)
+			if err != nil {
 				return fmt.Errorf("remove source: %w", err)
 			}
 
-			fmt.Printf("✓ Removed source: %s (%d documents)\n", sourceName, docCount)
+			// Parse the response to get deletion statistics
+			var deleteResult struct {
+				DocumentsDeleted int `json:"documents_deleted"`
+				VectorsDeleted   int `json:"vectors_deleted"`
+			}
+			if json.Unmarshal(respBytes, &deleteResult) == nil && deleteResult.VectorsDeleted > 0 {
+				fmt.Printf("✓ Removed source: %s (%d documents, %d vectors)\n",
+					sourceName, deleteResult.DocumentsDeleted, deleteResult.VectorsDeleted)
+			} else {
+				fmt.Printf("✓ Removed source: %s (%d documents)\n", sourceName, docCount)
+			}
 			return nil
 		},
 	}

@@ -123,16 +123,45 @@ func (sm *SourceManager) Add(ctx context.Context, req AddSourceRequest) (*Source
 	return source, nil
 }
 
-// Remove removes a source and its indexed documents.
-func (sm *SourceManager) Remove(ctx context.Context, sourceID string) error {
+// RemoveResult contains information about a source removal operation.
+type RemoveResult struct {
+	DocumentsDeleted int // Number of documents deleted from SQLite
+	VectorsDeleted   int // Number of vectors deleted from Qdrant
+}
+
+// Remove removes a source and its indexed documents, including vectors.
+func (sm *SourceManager) Remove(ctx context.Context, sourceID string) (*RemoveResult, error) {
+	result := &RemoveResult{}
+
+	// Count documents before deletion for reporting
+	var docCount int
+	if err := sm.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM kb_documents WHERE source_id = ?`, sourceID,
+	).Scan(&docCount); err == nil {
+		result.DocumentsDeleted = docCount
+	}
+
+	// Delete vectors from Qdrant FIRST (while we still have source_id reference)
+	// This is done before SQLite deletion so the source_id filter still works
+	vectorsDeleted, err := sm.indexer.DeleteBySource(ctx, sourceID)
+	if err != nil {
+		// Log warning but continue - SQLite deletion should still proceed
+		sm.logger.Warn().
+			Err(err).
+			Str("source_id", sourceID).
+			Msg("failed to delete vectors, continuing with SQLite cleanup")
+	} else {
+		result.VectorsDeleted = vectorsDeleted
+	}
+
 	// Delete from FTS first (due to foreign key constraints)
-	_, err := sm.db.ExecContext(ctx, `
+	_, err = sm.db.ExecContext(ctx, `
 		DELETE FROM kb_fts WHERE document_id IN (
 			SELECT document_id FROM kb_documents WHERE source_id = ?
 		)
 	`, sourceID)
 	if err != nil {
-		return fmt.Errorf("delete fts: %w", err)
+		return nil, fmt.Errorf("delete fts: %w", err)
 	}
 
 	// Delete chunks
@@ -142,7 +171,7 @@ func (sm *SourceManager) Remove(ctx context.Context, sourceID string) error {
 		)
 	`, sourceID)
 	if err != nil {
-		return fmt.Errorf("delete chunks: %w", err)
+		return nil, fmt.Errorf("delete chunks: %w", err)
 	}
 
 	// Delete documents
@@ -150,25 +179,27 @@ func (sm *SourceManager) Remove(ctx context.Context, sourceID string) error {
 		DELETE FROM kb_documents WHERE source_id = ?
 	`, sourceID)
 	if err != nil {
-		return fmt.Errorf("delete documents: %w", err)
+		return nil, fmt.Errorf("delete documents: %w", err)
 	}
 
 	// Delete source
-	result, err := sm.db.ExecContext(ctx, `DELETE FROM kb_sources WHERE source_id = ?`, sourceID)
+	deleteResult, err := sm.db.ExecContext(ctx, `DELETE FROM kb_sources WHERE source_id = ?`, sourceID)
 	if err != nil {
-		return fmt.Errorf("delete source: %w", err)
+		return nil, fmt.Errorf("delete source: %w", err)
 	}
 
-	rows, _ := result.RowsAffected()
+	rows, _ := deleteResult.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("source not found: %s", sourceID)
+		return nil, fmt.Errorf("source not found: %s", sourceID)
 	}
 
 	sm.logger.Info().
 		Str("source_id", sourceID).
+		Int("documents", result.DocumentsDeleted).
+		Int("vectors", result.VectorsDeleted).
 		Msg("removed source")
 
-	return nil
+	return result, nil
 }
 
 // List returns all sources.

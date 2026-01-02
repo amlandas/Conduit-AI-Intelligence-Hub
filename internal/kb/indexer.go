@@ -186,6 +186,32 @@ func (idx *Indexer) Delete(ctx context.Context, documentID string) error {
 	return nil
 }
 
+// DeleteBySource removes all vectors for a source (KB) from the vector store.
+// This is called when removing a KB to clean up all associated vectors.
+// Returns the number of vectors deleted, or 0 if semantic search is not enabled.
+func (idx *Indexer) DeleteBySource(ctx context.Context, sourceID string) (int, error) {
+	if idx.semantic == nil {
+		// Semantic search not enabled, no vectors to delete
+		return 0, nil
+	}
+
+	deleted, err := idx.semantic.DeleteBySource(ctx, sourceID)
+	if err != nil {
+		idx.logger.Warn().
+			Err(err).
+			Str("source_id", sourceID).
+			Msg("failed to delete source vectors")
+		return 0, err
+	}
+
+	idx.logger.Info().
+		Str("source_id", sourceID).
+		Int("deleted", deleted).
+		Msg("deleted source vectors")
+
+	return deleted, nil
+}
+
 // deleteInTx deletes a document within a transaction.
 func (idx *Indexer) deleteInTx(ctx context.Context, tx *sql.Tx, documentID string) error {
 	// Delete from FTS first

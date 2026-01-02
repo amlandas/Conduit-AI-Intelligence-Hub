@@ -335,6 +335,52 @@ func (vs *VectorStore) DeleteByDocument(ctx context.Context, documentID string) 
 	return nil
 }
 
+// DeleteBySource removes all points for a source (all documents in a KB).
+// This is used when removing a KB to clean up all associated vectors.
+func (vs *VectorStore) DeleteBySource(ctx context.Context, sourceID string) (int, error) {
+	// First, count how many points will be deleted for reporting
+	countResult, err := vs.client.Count(ctx, &qdrant.CountPoints{
+		CollectionName: vs.collectionName,
+		Filter: &qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewMatch("source_id", sourceID),
+			},
+		},
+		Exact: qdrant.PtrOf(true),
+	})
+
+	deletedCount := 0
+	if err != nil {
+		// Log warning but continue with deletion
+		vs.logger.Warn().Err(err).Str("source_id", sourceID).Msg("failed to count source points")
+	} else {
+		deletedCount = int(countResult)
+	}
+
+	// Delete all points matching the source_id
+	_, err = vs.client.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: vs.collectionName,
+		Points: &qdrant.PointsSelector{
+			PointsSelectorOneOf: &qdrant.PointsSelector_Filter{
+				Filter: &qdrant.Filter{
+					Must: []*qdrant.Condition{
+						qdrant.NewMatch("source_id", sourceID),
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete source points: %w", err)
+	}
+
+	vs.logger.Info().
+		Str("source_id", sourceID).
+		Int("deleted", deletedCount).
+		Msg("deleted source vectors")
+	return deletedCount, nil
+}
+
 // Search performs a similarity search.
 func (vs *VectorStore) Search(ctx context.Context, queryVector []float32, opts VectorSearchOptions) ([]VectorSearchResult, error) {
 	if err := vs.EnsureCollection(ctx); err != nil {

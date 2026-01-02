@@ -535,13 +535,24 @@ func (d *Daemon) handleGetKBSource(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDeleteKBSource(w http.ResponseWriter, r *http.Request) {
 	sourceID := chi.URLParam(r, "sourceID")
 
-	if err := d.kbSource.Remove(r.Context(), sourceID); err != nil {
+	result, err := d.kbSource.Remove(r.Context(), sourceID)
+	if err != nil {
 		d.logger.Error().Err(err).Msg("failed to remove KB source")
 		writeError(w, http.StatusNotFound, "E_NOT_FOUND", err.Error())
 		return
 	}
 
-	w.WriteHeader(http.StatusNoContent)
+	d.logger.Info().
+		Str("source_id", sourceID).
+		Int("documents", result.DocumentsDeleted).
+		Int("vectors", result.VectorsDeleted).
+		Msg("removed KB source")
+
+	// Return the removal statistics for transparency
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"documents_deleted": result.DocumentsDeleted,
+		"vectors_deleted":   result.VectorsDeleted,
+	})
 }
 
 // handleSyncKBSource triggers a sync for a KB source.

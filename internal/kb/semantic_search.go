@@ -280,6 +280,20 @@ func (ss *SemanticSearcher) DeleteDocument(ctx context.Context, documentID strin
 	return ss.vectorStore.DeleteByDocument(ctx, documentID)
 }
 
+// DeleteBySource removes all vectors for a source (all documents in a KB).
+// Returns the number of vectors deleted.
+func (ss *SemanticSearcher) DeleteBySource(ctx context.Context, sourceID string) (int, error) {
+	deleted, err := ss.vectorStore.DeleteBySource(ctx, sourceID)
+	if err != nil {
+		return 0, err
+	}
+	ss.logger.Info().
+		Str("source_id", sourceID).
+		Int("deleted", deleted).
+		Msg("deleted source vectors")
+	return deleted, nil
+}
+
 // getDocumentMimeType retrieves a document's MIME type from SQLite.
 func (ss *SemanticSearcher) getDocumentMimeType(ctx context.Context, documentID string) (string, error) {
 	var mimeType string
