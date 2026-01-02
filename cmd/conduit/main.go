@@ -1692,14 +1692,25 @@ Examples:
 					json.Unmarshal(syncData, &result)
 
 					if errData, ok := result["error"]; ok {
-						errMap := errData.(map[string]interface{})
-						fmt.Printf("ERROR: %s\n", errMap["message"])
+						if errMap, ok := errData.(map[string]interface{}); ok {
+							fmt.Printf("ERROR: %s\n", errMap["message"])
+						} else {
+							fmt.Printf("ERROR: %v\n", errData)
+						}
 						continue
 					}
 
-					added := int(result["added"].(float64))
-					updated := int(result["updated"].(float64))
-					deleted := int(result["deleted"].(float64))
+					// Safely extract numeric fields with nil checks
+					var added, updated, deleted int
+					if v, ok := result["added"].(float64); ok {
+						added = int(v)
+					}
+					if v, ok := result["updated"].(float64); ok {
+						updated = int(v)
+					}
+					if v, ok := result["deleted"].(float64); ok {
+						deleted = int(v)
+					}
 
 					totalAdded += added
 					totalUpdated += updated
