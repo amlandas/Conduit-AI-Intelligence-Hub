@@ -168,14 +168,18 @@ CREATED → AUDITING → INSTALLED → STARTING → RUNNING
 |-----------|-------------|--------|
 | Document Indexer | Full-text indexing with FTS5 | Complete |
 | Document Extractors | Multi-format text extraction (PDF, DOC, DOCX, ODT, RTF) | Complete |
-| Chunker | Configurable text chunking | Complete |
+| Chunker | Smart content-aware chunking | Complete |
 | Searcher | BM25 ranked search | Complete |
 | Source Manager | Directory/file source management | Complete |
 | MCP Server | KB exposed as MCP tool | Complete |
 | **Semantic Search** | Vector-based search with embeddings | Complete |
 | **Vector Store** | Qdrant integration for cosine similarity | Complete |
 | **Embedding Service** | Ollama nomic-embed-text (768-dim) | Complete |
-| **Hybrid Search** | Semantic + FTS5 with graceful fallback | Complete |
+| **Hybrid Search** | RRF fusion of semantic + FTS5 | Complete |
+| **Content Cleaner** | Pre-indexing boilerplate/OCR cleanup | Complete |
+| **MMR Diversity** | Maximal Marginal Relevance (λ=0.7) | Complete |
+| **Entity Boosting** | Proper noun detection and boosting | Complete |
+| **Reranking** | Semantic re-scoring of top results | Complete |
 
 **Supported Document Formats**:
 - Text: `.md`, `.txt`, `.rst`
@@ -198,9 +202,14 @@ CREATED → AUDITING → INSTALLED → STARTING → RUNNING
 - Snippet extraction with highlighting
 - Source and document filtering
 - **Semantic search** with Qdrant vector database
-- **Hybrid search mode** (semantic + keyword fallback)
-- **Search mode flags**: `--semantic`, `--fts5`
+- **Hybrid RRF search** (reciprocal rank fusion of semantic + lexical)
+- **Query-adaptive mode selection** (auto-detects query type)
+- **MMR diversity** (reduces redundant results, λ=0.7)
+- **Entity boosting** (proper noun detection and ranking boost)
+- **Semantic reranking** (re-scores top candidates)
+- **Search mode flags**: `--semantic`, `--fts5`, `--hybrid` (default: auto)
 - **Migration command**: `conduit kb migrate` for existing documents
+- **See**: `docs/KB_SEARCH_HLD.md` for detailed architecture
 
 ### 8. Data Store (`internal/store/`)
 
@@ -329,7 +338,10 @@ conduit/
 │   │   ├── types.go          # Types and default patterns
 │   │   ├── embeddings.go     # Ollama embedding service
 │   │   ├── vectorstore.go    # Qdrant vector store
-│   │   ├── semantic_search.go # Hybrid search orchestration
+│   │   ├── semantic_search.go # Semantic search with Qdrant
+│   │   ├── hybrid_search.go  # Hybrid RRF fusion + MMR + reranking
+│   │   ├── content_cleaner.go # Pre-indexing content cleanup
+│   │   ├── retrieval_test_suite.go # Quality validation tests
 │   │   └── mcp.go
 │   ├── lifecycle/            # Instance lifecycle
 │   │   ├── manager.go

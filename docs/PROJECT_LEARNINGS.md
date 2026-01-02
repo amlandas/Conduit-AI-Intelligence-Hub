@@ -432,6 +432,106 @@ This reinforces Option C:
 
 ---
 
+### Phase 12: Query-Adaptive Confidence Model
+**Date**: January 2026
+
+#### Context
+Testing revealed that a hard similarity floor (0.01) was filtering out valid exact-match results. The query "Google is not a conventional company" returned zero results despite the text being correctly indexed. Root cause: RRF scores for single-strategy matches (~0.008) fell below the floor.
+
+More importantly, the initial design assumed lexical match = high confidence, but for AI consumption, **semantic relevance often matters more than lexical precision**.
+
+#### Key Insight: Fixed Confidence Rankings Are Wrong
+
+| Query Type | What User Wants | Best Strategy |
+|------------|-----------------|---------------|
+| Exact quote: `"Google is not conventional"` | Literal text | Exact match |
+| Conceptual: `how does authentication work` | Relevant info | **Semantic** |
+| Entity: `Oak Ridge laboratories` | Entity info | Hybrid |
+
+For conceptual queries (predominant in AI tool usage), semantic search should rank HIGHER because it captures intent, not just words.
+
+#### Revised Architecture: Parallel Search + Agreement-Based Confidence
+
+**Instead of cascade (try one, fall back), run strategies in parallel:**
+
+```
+Query → ┬─▶ Exact Match
+        ├─▶ Semantic Search
+        ├─▶ Hybrid RRF
+        └─▶ Relaxed Match
+                │
+                ▼
+        Agreement Analysis
+        ──────────────────
+        doc_A: Found by 3/4 → VERY HIGH
+        doc_B: Found by 2/4 → HIGH
+        doc_C: Semantic only → MEDIUM-HIGH (conceptual query)
+        doc_D: Lexical only  → MEDIUM (words match, meaning may not)
+```
+
+#### Confidence Scoring Model
+
+| Scenario | Confidence | Rationale |
+|----------|------------|-----------|
+| Multiple strategies agree | VERY HIGH | Cross-validation |
+| Semantic + entity boost | HIGH | Meaning + specificity |
+| Semantic only (conceptual) | HIGH | Captures intent |
+| Hybrid RRF | MEDIUM-HIGH | Balanced |
+| Lexical only | MEDIUM | Words match, meaning may not |
+| Relaxed/Partial only | LOW | Weak signal |
+
+#### Performance Considerations for MCP Integration
+
+**Latency Budget Analysis:**
+
+| Component | Current | Target | Notes |
+|-----------|---------|--------|-------|
+| Query parsing | <1ms | <1ms | Fast |
+| FTS5 search | ~5-20ms | ~10ms | SQLite, local |
+| Semantic search | ~50-200ms | ~100ms | Qdrant + Ollama embedding |
+| RRF fusion | ~1-5ms | <5ms | In-memory |
+| MMR + Reranking | ~10-50ms | <30ms | Text similarity |
+| **Total** | ~70-280ms | **<150ms** | Target for MCP |
+
+**AI Model Tool Call Timeouts (researched):**
+
+| Model | Default Timeout | Max Timeout | Notes |
+|-------|-----------------|-------------|-------|
+| Claude (Anthropic) | 60s | 600s | Tool use has generous timeout |
+| GPT-4/5 (OpenAI) | 60s | 300s | Function calls |
+| Gemini (Google) | 30s | 120s | More aggressive |
+| Local models | Varies | - | Depends on implementation |
+
+**MCP Server Recommendations:**
+
+| Setting | Recommended Value | Rationale |
+|---------|-------------------|-----------|
+| Search timeout | 5s | Fail fast, let client retry |
+| Embedding timeout | 10s | Ollama can be slow on first call |
+| Total request timeout | 15s | Well under AI model limits |
+| Connection pool | Keep-alive | Reduce connection overhead |
+
+#### Design Principle: Never Zero Results
+
+A knowledge base search should NEVER return zero results for reasonable queries. Instead:
+1. Always return something (even low confidence)
+2. Include confidence metadata in response
+3. Let AI client decide whether to use results
+
+```json
+{
+  "results": [...],
+  "confidence": "high",
+  "strategies_matched": ["semantic", "hybrid"],
+  "search_time_ms": 145
+}
+```
+
+#### Lesson Learned
+> **Semantic relevance > lexical precision for AI consumers.** When serving AI tools, prioritize meaning over exact words. A semantically relevant result is more valuable than a coincidental word match. Design confidence scoring to reflect this.
+
+---
+
 ## Technical Debt and Future Improvements
 
 ### Known Issues
