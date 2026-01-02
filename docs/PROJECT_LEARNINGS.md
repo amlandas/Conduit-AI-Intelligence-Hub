@@ -527,6 +527,136 @@ A knowledge base search should NEVER return zero results for reasonable queries.
 }
 ```
 
+#### Query Adaptive Design
+
+┌─────────────────────────────────────────────────────────────────────────┐
+  │                         QUERY-ADAPTIVE SEARCH FLOW                      │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  1. QUERY INTENT (~5ms)
+     ─────────────────────
+     User Query: "how does authentication work in Oak Ridge systems"
+                                │
+                                ▼
+     ┌──────────────────────────────────────────────┐
+     │ Classify Query Type                          │
+     │ ├─ Has quotes? → EXACT_QUOTE                 │
+     │ ├─ Has proper nouns? → ENTITY ✓ (Oak Ridge)  │
+     │ ├─ Question words? → CONCEPTUAL ✓ (how does) │
+     │ └─ Default → EXPLORATORY                     │
+     │                                              │
+     │ Result: ENTITY + CONCEPTUAL signals          │
+     └──────────────────────────────────────────────┘
+
+  2. STRATEGY SELECTION (~1ms)
+     ──────────────────────────
+                                │
+                                ▼
+     ┌──────────────────────────────────────────────┐
+     │ Load Weights for Query Type                  │
+     │                                              │
+     │ CONCEPTUAL + ENTITY:                         │
+     │   Semantic Weight: 0.6                       │
+     │   Lexical Weight:  0.4                       │
+     │   Entity Boost:    +50%                      │
+     └──────────────────────────────────────────────┘
+
+  3. PARALLEL FETCH (~150ms) ◀── BOTTLENECK
+     ────────────────────────
+                                │
+              ┌─────────────────┼─────────────────┐
+              ▼                 ▼                 ▼
+     ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+     │ FTS5 Exact   │  │ FTS5 Relaxed │  │  Semantic    │
+     │   ~15ms      │  │   ~15ms      │  │   ~150ms     │
+     │              │  │              │  │              │
+     │ "Oak Ridge"  │  │ oak* ridge*  │  │ Query embed  │
+     │ exact match  │  │ wildcards    │  │ → Qdrant     │
+     │              │  │              │  │ similarity   │
+     │ Results: 3   │  │ Results: 8   │  │ Results: 12  │
+     └──────────────┘  └──────────────┘  └──────────────┘
+              │                 │                 │
+              └─────────────────┴─────────────────┘
+                                │
+                                ▼
+
+  4. DETERMINE OUTPUT (~70ms)
+     ─────────────────────────
+
+     4a. Agreement Analysis (~10ms)
+     ┌──────────────────────────────────────────────┐
+     │ Chunk "weinberg_p42":                        │
+     │   Found by: FTS Exact ✓, FTS Relaxed ✓,      │
+     │             Semantic ✓                       │
+     │   Agreement: 3/3 = 100% → VERY HIGH          │
+     │                                              │
+     │ Chunk "alphabet_10k_p12":                    │
+     │   Found by: Semantic ✓ only                  │
+     │   Agreement: 1/3 = 33% → MEDIUM              │
+     └──────────────────────────────────────────────┘
+                                │
+                                ▼
+     4b. Query-Adaptive Weighting (~5ms)
+     ┌──────────────────────────────────────────────┐
+     │ Apply weights based on query type:           │
+     │                                              │
+     │ weinberg_p42:                                │
+     │   Semantic: 0.6 × (1/rank) = 0.6 × 0.2 = 0.12│
+     │   Lexical:  0.4 × (1/rank) = 0.4 × 1.0 = 0.40│
+     │   Entity boost: "Oak Ridge" found → +50%    │
+     │   Agreement bonus: 100% → +20%              │
+     │   Final: 0.52 × 1.5 × 1.2 = 0.94 ✓ TOP      │
+     └──────────────────────────────────────────────┘
+                                │
+                                ▼
+     4c. Post-Processing (~50ms)
+     ┌──────────────────────────────────────────────┐
+     │ ├─ Similarity Floor: Remove score < 0.001   │
+     │ ├─ Reranking: Re-score top 30 semantically  │
+     │ └─ MMR Diversity: Reduce near-duplicates    │
+     └──────────────────────────────────────────────┘
+
+  5. SHARE OUTPUT (~5ms)
+     ─────────────────────
+                                │
+                                ▼
+     ┌──────────────────────────────────────────────┐
+     │ {                                            │
+     │   "results": [                               │
+     │     {                                        │
+     │       "path": "Weinberg_Big_Science.pdf",    │
+     │       "snippet": "...Oak Ridge...",          │
+     │       "score": 0.94,                         │
+     │       "strategies": ["fts_exact",            │
+     │                      "fts_relaxed",          │
+     │                      "semantic"],            │
+     │       "agreement": "very_high"               │
+     │     },                                       │
+     │     ...                                      │
+     │   ],                                         │
+     │   "confidence": "high",                      │
+     │   "query_type": "entity_conceptual",         │
+     │   "search_time_ms": 226,                     │
+     │   "strategies_used": 3,                      │
+     │   "note": null                               │
+     │ }                                            │
+     └──────────────────────────────────────────────┘
+
+  Summary Table
+
+  | Phase        | What Happens                                   | Time   |
+  |--------------|------------------------------------------------|--------|
+  | 1. Intent    | Classify query (quotes? entities? conceptual?) | ~5ms   |
+  | 2. Lookup    | Load strategy weights for query type           | ~1ms   |
+  | 3. Fetch     | Run FTS5 + Semantic in parallel                | ~150ms |
+  | 4. Determine | Agreement → Weighting → Post-process           | ~70ms  |
+  | 5. Share     | Assemble JSON with confidence metadata         | ~5ms   |
+  | Total        |                                                | ~230ms |
+
+  The AI client receives not just results, but why those results are confident (agreement across strategies, query-type-appropriate weighting).
+
+
+
 #### Lesson Learned
 > **Semantic relevance > lexical precision for AI consumers.** When serving AI tools, prioritize meaning over exact words. A semantically relevant result is more valuable than a coincidental word match. Design confidence scoring to reflect this.
 
