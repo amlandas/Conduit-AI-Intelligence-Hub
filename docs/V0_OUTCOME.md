@@ -421,6 +421,38 @@ During user testing, several critical bugs were identified and resolved:
    - Only offers to remove the runtime that was in use
    - Specifically identifies qwen2.5-coder:7b model instead of generic "models"
 
+### Remote Installation Fixes (January 2026)
+
+5. **Daemon PATH Configuration** (Bug #5)
+   - **Issue**: Daemon service couldn't find pdftotext and other tools on remote machines
+   - **Cause**: launchd (macOS) and systemd (Linux) services don't inherit user's shell PATH
+   - **Fix**: Added explicit PATH to service configurations including `/opt/homebrew/bin` and `/usr/local/bin`
+
+6. **CLI Panic on Sync Response** (Bug #6)
+   - **Issue**: CLI crashed with panic during `kb sync` when daemon returned unexpected response
+   - **Cause**: Unsafe type assertions on response fields that could be nil
+   - **Fix**: Added nil-safe type assertions with comma-ok pattern
+
+7. **Docker Credential Helper Issue** (Bug #7)
+   - **Issue**: Qdrant container failed to start during installation via SSH or launchd
+   - **Cause**: `docker-credential-gcloud` configured in Docker config but not available in PATH
+   - **Fix**: Install script temporarily disables credential helpers during container operations
+
+8. **Qdrant Container Recreation** (Bug #8)
+   - **Issue**: After uninstall/reinstall, Qdrant container had invalid volume mount
+   - **Cause**: Container restarted instead of recreated when `~/.conduit/qdrant` was deleted
+   - **Fix**: Install script always removes and recreates container for fresh state
+
+9. **Qdrant Container Removal** (Bug #9)
+   - **Issue**: Orphaned Qdrant container after uninstall caused issues on reinstall
+   - **Cause**: Uninstall script didn't handle Qdrant container
+   - **Fix**: Added `remove_qdrant_container` step to uninstall script
+
+10. **Invalid UTF-8 Panic** (Bug #10)
+    - **Issue**: Vector store panicked when content contained invalid UTF-8 sequences
+    - **Cause**: Qdrant client's `NewValueMap` requires valid UTF-8 strings
+    - **Fix**: Added `sanitizeUTF8()` function to replace invalid sequences with Unicode replacement character
+
 ---
 
 ## Known Limitations (V0)

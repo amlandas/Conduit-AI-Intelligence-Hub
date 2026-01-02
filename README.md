@@ -315,6 +315,7 @@ curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hu
 
 The uninstall script will:
 - Stop and remove the daemon service
+- Remove Qdrant vector database container
 - Remove binaries from your PATH
 - Optionally remove data directory
 - Clean up shell configuration
@@ -351,6 +352,66 @@ rm -rf ~/.conduit
 
 # 4. Clean shell config (remove PATH exports)
 # Edit ~/.zshrc or ~/.bashrc and remove Conduit PATH line
+```
+
+## Troubleshooting
+
+### Common Issues
+
+**Semantic search not working (0 vectors)**
+```bash
+# Check if Qdrant is running
+curl http://localhost:6333/collections
+
+# Check daemon logs for errors
+cat ~/.conduit/daemon.log | grep -E "(error|warn)" | tail -20
+
+# Restart Qdrant container
+podman restart conduit-qdrant  # or: docker restart conduit-qdrant
+```
+
+**Documents show 0 added after sync**
+- Documents may already be indexed with matching hashes
+- Check: `conduit kb stats` to see current document count
+- Force re-index: Remove source and re-add it
+
+**Daemon can't find pdftotext or other tools**
+```bash
+# On macOS, install poppler via Homebrew
+brew install poppler
+
+# Then restart the daemon service
+conduit service stop && conduit service start
+```
+
+**Container operations fail with credential errors**
+```bash
+# If you see "docker-credential-gcloud" errors, the install script
+# handles this automatically. For manual operation:
+echo '{"auths": {}}' > ~/.docker/config.json.tmp
+mv ~/.docker/config.json ~/.docker/config.json.backup
+mv ~/.docker/config.json.tmp ~/.docker/config.json
+# Run your container command, then restore:
+mv ~/.docker/config.json.backup ~/.docker/config.json
+```
+
+### Diagnostic Commands
+
+```bash
+# Check daemon status
+conduit status
+
+# Run comprehensive diagnostics
+conduit doctor
+
+# Check KB statistics
+conduit kb stats
+
+# View daemon logs
+cat ~/.conduit/daemon.log | tail -50
+
+# Check Qdrant vector count
+curl -s http://localhost:6333/collections/conduit_kb | jq '.result.points_count'
 ```
 
 ## Development

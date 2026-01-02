@@ -1,114 +1,42 @@
 # Conduit KB Sync - Debug Status
 
 **Date:** January 1, 2026
-**Issue:** PDF files not syncing on remote machine via install script
+**Status:** RESOLVED
 
 ---
 
 ## Problem Summary
 
-`conduit kb sync` works correctly on local machine but fails on remote machine when installed via the install script. Text files (.txt, .md) sync fine, but PDF files are not being indexed.
+`conduit kb sync` was not properly indexing documents (PDFs, text files) on remote machines when installed via the install script. Multiple root causes were identified and fixed.
 
 ---
 
-## What Works (Local Machine)
+## All Issues Resolved
 
-When building manually with these exact commands, everything works:
+### Phase 1: Initial Fixes (Early January 1)
 
-```bash
-CGO_ENABLED=1 go build -tags "fts5" -o conduit ./cmd/conduit
-CGO_ENABLED=1 go build -tags "fts5" -o conduit-daemon ./cmd/conduit-daemon
-```
+| Issue | Root Cause | Fix | Commit |
+|-------|------------|-----|--------|
+| Pattern corruption | Database stored `.pdf` instead of `*.pdf` | `normalizePatterns()` in source.go | `9d147e5` |
+| Chunk ID collisions | Same file in different dirs caused UNIQUE failures | `generateUniqueChunkID()` in indexer.go | `41ed74f` |
+| CGO build failures | Xcode CLT not checked before build | CGO prerequisites check in install.sh | `fdea3bb` |
+| Daemon persistence | Old daemon process persisted after reinstall | Daemon cleanup in install.sh | `6b10253` |
 
-- PDF files are matched by patterns
-- pdftotext extracts content (43,185 chars from test PDF)
-- Content is indexed and searchable via `conduit kb search`
+### Phase 2: Service Configuration (Mid January 1)
 
----
+| Issue | Root Cause | Fix | Commit |
+|-------|------------|-----|--------|
+| Tools not found by daemon | launchd/systemd services missing PATH | Added PATH to service configurations | `e398ab9` |
+| CLI panic on sync | Unsafe type assertions in response handling | Nil-safe type assertions | `bed1cc9` |
 
-## Root Causes Identified & Fixed
+### Phase 3: Vector Store & Container Issues (Late January 1)
 
-### 1. Pattern Normalization (Commit 9d147e5)
-**Problem:** Database stored patterns as `.pdf` instead of `*.pdf`
-**Fix:** Added `normalizePatterns()` function in `internal/kb/source.go` that auto-corrects patterns on load
-**Status:** FIXED and pushed to GitHub
-
-### 2. Chunk ID Collisions (Commit 41ed74f)
-**Problem:** Same PDF in different directories caused UNIQUE constraint failures
-**Fix:** Added `generateUniqueChunkID()` in `internal/kb/indexer.go` that includes document ID in hash
-**Status:** FIXED and pushed to GitHub
-
-### 3. CGO Prerequisites Check (Commit fdea3bb)
-**Problem:** Build might fail silently if Xcode Command Line Tools not installed
-**Fix:** Added explicit check for Xcode/gcc before building in install script
-**Status:** FIXED and pushed to GitHub
-
-### 4. Daemon Cleanup on Reinstall (Commit 6b10253)
-**Problem:** Old daemon process might persist after reinstall
-**Fix:** Added `pkill`, socket cleanup, and plist verification to install script
-**Status:** FIXED and pushed to GitHub
-
----
-
-## What's Still Failing
-
-Remote machine still shows 0 documents added for PDFs after running install script, despite all fixes being pushed to GitHub.
-
----
-
-## Diagnostic Commands to Run on Remote Machine
-
-```bash
-# 1. Check which conduit-daemon binary is running
-ps aux | grep conduit-daemon
-
-# 2. Check the plist path
-cat ~/Library/LaunchAgents/com.simpleflo.conduit.plist | grep -A1 ProgramArguments
-
-# 3. Check daemon log for errors
-cat ~/.conduit/daemon.log | tail -50
-
-# 4. Verify pdftotext works
-pdftotext -layout "/path/to/test.pdf" - | head -10
-
-# 5. Run sync with debug logging
-CONDUIT_LOG_LEVEL=debug conduit kb sync 2>&1 | tee /tmp/sync-debug.log
-
-# 6. Check patterns in database
-sqlite3 ~/.conduit/conduit.db "SELECT patterns FROM kb_sources"
-
-# 7. Check binary version/location
-which conduit-daemon
-ls -la $(which conduit-daemon)
-
-# 8. Verify FTS5 is compiled in (should show sqlite_fts5)
-strings $(which conduit-daemon) | grep -i fts5 | head -5
-```
-
----
-
-## Possible Issues to Investigate
-
-1. **Binary Location Mismatch**
-   - Install script puts binaries in `~/.local/bin/`
-   - Plist might be pointing to different location
-   - Check: `cat ~/Library/LaunchAgents/com.simpleflo.conduit.plist`
-
-2. **Old Binary Still Being Used**
-   - Even after reinstall, PATH might resolve to old binary
-   - Check: `which conduit-daemon` vs `~/.local/bin/conduit-daemon`
-
-3. **Database Not Getting Fixed**
-   - Pattern normalization happens at read-time, but maybe sync is failing before that
-   - Try: Delete and re-add the source folder
-
-4. **Install Script Not Actually Rebuilding**
-   - Might be using cached clone or failing silently
-   - Run install script with verbose output and check for errors
-
-5. **Daemon Not Starting with New Binary**
-   - Check `launchctl list | grep conduit` for exit status
-   - Check `~/.conduit/daemon.log` for startup errors
+| Issue | Root Cause | Fix | Commit |
+|-------|------------|-----|--------|
+| Qdrant container fails to start | `docker-credential-gcloud` not in PATH during SSH/launchd | Temporarily disable credential helpers | `4b06a53` |
+| Qdrant storage broken after reinstall | Container volume mount invalid after `~/.conduit` removal | Always recreate container | `4b06a53` |
+| Orphaned container after uninstall | Uninstall script didn't remove Qdrant container | Added `remove_qdrant_container` step | `4b06a53` |
+| Panic on invalid UTF-8 | Qdrant client panics on non-UTF-8 strings | `sanitizeUTF8()` in vectorstore.go | `4b06a53` |
 
 ---
 
@@ -116,55 +44,39 @@ strings $(which conduit-daemon) | grep -i fts5 | head -5
 
 | File | Changes |
 |------|---------|
-| `internal/kb/source.go` | Added `normalizePatterns()` function, called in `List()` and `Get()` |
-| `internal/kb/indexer.go` | Added `generateUniqueChunkID()` function |
-| `scripts/install.sh` | CGO check, daemon cleanup, plist verification |
+| `internal/kb/source.go` | Pattern normalization, SetSemanticSearcher |
+| `internal/kb/indexer.go` | Unique chunk IDs, semantic search integration |
+| `internal/kb/vectorstore.go` | UTF-8 sanitization for Qdrant payloads |
+| `cmd/conduit/main.go` | Nil-safe type assertions in sync response |
+| `scripts/install.sh` | PATH in services, CGO check, credential helper bypass, container recreation |
+| `scripts/uninstall.sh` | Qdrant container removal step |
 
 ---
 
-## Git Commits (in order)
+## Verification
 
-1. `41ed74f` - fix(kb): resolve chunk ID collisions and improve sync logging
-2. `9d147e5` - fix(kb): normalize corrupted file patterns on load
-3. `fdea3bb` - fix(install): add CGO prerequisites check and build verification
-4. `6b10253` - fix(install): robust daemon cleanup before reinstall
+Successfully tested on remote macOS machine (192.168.1.60):
 
----
+```bash
+# Fresh install
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
 
-## Next Steps for Tomorrow
+# Add source and sync
+conduit kb add /path/to/documents
+conduit kb sync
 
-1. Run diagnostic commands above on remote machine
-2. Share output of `~/.conduit/daemon.log` and sync debug log
-3. Verify the binary being run is the newly built one
-4. Consider completely fresh install:
-   ```bash
-   # Nuclear option - remove everything
-   pkill -f conduit
-   rm -rf ~/.conduit
-   rm -f ~/Library/LaunchAgents/com.simpleflo.conduit.plist
-   rm -f ~/.local/bin/conduit*
-
-   # Fresh install
-   curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
-   ```
-
-5. If still failing, add more debug logging to the sync process to see exactly where it's stopping
+# Results
+# - 5 documents indexed
+# - 773 chunks created
+# - 773 vectors in Qdrant
+# - Semantic search returning relevant results
+```
 
 ---
 
-## Test Files
+## Hybrid Search Implementation
 
-- Local test directory: `/Users/amlandas/Documents/test`
-- Contains: `AERO_Q209_article05.pdf` (269,614 bytes)
-- pdftotext extracts 43,185 characters from this PDF successfully
-
----
-
-## IMPLEMENTED: Hybrid Search (Semantic + FTS5)
-
-**Status:** ✅ COMPLETE (Commits 06093b7, 37d7b42, January 1, 2026)
-
-**Decision:** Implemented hybrid search with Qdrant vector database + SQLite FTS5 with graceful fallback.
+**Status:** COMPLETE
 
 ### Search Modes
 
@@ -174,127 +86,60 @@ strings $(which conduit-daemon) | grep -i fts5 | head -5
 | Semantic | `--semantic` | Vector-based search only (requires Qdrant + Ollama) |
 | Keyword | `--fts5` | Full-text keyword search only (always available) |
 
-### Key Fixes Applied
-
-1. **SourceManager-Indexer Wiring** - SourceManager's internal indexer now receives SemanticSearcher
-2. **UUID Conversion for Qdrant** - Chunk IDs converted to UUID v5 format (Qdrant requires UUIDs)
-3. **Background Context for Migration** - Long-running operations use `context.Background()` to avoid HTTP timeouts
-4. **10-Minute Client Timeout** - Migration command uses extended timeout for large document sets
-
-### Why This Change
-
-| SQLite FTS5 (kept for fallback) | Qdrant + Embeddings (new) |
-|---------------------------------|---------------------------|
-| Keyword-based search only | Semantic search (understands meaning) |
-| CGO build requirement | No CGO needed for vector search |
-| "deployment" won't find "CI/CD" | "deployment" finds related concepts |
-| Limited RAG support | Full RAG capability for AI clients |
-
 ### Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                     DOCUMENT INGESTION                          │
-├─────────────────────────────────────────────────────────────────┤
-│  Document → Extract Text → Chunk → Ollama (nomic-embed-text)   │
-│                                           ↓                     │
-│                                    768-dim vectors              │
-│                                           ↓                     │
-│                                    Store in Qdrant              │
-└─────────────────────────────────────────────────────────────────┘
+DOCUMENT INGESTION
+───────────────────────────────────────────────────────────
+Document → Extract Text → Chunk → Ollama (nomic-embed-text)
+                                         ↓
+                                  768-dim vectors
+                                         ↓
+                                  Store in Qdrant + FTS5
 
-┌─────────────────────────────────────────────────────────────────┐
-│                        QUERY FLOW                               │
-├─────────────────────────────────────────────────────────────────┤
-│  User Query → Ollama (embed) → Vector Search → Ranked Results  │
-└─────────────────────────────────────────────────────────────────┘
+QUERY FLOW
+───────────────────────────────────────────────────────────
+User Query → Ollama (embed) → Vector Search → Ranked Results
+         ↘                                   ↗
+           FTS5 fallback if Qdrant unavailable
 ```
 
-### Technology Choices
+### Technology Stack
 
 | Component | Choice | Rationale |
 |-----------|--------|-----------|
-| **Vector DB** | Qdrant | Single binary, easy self-host, excellent Go client, simpler than Milvus |
-| **Embedding Model** | nomic-embed-text | Available on Ollama, 768 dims, good quality, MIT licensed |
-| **Alternative Models** | e5-base, BGE-base-en-v1.5 | Can be swapped based on performance needs |
+| Vector DB | Qdrant | Single binary, easy self-host, excellent Go client |
+| Embedding Model | nomic-embed-text | Ollama-hosted, 768 dims, MIT licensed |
+| FTS Fallback | SQLite FTS5 | Always available, no external dependencies |
 
-### Installation Requirements
+---
 
-**Fully managed installation experience:**
-- User should NOT need to input anything except interactive choices
-- Qdrant: Auto-install via Docker or direct binary download
-- Ollama embedding model: Auto-pull during first sync
-- All configuration auto-generated with sensible defaults
-
-### Implementation Status (Completed)
-
-1. **✅ Add Qdrant dependency**
-   - Go client: `github.com/qdrant/go-client`
-   - Auto-install Qdrant via Docker in install script
-
-2. **✅ Add embedding service**
-   - `internal/kb/embeddings.go` - Ollama integration
-   - Auto-pull `nomic-embed-text` model on first use
-
-3. **✅ Refactor KB module**
-   - `internal/kb/vectorstore.go` - Qdrant client wrapper
-   - `internal/kb/semantic_search.go` - High-level semantic search API
-   - `internal/kb/indexer.go` - Added `SetSemanticSearcher()` for optional vector indexing
-   - Document extraction (pdftotext, etc.) unchanged
-
-4. **✅ Update install script**
-   - `install_qdrant()` - Docker-based Qdrant installation
-   - `install_embedding_model()` - nomic-embed-text auto-pull
-   - Verification steps for semantic search components
-
-5. **✅ Migration path**
-   - `SemanticSearcher.MigrateFromFTS()` method for existing data
-   - SQLite kept for metadata, Qdrant for vectors
-
-### Benefits Achieved
-
-- **No CGO issues** - Qdrant client is pure Go
-- **True semantic search** - Find documents by meaning
-- **RAG-ready** - Perfect for AI client augmentation
-- **Local-first** - All processing on user's machine
-- **Graceful degradation** - FTS5 still works if vector services unavailable
-
-### Files Created/Modified
-
-| File | Status | Description |
-|------|--------|-------------|
-| `internal/kb/embeddings.go` | ✅ NEW | EmbeddingService for Ollama (768-dim vectors) |
-| `internal/kb/vectorstore.go` | ✅ NEW | VectorStore for Qdrant (cosine similarity, UUID conversion) |
-| `internal/kb/semantic_search.go` | ✅ NEW | SemanticSearcher combining both |
-| `internal/kb/indexer.go` | ✅ MODIFIED | Added optional semantic indexing |
-| `internal/kb/source.go` | ✅ MODIFIED | Added `SetSemanticSearcher()` method |
-| `internal/daemon/daemon.go` | ✅ MODIFIED | Wire SemanticSearcher to SourceManager |
-| `internal/daemon/handlers.go` | ✅ MODIFIED | Added `handleKBMigrate` with background context |
-| `cmd/conduit/main.go` | ✅ MODIFIED | Added `kb migrate` command, `--semantic`/`--fts5` flags |
-| `scripts/install.sh` | ✅ MODIFIED | Added Qdrant and embedding model installation |
-| `go.mod` | ✅ MODIFIED | Added Qdrant and Ollama dependencies |
-
-### Usage
+## Usage
 
 ```bash
-# Start Qdrant
-docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant
+# Search (hybrid by default)
+conduit kb search "machine learning"
 
-# Pull embedding model
-ollama pull nomic-embed-text
+# Force semantic only
+conduit kb search "NLP concepts" --semantic
 
-# Search commands (semantic search automatically enabled when services available)
-conduit kb search "machine learning"           # Hybrid (default) - tries semantic, falls back to FTS5
-conduit kb search "NLP concepts" --semantic    # Force semantic only (requires Qdrant + Ollama)
-conduit kb search "deployment" --fts5          # Force keyword only (always available)
+# Force keyword only
+conduit kb search "deployment" --fts5
 
-# Migrate existing FTS documents to vector store
-conduit kb migrate                             # Adds embeddings to existing indexed documents
+# Migrate existing documents to vector store
+conduit kb migrate
 ```
 
-### Documents Updated
+---
 
-- ✅ HLD V0 - Vector search architecture added
-- ✅ HLD V0.5 - Security considerations for embedding service
-- ✅ HLD V1 - GUI integration with semantic search
-- ✅ low-level-plan/08-KB-ARCHITECTURE.md - Complete rewrite for vector approach
+## Key Lessons Learned
+
+1. **Background services need explicit PATH** - launchd/systemd don't inherit user's shell environment
+2. **Docker credential helpers can block operations** - need to bypass when not in interactive terminal
+3. **Container volume mounts break when host directory is deleted** - always recreate container
+4. **UTF-8 validation is critical for external services** - Qdrant requires valid UTF-8
+5. **Graceful fallback hides failures** - need to check logs, not just CLI output
+
+---
+
+**Last Updated:** January 1, 2026
