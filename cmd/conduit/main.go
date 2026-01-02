@@ -3125,7 +3125,8 @@ not just keywords. It runs as a container managed by Conduit.
 Examples:
   conduit qdrant install     # Install and start Qdrant
   conduit qdrant status      # Check Qdrant health
-  conduit qdrant attach      # Enable semantic search without restart`,
+  conduit qdrant attach      # Enable semantic search without restart
+  conduit qdrant purge       # Clear all vectors (fresh start)`,
 	}
 
 	cmd.AddCommand(qdrantInstallCmd())
@@ -3133,6 +3134,7 @@ Examples:
 	cmd.AddCommand(qdrantStopCmd())
 	cmd.AddCommand(qdrantStatusCmd())
 	cmd.AddCommand(qdrantAttachCmd())
+	cmd.AddCommand(qdrantPurgeCmd())
 
 	return cmd
 }
@@ -3556,6 +3558,89 @@ restarting the daemon.`,
 	}
 
 	cmd.Flags().BoolVar(&reindex, "reindex", false, "Re-index existing documents after attach")
+
+	return cmd
+}
+
+// qdrantPurgeCmd clears all vectors from the Qdrant collection
+func qdrantPurgeCmd() *cobra.Command {
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "purge",
+		Short: "Clear all vectors from Qdrant",
+		Long: `Remove all vectors from the Qdrant collection.
+
+This is useful when:
+- You reinstalled Conduit and have orphaned vectors
+- You want to start fresh with semantic search
+- There's a mismatch between SQLite documents and Qdrant vectors
+
+After purging, run 'conduit kb sync' to re-index all documents.
+
+WARNING: This operation cannot be undone!`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit")
+
+			// Create QdrantManager to check status
+			mgr := kb.NewQdrantManager(kb.QdrantConfig{
+				DataDir: dataDir,
+			})
+
+			// Check if Qdrant is running
+			health := mgr.CheckHealth(ctx)
+			if !health.APIReachable {
+				return fmt.Errorf("Qdrant is not running. Start it first with: conduit qdrant start")
+			}
+
+			// Get current vector count
+			vectorCount := health.TotalPoints
+			if vectorCount == 0 {
+				fmt.Println("✓ Qdrant collection is already empty")
+				return nil
+			}
+
+			// Confirm with user unless force flag is set
+			if !force {
+				fmt.Printf("This will delete %d vectors from Qdrant.\n", vectorCount)
+				fmt.Print("Are you sure you want to continue? [y/N]: ")
+				var response string
+				fmt.Scanln(&response)
+				if response != "y" && response != "Y" {
+					fmt.Println("Aborted.")
+					return nil
+				}
+			}
+
+			// Delete all vectors by deleting and recreating the collection
+			fmt.Println("Purging Qdrant collection...")
+
+			// Use curl to delete the collection (simpler than importing Qdrant client)
+			deleteURL := fmt.Sprintf("http://localhost:%d/collections/conduit_kb", 6333)
+			req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
+			client := &http.Client{Timeout: 30 * time.Second}
+			resp, err := client.Do(req)
+			if err != nil {
+				return fmt.Errorf("failed to delete collection: %w", err)
+			}
+			resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+				return fmt.Errorf("failed to delete collection: HTTP %d", resp.StatusCode)
+			}
+
+			fmt.Printf("✓ Purged %d vectors from Qdrant\n", vectorCount)
+			fmt.Println()
+			fmt.Println("The collection will be recreated automatically on next sync.")
+			fmt.Println("Re-index documents with: conduit kb sync")
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
 
 	return cmd
 }

@@ -215,6 +215,7 @@ conduit qdrant install        # Install/start Qdrant container
 conduit qdrant start          # Start existing container
 conduit qdrant stop           # Stop container (preserves data)
 conduit qdrant attach         # Enable semantic search without restart
+conduit qdrant purge          # Clear all vectors (useful after reinstall)
 ```
 
 **Search Modes:**

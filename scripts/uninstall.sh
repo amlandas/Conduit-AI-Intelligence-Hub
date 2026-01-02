@@ -311,14 +311,22 @@ remove_data() {
 
     # Show what will be removed
     local size=$(du -sh "$CONDUIT_HOME" 2>/dev/null | cut -f1 || echo "unknown")
+    local qdrant_size=$(du -sh "$CONDUIT_HOME/qdrant" 2>/dev/null | cut -f1 || echo "none")
     warn "This will remove:"
     echo "  - Directory: $CONDUIT_HOME"
     echo "  - Size: $size"
     echo "  - All configuration, databases, and logs"
+    echo "  - Qdrant vector data: $qdrant_size"
+    echo ""
+    echo "  NOTE: If you keep this directory and reinstall Conduit,"
+    echo "        Qdrant vectors will persist but SQLite data won't."
+    echo "        This may cause orphaned vectors. After reinstall,"
+    echo "        run 'conduit qdrant purge' to clear stale vectors."
     echo ""
 
     if ! confirm "Remove data directory? (This cannot be undone)" "n"; then
         warn "Data directory left in place"
+        echo "  If you reinstall Conduit, run 'conduit qdrant purge' to clean up."
         return 0
     fi
 
