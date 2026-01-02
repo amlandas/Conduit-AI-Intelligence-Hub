@@ -1799,7 +1799,8 @@ Examples:
   conduit kb sync                    # Sync all sources
   conduit kb sync abc123-def456      # Sync specific source`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			c := newClient(socketPath)
+			// Use a longer timeout for sync (5 minutes) - PDF extraction and embedding can be slow
+			c := newClientWithTimeout(socketPath, 5*time.Minute)
 
 			if len(args) > 0 {
 				// Sync specific source
