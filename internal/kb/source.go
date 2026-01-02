@@ -358,11 +358,10 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 			Metadata:   metadata.Extra,
 		}
 
-		// Chunk content
-		chunks := sm.chunker.Chunk(content, ChunkOptions{
-			MaxSize:   1000,
-			Overlap:   100,
-			Splitters: []string{"\n\n", "\n", ". ", " "},
+		// Chunk content using smart chunking based on file type
+		chunks := sm.chunker.ChunkSmart(content, path, ChunkOptions{
+			MaxSize: 1000,
+			Overlap: 100,
 		})
 
 		// Index document

@@ -487,6 +487,7 @@ func (d *Daemon) handleSyncKBSource(w http.ResponseWriter, r *http.Request) {
 
 // handleKBSearch searches the knowledge base.
 // Supports modes: "hybrid" (default), "semantic", "fts5"
+// Use raw=true to skip result processing (chunk merging, boilerplate filtering)
 func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
@@ -498,6 +499,9 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = "hybrid" // Default to hybrid
 	}
+
+	// Check if raw results are requested
+	rawResults := r.URL.Query().Get("raw") == "true"
 
 	ctx := r.Context()
 
@@ -515,7 +519,11 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "semantic search failed")
 			return
 		}
-		writeJSON(w, http.StatusOK, d.convertSemanticResult(result, "semantic"))
+		if rawResults {
+			writeJSON(w, http.StatusOK, d.convertSemanticResult(result, "semantic"))
+		} else {
+			writeJSON(w, http.StatusOK, d.processSemanticResult(result, "semantic"))
+		}
 
 	case "fts5":
 		// Force FTS5 keyword search only
@@ -525,15 +533,19 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "fts5 search failed")
 			return
 		}
-		// Add search_mode to response
-		resp := map[string]interface{}{
-			"results":     result.Results,
-			"total_hits":  result.TotalHits,
-			"query":       result.Query,
-			"search_time": result.SearchTime,
-			"search_mode": "fts5",
+		if rawResults {
+			resp := map[string]interface{}{
+				"results":     result.Results,
+				"total_hits":  result.TotalHits,
+				"query":       result.Query,
+				"search_time": result.SearchTime,
+				"search_mode": "fts5",
+				"processed":   false,
+			}
+			writeJSON(w, http.StatusOK, resp)
+		} else {
+			writeJSON(w, http.StatusOK, d.processFTS5Result(result, "fts5"))
 		}
-		writeJSON(w, http.StatusOK, resp)
 
 	case "hybrid":
 		fallthrough
@@ -542,7 +554,11 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 		if d.kbSemantic != nil {
 			result, err := d.kbSemantic.Search(ctx, query, d.kbSemanticOpts(r))
 			if err == nil && len(result.Results) > 0 {
-				writeJSON(w, http.StatusOK, d.convertSemanticResult(result, "semantic"))
+				if rawResults {
+					writeJSON(w, http.StatusOK, d.convertSemanticResult(result, "semantic"))
+				} else {
+					writeJSON(w, http.StatusOK, d.processSemanticResult(result, "semantic"))
+				}
 				return
 			}
 			if err != nil {
@@ -557,14 +573,19 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusInternalServerError, "E_INTERNAL", "search failed")
 			return
 		}
-		resp := map[string]interface{}{
-			"results":     result.Results,
-			"total_hits":  result.TotalHits,
-			"query":       result.Query,
-			"search_time": result.SearchTime,
-			"search_mode": "fts5",
+		if rawResults {
+			resp := map[string]interface{}{
+				"results":     result.Results,
+				"total_hits":  result.TotalHits,
+				"query":       result.Query,
+				"search_time": result.SearchTime,
+				"search_mode": "fts5",
+				"processed":   false,
+			}
+			writeJSON(w, http.StatusOK, resp)
+		} else {
+			writeJSON(w, http.StatusOK, d.processFTS5Result(result, "fts5"))
 		}
-		writeJSON(w, http.StatusOK, resp)
 	}
 }
 
@@ -618,6 +639,83 @@ func (d *Daemon) convertSemanticResult(result *kb.SemanticSearchResult, mode str
 		"query":       result.Query,
 		"search_time": result.SearchTime,
 		"search_mode": mode,
+		"processed":   false,
+	}
+}
+
+// processSemanticResult processes semantic search results with chunk merging and boilerplate filtering.
+func (d *Daemon) processSemanticResult(result *kb.SemanticSearchResult, mode string) map[string]interface{} {
+	// Convert semantic hits to SearchHit format for processing
+	hits := make([]kb.SearchHit, len(result.Results))
+	for i, r := range result.Results {
+		hits[i] = kb.SearchHit{
+			DocumentID: r.DocumentID,
+			ChunkID:    r.ChunkID,
+			Path:       r.Path,
+			Title:      r.Title,
+			Snippet:    r.Snippet,
+			Score:      r.Score,
+			Metadata:   r.Metadata,
+		}
+	}
+
+	// Process results
+	processor := kb.NewResultProcessor()
+	processed := processor.ProcessResults(hits)
+
+	// Convert to response format
+	results := make([]map[string]interface{}, len(processed))
+	for i, p := range processed {
+		results[i] = map[string]interface{}{
+			"document_id": p.DocumentID,
+			"path":        p.Path,
+			"title":       p.Title,
+			"content":     p.Content,
+			"score":       p.Score,
+			"chunk_count": p.ChunkCount,
+			"metadata":    p.Metadata,
+			"source":      p.Source,
+		}
+	}
+
+	return map[string]interface{}{
+		"results":     results,
+		"total_hits":  result.TotalHits,
+		"query":       result.Query,
+		"search_time": result.SearchTime,
+		"search_mode": mode,
+		"processed":   true,
+	}
+}
+
+// processFTS5Result processes FTS5 search results with chunk merging and boilerplate filtering.
+func (d *Daemon) processFTS5Result(result *kb.SearchResult, mode string) map[string]interface{} {
+	// Process results
+	processor := kb.NewResultProcessor()
+	processed := processor.ProcessResults(result.Results)
+
+	// Convert to response format
+	results := make([]map[string]interface{}, len(processed))
+	for i, p := range processed {
+		results[i] = map[string]interface{}{
+			"document_id": p.DocumentID,
+			"path":        p.Path,
+			"title":       p.Title,
+			"content":     p.Content,
+			"score":       p.Score,
+			"chunk_count": p.ChunkCount,
+			"metadata":    p.Metadata,
+			"source":      p.Source,
+		}
+	}
+
+	return map[string]interface{}{
+		"results":     results,
+		"total_hits":  result.TotalHits,
+		"query":       result.Query,
+		"search_time": result.SearchTime,
+		"search_mode": mode,
+		"processed":   true,
 	}
 }
 

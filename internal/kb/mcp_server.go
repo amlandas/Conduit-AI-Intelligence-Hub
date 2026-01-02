@@ -215,6 +215,29 @@ func (s *MCPServer) handleToolsList() interface{} {
 					"properties": map[string]interface{}{},
 				},
 			},
+			{
+				"name":        "kb_search_with_context",
+				"description": "Search knowledge base with processed, prompt-ready results. Returns merged chunks from same documents, filters boilerplate, and provides citation-ready source info.",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "The search query in natural language",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum number of document results (default 5)",
+						},
+						"mode": map[string]interface{}{
+							"type":        "string",
+							"description": "Search mode: 'hybrid' (default), 'semantic', or 'fts5'",
+							"enum":        []string{"hybrid", "semantic", "fts5"},
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
 		},
 	}
 }
@@ -232,6 +255,8 @@ func (s *MCPServer) handleToolCall(ctx context.Context, params json.RawMessage) 
 	switch call.Name {
 	case "kb_search":
 		return s.toolSearch(ctx, call.Arguments)
+	case "kb_search_with_context":
+		return s.toolSearchWithContext(ctx, call.Arguments)
 	case "kb_list_sources":
 		return s.toolListSources(ctx)
 	case "kb_get_document":
@@ -281,6 +306,86 @@ func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (inter
 		content = append(content, map[string]interface{}{
 			"type": "text",
 			"text": "No results found for: " + params.Query,
+		})
+	}
+
+	return map[string]interface{}{
+		"content": content,
+	}, nil
+}
+
+// toolSearchWithContext performs a search and returns processed, prompt-ready results.
+func (s *MCPServer) toolSearchWithContext(ctx context.Context, args json.RawMessage) (interface{}, error) {
+	var params struct {
+		Query string `json:"query"`
+		Limit int    `json:"limit"`
+		Mode  string `json:"mode"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, fmt.Errorf("parse search args: %w", err)
+	}
+
+	if params.Limit <= 0 {
+		params.Limit = 5 // Default to 5 for processed results
+	}
+	if params.Mode == "" {
+		params.Mode = "hybrid"
+	}
+
+	opts := SearchOptions{
+		Limit:     params.Limit * 3, // Fetch more to allow for merging
+		Highlight: true,
+	}
+
+	result, err := s.searcher.Search(ctx, params.Query, opts)
+	if err != nil {
+		return nil, fmt.Errorf("search: %w", err)
+	}
+
+	// Process results using the result processor
+	processor := NewResultProcessor()
+	processed := processor.ProcessResults(result.Results)
+
+	// Limit to requested number of documents
+	if len(processed) > params.Limit {
+		processed = processed[:params.Limit]
+	}
+
+	// Format as prompt-ready content
+	var content []map[string]interface{}
+
+	if len(processed) == 0 {
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": "No relevant documents found for: " + params.Query,
+		})
+	} else {
+		// Build a nicely formatted response
+		var sb strings.Builder
+		sb.WriteString("## Relevant Context\n\n")
+		sb.WriteString(fmt.Sprintf("*Found %d documents for: \"%s\"*\n\n", len(processed), params.Query))
+
+		for i, p := range processed {
+			sb.WriteString(fmt.Sprintf("### %d. %s\n", i+1, p.Title))
+			sb.WriteString(fmt.Sprintf("*Source: %s", p.Source.File))
+			if p.Source.Page > 0 {
+				sb.WriteString(fmt.Sprintf(" (page %d)", p.Source.Page))
+			}
+			if p.Source.Section != "" {
+				sb.WriteString(fmt.Sprintf(" - %s", p.Source.Section))
+			}
+			sb.WriteString("*\n\n")
+			sb.WriteString(p.Content)
+			sb.WriteString("\n")
+
+			if i < len(processed)-1 {
+				sb.WriteString("\n---\n\n")
+			}
+		}
+
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": sb.String(),
 		})
 	}
 

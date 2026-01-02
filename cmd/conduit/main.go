@@ -1652,7 +1652,8 @@ Examples:
 }
 
 func kbSearchCmd() *cobra.Command {
-	var semantic, fts5 bool
+	var semantic, fts5, raw bool
+	var contextChunks int
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -1662,10 +1663,15 @@ func kbSearchCmd() *cobra.Command {
 By default, hybrid search is used which tries semantic search first
 (if Qdrant and Ollama are available) and falls back to FTS5 keyword search.
 
+Results are processed by default (merged chunks, filtered boilerplate).
+Use --raw to get unprocessed results.
+
 Examples:
-  conduit kb search "how does authentication work"    # Hybrid (default)
+  conduit kb search "how does authentication work"    # Hybrid (default, processed)
   conduit kb search "authentication" --semantic       # Force semantic only
-  conduit kb search "class AuthProvider" --fts5       # Force keyword only`,
+  conduit kb search "class AuthProvider" --fts5       # Force keyword only
+  conduit kb search "query" --raw                     # Raw chunks without processing
+  conduit kb search "query" --context 2               # Include 2 adjacent chunks`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
@@ -1682,7 +1688,15 @@ Examples:
 				mode = "fts5"
 			}
 
+			// Build API URL with processing options
 			apiURL := fmt.Sprintf("/api/v1/kb/search?q=%s&mode=%s", url.QueryEscape(query), mode)
+			if raw {
+				apiURL += "&raw=true"
+			}
+			if contextChunks > 0 {
+				apiURL += fmt.Sprintf("&context=%d", contextChunks)
+			}
+
 			data, err := c.get(apiURL)
 			if err != nil {
 				return fmt.Errorf("search failed: %w", err)
@@ -1708,18 +1722,55 @@ Examples:
 				modeLabel = " [keyword]"
 			}
 
-			fmt.Printf("Found %v results for: %s%s\n\n", resp["total_hits"], query, modeLabel)
-			for _, r := range results {
-				result := r.(map[string]interface{})
-				path, _ := result["path"].(string)
-				snippet, _ := result["snippet"].(string)
+			// Check if results are processed (merged)
+			isProcessed, _ := resp["processed"].(bool)
+			if isProcessed {
+				modeLabel += " [processed]"
+			}
 
-				// Show confidence for semantic results
-				confidence, hasConfidence := result["confidence"].(string)
-				if hasConfidence && confidence != "" {
-					fmt.Printf("• %s [%s]\n  %s\n\n", path, confidence, snippet)
-				} else {
-					fmt.Printf("• %s\n  %s\n\n", path, snippet)
+			fmt.Printf("Found %v results for: %s%s\n\n", resp["total_hits"], query, modeLabel)
+
+			// Display results based on whether they're processed or raw
+			if isProcessed {
+				// Processed results have merged content
+				for _, r := range results {
+					result := r.(map[string]interface{})
+					path, _ := result["path"].(string)
+					content, _ := result["content"].(string)
+					chunkCount := 1
+					if cc, ok := result["chunk_count"].(float64); ok {
+						chunkCount = int(cc)
+					}
+
+					// Extract filename for cleaner display
+					parts := strings.Split(path, "/")
+					filename := path
+					if len(parts) > 0 {
+						filename = parts[len(parts)-1]
+					}
+
+					if chunkCount > 1 {
+						fmt.Printf("• %s (%d chunks merged)\n", filename, chunkCount)
+					} else {
+						fmt.Printf("• %s\n", filename)
+					}
+					fmt.Printf("  Path: %s\n", path)
+					fmt.Printf("  %s\n\n", content)
+				}
+			} else {
+				// Raw results show individual chunks
+				for _, r := range results {
+					result := r.(map[string]interface{})
+					path, _ := result["path"].(string)
+					snippet, _ := result["snippet"].(string)
+
+					// Show confidence for semantic results
+					confidence, hasConfidence := result["confidence"].(string)
+					if hasConfidence && confidence != "" {
+						fmt.Printf("• %s [%s]\n  %s\n\n", path, confidence, snippet)
+					} else {
+						fmt.Printf("• %s\n  %s\n\n", path, snippet)
+					}
 				}
 			}
 
@@ -1729,6 +1780,8 @@ Examples:
 
 	cmd.Flags().BoolVar(&semantic, "semantic", false, "Force semantic search (requires Qdrant + Ollama)")
 	cmd.Flags().BoolVar(&fts5, "fts5", false, "Force FTS5 keyword search")
+	cmd.Flags().BoolVar(&raw, "raw", false, "Return raw chunks without processing")
+	cmd.Flags().IntVar(&contextChunks, "context", 0, "Number of adjacent chunks to include")
 
 	return cmd
 }
