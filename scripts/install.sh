@@ -864,11 +864,15 @@ install_qdrant() {
         return 0
     fi
 
-    # Check if Docker/Podman is available
+    # Check if Docker/Podman is available and actually working
+    # We test with 'ps' command as 'info' can sometimes succeed when daemon has issues
     local CONTAINER_CMD=""
-    if command_exists docker && docker info >/dev/null 2>&1; then
+    if command_exists docker && docker ps >/dev/null 2>&1; then
         CONTAINER_CMD="docker"
+    elif command_exists podman && podman ps >/dev/null 2>&1; then
+        CONTAINER_CMD="podman"
     elif command_exists podman && podman info >/dev/null 2>&1; then
+        # Fallback: podman info works but ps doesn't (e.g., fresh install)
         CONTAINER_CMD="podman"
     fi
 
@@ -888,8 +892,10 @@ install_qdrant() {
 
     info "Starting Qdrant container..."
 
-    # Create data directory for persistence (critical for Qdrant to write collections)
-    mkdir -p "${CONDUIT_HOME}/qdrant"
+    # Create data directory structure for persistence
+    # Qdrant needs collections/ and snapshots/ subdirectories to exist
+    mkdir -p "${CONDUIT_HOME}/qdrant/collections"
+    mkdir -p "${CONDUIT_HOME}/qdrant/snapshots"
 
     # Handle Docker credential helper issues that can prevent container operations
     # Some systems have credential helpers (like docker-credential-gcloud) configured
