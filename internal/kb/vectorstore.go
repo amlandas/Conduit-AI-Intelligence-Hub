@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -12,6 +13,17 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/simpleflo/conduit/internal/observability"
 )
+
+// sanitizeUTF8 ensures a string contains only valid UTF-8 characters.
+// Invalid UTF-8 sequences are replaced with the Unicode replacement character (U+FFFD).
+// This is required because Qdrant's payload storage requires valid UTF-8 strings.
+func sanitizeUTF8(s string) string {
+	if s == "" {
+		return s
+	}
+	// strings.ToValidUTF8 replaces invalid UTF-8 with the replacement string
+	return strings.ToValidUTF8(s, "\uFFFD")
+}
 
 // chunkIDToUUID converts a chunk ID string to a deterministic UUID v5.
 // This allows us to use string chunk IDs internally while Qdrant requires UUIDs.
@@ -204,17 +216,19 @@ func (vs *VectorStore) UpsertBatch(ctx context.Context, points []VectorPoint) er
 	// Convert to Qdrant points
 	qdrantPoints := make([]*qdrant.PointStruct, len(points))
 	for i, p := range points {
+		// Sanitize all string fields to ensure valid UTF-8
+		// Qdrant's NewValueMap panics on invalid UTF-8 sequences
 		payload := map[string]any{
-			"document_id": p.DocumentID,
-			"chunk_id":    p.ID, // Store original chunk ID for retrieval
+			"document_id": sanitizeUTF8(p.DocumentID),
+			"chunk_id":    sanitizeUTF8(p.ID), // Store original chunk ID for retrieval
 			"chunk_index": p.ChunkIndex,
-			"path":        p.Path,
-			"title":       p.Title,
-			"content":     p.Content,
+			"path":        sanitizeUTF8(p.Path),
+			"title":       sanitizeUTF8(p.Title),
+			"content":     sanitizeUTF8(p.Content),
 		}
-		// Add metadata fields
+		// Add metadata fields (sanitize string values)
 		for k, v := range p.Metadata {
-			payload[k] = v
+			payload[sanitizeUTF8(k)] = sanitizeUTF8(v)
 		}
 
 		// Convert chunk ID to UUID for Qdrant (which requires UUID format)

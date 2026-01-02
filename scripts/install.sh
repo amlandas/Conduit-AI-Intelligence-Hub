@@ -891,20 +891,51 @@ install_qdrant() {
     # Create data directory for persistence (critical for Qdrant to write collections)
     mkdir -p "${CONDUIT_HOME}/qdrant"
 
-    # Check if container already exists (stopped)
-    if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
-        info "Found existing conduit-qdrant container, restarting..."
-        $CONTAINER_CMD start conduit-qdrant 2>/dev/null || true
-    else
-        # Run new Qdrant container
-        $CONTAINER_CMD run -d \
-            --name conduit-qdrant \
-            --restart unless-stopped \
-            -p 6333:6333 \
-            -p 6334:6334 \
-            -v "${CONDUIT_HOME}/qdrant:/qdrant/storage" \
-            qdrant/qdrant:latest
+    # Handle Docker credential helper issues that can prevent container operations
+    # Some systems have credential helpers (like docker-credential-gcloud) configured
+    # that may not be available in PATH during installation scripts or background services
+    local DOCKER_CONFIG="${HOME}/.docker/config.json"
+    local DOCKER_CONFIG_BACKUP=""
+    if [[ -f "$DOCKER_CONFIG" ]] && grep -q "credHelpers" "$DOCKER_CONFIG" 2>/dev/null; then
+        info "Temporarily disabling Docker credential helpers for container operations..."
+        DOCKER_CONFIG_BACKUP="${DOCKER_CONFIG}.install-backup"
+        cp "$DOCKER_CONFIG" "$DOCKER_CONFIG_BACKUP"
+        # Create minimal config without credential helpers
+        echo '{"auths": {}}' > "$DOCKER_CONFIG"
     fi
+
+    # Function to restore Docker config
+    restore_docker_config() {
+        if [[ -n "$DOCKER_CONFIG_BACKUP" ]] && [[ -f "$DOCKER_CONFIG_BACKUP" ]]; then
+            mv "$DOCKER_CONFIG_BACKUP" "$DOCKER_CONFIG"
+        fi
+    }
+
+    # Always remove existing container to ensure fresh state
+    # This is important when reinstalling or when storage directory was cleared
+    if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
+        info "Removing existing conduit-qdrant container for fresh install..."
+        $CONTAINER_CMD stop conduit-qdrant 2>/dev/null || true
+        $CONTAINER_CMD rm conduit-qdrant 2>/dev/null || true
+    fi
+
+    # Run new Qdrant container
+    if ! $CONTAINER_CMD run -d \
+        --name conduit-qdrant \
+        --restart unless-stopped \
+        -p 6333:6333 \
+        -p 6334:6334 \
+        -v "${CONDUIT_HOME}/qdrant:/qdrant/storage" \
+        docker.io/qdrant/qdrant:latest 2>&1; then
+        warn "Failed to start Qdrant container"
+        restore_docker_config
+        echo "You may need to start Qdrant manually:"
+        echo "  $CONTAINER_CMD run -d --name conduit-qdrant -p 6333:6333 -p 6334:6334 -v ~/.conduit/qdrant:/qdrant/storage qdrant/qdrant"
+        return 1
+    fi
+
+    # Restore Docker config
+    restore_docker_config
 
     # Wait for Qdrant to be ready
     local RETRIES=30

@@ -263,6 +263,41 @@ remove_binaries() {
     done
 }
 
+# Remove Qdrant container
+remove_qdrant_container() {
+    echo ""
+    echo "Step 3b: Remove Qdrant Container"
+    echo "──────────────────────────────────────────────────────────────"
+
+    # Detect container runtime
+    local CONTAINER_CMD=""
+    if command_exists podman; then
+        CONTAINER_CMD="podman"
+    elif command_exists docker; then
+        CONTAINER_CMD="docker"
+    else
+        info "No container runtime found, skipping Qdrant removal"
+        return 0
+    fi
+
+    # Check if Qdrant container exists
+    if ! $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
+        info "No Qdrant container found"
+        return 0
+    fi
+
+    if confirm "Remove Qdrant vector database container?"; then
+        info "Stopping and removing Qdrant container..."
+        $CONTAINER_CMD stop conduit-qdrant 2>/dev/null || true
+        $CONTAINER_CMD rm conduit-qdrant 2>/dev/null || true
+        success "Qdrant container removed"
+    else
+        warn "Qdrant container left in place"
+        echo "  Note: If you remove the data directory, the container will have orphaned storage."
+        echo "  To remove manually: $CONTAINER_CMD rm -f conduit-qdrant"
+    fi
+}
+
 # Remove data directory
 remove_data() {
     echo ""
@@ -723,6 +758,7 @@ main() {
     stop_daemon || true
     remove_service || true
     remove_binaries || true
+    remove_qdrant_container || true
     remove_data || true
     cleanup_shell_config || true
     remove_dependencies || true
