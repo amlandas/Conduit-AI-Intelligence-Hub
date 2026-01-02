@@ -500,6 +500,63 @@ if err := s.semantic.Search(...); err != nil {
 
 ---
 
+## 9.5 Data Lifecycle: Source Removal
+
+When a KB source is removed, all associated data must be cleaned up from both storage layers.
+
+### Deletion Order (Critical)
+
+```
+SourceManager.Remove(sourceID)
+    │
+    ├─1─► indexer.DeleteBySource(sourceID)      # Vectors FIRST
+    │         └─► semantic.DeleteBySource()
+    │                 └─► vectorStore.DeleteBySource() [filter: source_id]
+    │
+    ├─2─► SQL: DELETE FROM kb_fts              # Then FTS5
+    ├─3─► SQL: DELETE FROM kb_chunks           # Then chunks
+    ├─4─► SQL: DELETE FROM kb_documents        # Then documents
+    └─5─► SQL: DELETE FROM kb_sources          # Finally source
+```
+
+**Why this order?**
+1. Vector deletion uses `source_id` filter in Qdrant - requires SQLite records to still exist
+2. SQLite deletion order respects foreign key constraints
+3. Partial failure (e.g., Qdrant down) doesn't orphan SQLite data
+
+### API Response
+
+The deletion endpoint returns statistics for transparency:
+
+```json
+{
+  "documents_deleted": 5,
+  "vectors_deleted": 50
+}
+```
+
+### CLI Display
+
+```
+$ conduit kb remove "Project Docs"
+✓ Removed source: Project Docs (5 documents, 50 vectors)
+```
+
+### Graceful Handling
+
+If semantic search is not enabled, vector deletion is skipped gracefully:
+
+```go
+func (idx *Indexer) DeleteBySource(ctx context.Context, sourceID string) (int, error) {
+    if idx.semantic == nil {
+        return 0, nil  // No vectors to delete
+    }
+    return idx.semantic.DeleteBySource(ctx, sourceID)
+}
+```
+
+---
+
 ## 10. Future Enhancements
 
 ### 10.1 Short-Term
@@ -531,3 +588,4 @@ if err := s.semantic.Search(...); err != nil {
 | Version | Date | Author | Changes |
 |---------|------|--------|---------|
 | 1.0 | Jan 2026 | Conduit Team | Initial HLD |
+| 1.1 | Jan 2026 | Conduit Team | Added Section 9.5: Data Lifecycle (vector cleanup on KB removal) |

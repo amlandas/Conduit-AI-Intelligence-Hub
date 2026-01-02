@@ -203,8 +203,18 @@ conduit kb sync               # Sync all sources
 conduit kb search <query>     # Search documents (hybrid by default)
 conduit kb search <query> --semantic  # Force semantic search only
 conduit kb search <query> --fts5      # Force keyword search only
+conduit kb remove <name>      # Remove source (cleans up FTS5 + vectors)
 conduit kb migrate            # Migrate existing docs to vector store
 conduit kb stats              # Show KB statistics
+```
+
+### Qdrant Management
+```bash
+conduit qdrant status         # Check Qdrant container and vector count
+conduit qdrant install        # Install/start Qdrant container
+conduit qdrant start          # Start existing container
+conduit qdrant stop           # Stop container (preserves data)
+conduit qdrant attach         # Enable semantic search without restart
 ```
 
 **Search Modes:**
@@ -213,6 +223,11 @@ conduit kb stats              # Show KB statistics
 - **Keyword (`--fts5`)**: Full-text keyword search using SQLite FTS5
 
 Semantic search understands meaning - "understanding text with computers" matches documents about "natural language processing" even without exact keyword matches.
+
+**KB Removal**: When you remove a source with `conduit kb remove`, both FTS5 entries and Qdrant vectors are automatically cleaned up. The output shows deletion statistics:
+```
+✓ Removed source: Project Docs (42 documents, 420 vectors)
+```
 
 **Supported Document Formats:**
 - Text: `.md`, `.txt`, `.rst`

@@ -532,9 +532,27 @@ This generates embeddings for all existing documents. New documents are automati
 
 ### Removing a Source
 
+When you remove a KB source, Conduit cleans up all associated data:
+- FTS5 full-text index entries
+- Document chunks in SQLite
+- Vector embeddings in Qdrant (if semantic search is enabled)
+
 ```bash
-./bin/conduit kb remove <source-id>
+# Remove a source by name or ID
+./bin/conduit kb remove "Project Docs"
+
+# Force remove without confirmation
+./bin/conduit kb remove <source-id> --force
 ```
+
+**Example Output**:
+```
+Source 'Project Docs' has 42 indexed documents.
+Remove source and all documents? [y/N]: y
+✓ Removed source: Project Docs (42 documents, 420 vectors)
+```
+
+The output shows both documents and vectors deleted, confirming complete cleanup.
 
 ---
 

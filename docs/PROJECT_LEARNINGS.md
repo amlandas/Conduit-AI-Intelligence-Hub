@@ -736,6 +736,112 @@ A knowledge base search should NEVER return zero results for reasonable queries.
 | 2026-01 | RAG-Playground analysis | - |
 | 2026-01 | Architecture trade-off analysis (Graph RAG vs Option C) | - |
 | 2026-01 | MMR diversity, similarity floor, reranking, entity boosting | - |
+| 2026-01 | Vector cleanup on KB removal | - |
+
+---
+
+### Phase 13: Vector Cleanup on KB Removal
+**Date**: January 2026
+
+#### Context
+Testing revealed that when running `conduit kb remove`, the FTS5 data was deleted from SQLite but Qdrant vectors persisted as orphans. This caused stale semantic search results from deleted KB sources.
+
+#### Root Cause Analysis
+The `SourceManager.Remove()` method used raw SQL to delete from SQLite tables (`kb_fts`, `kb_chunks`, `kb_documents`, `kb_sources`) but never called vector deletion methods. In contrast, the `Sync()` method correctly used `Indexer.Delete()` for removed files, which properly cleaned up vectors.
+
+```
+# Problem Flow
+SourceManager.Remove(sourceID)
+    → SQL: DELETE FROM kb_fts, kb_chunks, kb_documents, kb_sources
+    → ❌ No Qdrant cleanup → Orphaned vectors
+
+# Solution Flow
+SourceManager.Remove(sourceID)
+    → indexer.DeleteBySource(sourceID)  # Delete vectors FIRST
+        → semantic.DeleteBySource(sourceID)
+            → vectorStore.DeleteBySource(sourceID) [filter: source_id = X]
+    → SQL: DELETE FROM kb_fts, kb_chunks, kb_documents, kb_sources
+```
+
+#### Critical Design Decision: Order of Deletion
+
+**Vectors must be deleted BEFORE SQLite records** because:
+1. The `source_id` filter in Qdrant requires the relationship to still exist
+2. Once SQLite records are deleted, we lose the source-to-document mapping
+3. The deletion is atomic from the user's perspective even if partially fails
+
+#### Implementation
+
+**Files Modified**:
+| File | Changes |
+|------|---------|
+| `internal/kb/vectorstore.go` | Added `DeleteBySource(ctx, sourceID)` with count and filter-based deletion |
+| `internal/kb/semantic_search.go` | Added `DeleteBySource(ctx, sourceID)` wrapper |
+| `internal/kb/indexer.go` | Added `DeleteBySource(ctx, sourceID)` that calls semantic if enabled |
+| `internal/kb/source.go` | Added `RemoveResult` struct; updated `Remove()` to delete vectors first |
+| `internal/daemon/handlers.go` | Updated handler to return JSON with deletion statistics |
+| `cmd/conduit/main.go` | Updated CLI to display vector count in removal confirmation |
+
+**Key Code Pattern** (VectorStore.DeleteBySource):
+```go
+func (vs *VectorStore) DeleteBySource(ctx context.Context, sourceID string) (int, error) {
+    // Count first for reporting
+    countResult, _ := vs.client.Count(ctx, &qdrant.CountPoints{
+        CollectionName: vs.collectionName,
+        Filter: &qdrant.Filter{
+            Must: []*qdrant.Condition{
+                qdrant.NewMatch("source_id", sourceID),
+            },
+        },
+    })
+
+    // Delete using filter (not point IDs)
+    vs.client.Delete(ctx, &qdrant.DeletePoints{
+        CollectionName: vs.collectionName,
+        Points: &qdrant.PointsSelector{
+            PointsSelectorOneOf: &qdrant.PointsSelector_Filter{
+                Filter: &qdrant.Filter{
+                    Must: []*qdrant.Condition{
+                        qdrant.NewMatch("source_id", sourceID),
+                    },
+                },
+            },
+        },
+    })
+    return int(countResult), nil
+}
+```
+
+#### UX Enhancement
+
+Before:
+```
+$ conduit kb remove "My KB"
+✓ Removed source: My KB (5 documents)
+```
+
+After:
+```
+$ conduit kb remove "My KB"
+✓ Removed source: My KB (5 documents, 50 vectors)
+```
+
+The CLI now transparently shows that both FTS5 documents and Qdrant vectors were cleaned up.
+
+#### Graceful Degradation
+
+If semantic search is not enabled (Qdrant unavailable), the deletion chain handles this gracefully:
+```go
+func (idx *Indexer) DeleteBySource(ctx context.Context, sourceID string) (int, error) {
+    if idx.semantic == nil {
+        return 0, nil  // No vectors to delete
+    }
+    return idx.semantic.DeleteBySource(ctx, sourceID)
+}
+```
+
+#### Lesson Learned
+> **Abstraction consistency matters.** When bypass patterns exist (raw SQL vs abstracted methods), they create silent bugs. The `Sync()` method correctly used `Indexer.Delete()` which cleaned vectors, but `Remove()` used raw SQL and missed it. Solution: Always use the same abstraction layer for related operations.
 
 ---
 
