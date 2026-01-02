@@ -39,6 +39,7 @@ type Daemon struct {
 	kbIndexer    *kb.Indexer
 	kbSemantic   *kb.SemanticSearcher // Optional: nil if Qdrant/Ollama unavailable
 	kbHybrid     *kb.HybridSearcher   // Combines FTS5 and semantic search
+	kbQdrant     *kb.QdrantManager    // Manages Qdrant container lifecycle
 
 	// State
 	mu        sync.RWMutex
@@ -72,6 +73,26 @@ func New(cfg *config.Config) (*Daemon, error) {
 	kbSearcher := kb.NewSearcher(st.DB())
 	kbIndexer := kb.NewIndexer(st.DB())
 
+	logger := observability.Logger("daemon")
+
+	// Initialize Qdrant manager for managed container lifecycle
+	// This ensures storage directory exists, container is running, and collection is healthy
+	qdrantCfg := kb.QdrantConfig{
+		DataDir:        cfg.DataDir,
+		ContainerName:  "conduit-qdrant",
+		HTTPPort:       6333,
+		GRPCPort:       6334,
+		CollectionName: "conduit_kb",
+	}
+	kbQdrant := kb.NewQdrantManager(qdrantCfg)
+
+	// Try to ensure Qdrant is ready (non-blocking if container runtime unavailable)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	if err := kbQdrant.EnsureReady(ctx); err != nil {
+		logger.Warn().Err(err).Msg("Qdrant not ready, semantic search will be unavailable")
+	}
+	cancel()
+
 	// Try to initialize semantic search (optional - graceful if unavailable)
 	var kbSemantic *kb.SemanticSearcher
 	semanticCfg := kb.SemanticSearchConfig{
@@ -89,18 +110,22 @@ func New(cfg *config.Config) (*Daemon, error) {
 			BatchSize:      100,
 		},
 	}
-	logger := observability.Logger("daemon")
 
-	kbSemantic, err = kb.NewSemanticSearcher(st.DB(), semanticCfg)
-	if err != nil {
-		logger.Warn().Err(err).Msg("semantic search unavailable, falling back to FTS5 only")
-		kbSemantic = nil
+	// Only initialize semantic search if Qdrant manager detected a container runtime
+	if kbQdrant.IsAvailable() {
+		kbSemantic, err = kb.NewSemanticSearcher(st.DB(), semanticCfg)
+		if err != nil {
+			logger.Warn().Err(err).Msg("semantic search unavailable, falling back to FTS5 only")
+			kbSemantic = nil
+		} else {
+			// Wire semantic search into both indexers for new documents
+			// The SourceManager has its own internal indexer that does the actual syncing
+			kbSource.SetSemanticSearcher(kbSemantic)
+			kbIndexer.SetSemanticSearcher(kbSemantic)
+			logger.Info().Msg("semantic search enabled")
+		}
 	} else {
-		// Wire semantic search into both indexers for new documents
-		// The SourceManager has its own internal indexer that does the actual syncing
-		kbSource.SetSemanticSearcher(kbSemantic)
-		kbIndexer.SetSemanticSearcher(kbSemantic)
-		logger.Info().Msg("semantic search enabled")
+		logger.Info().Msg("no container runtime available, semantic search disabled")
 	}
 
 	// Create hybrid searcher (always available - falls back to FTS5 if semantic unavailable)
@@ -116,6 +141,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		kbIndexer:  kbIndexer,
 		kbSemantic: kbSemantic,
 		kbHybrid:   kbHybrid,
+		kbQdrant:   kbQdrant,
 		shutdownCh: make(chan struct{}),
 	}
 

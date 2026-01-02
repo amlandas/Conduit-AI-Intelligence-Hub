@@ -44,11 +44,13 @@ type UpdateSourceRequest struct {
 
 // SyncResult contains the result of a sync operation.
 type SyncResult struct {
-	Added    int           `json:"added"`
-	Updated  int           `json:"updated"`
-	Deleted  int           `json:"deleted"`
-	Errors   []SyncError   `json:"errors,omitempty"`
-	Duration time.Duration `json:"duration"`
+	Added           int           `json:"added"`
+	Updated         int           `json:"updated"`
+	Deleted         int           `json:"deleted"`
+	Errors          []SyncError   `json:"errors,omitempty"`
+	Duration        time.Duration `json:"duration"`
+	SemanticEnabled bool          `json:"semantic_enabled"` // Whether semantic indexing was attempted
+	SemanticErrors  int           `json:"semantic_errors"`  // Number of documents with semantic indexing failures
 }
 
 // SyncError represents an error during sync.

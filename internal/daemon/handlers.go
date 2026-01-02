@@ -81,6 +81,9 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Get binding count
 	bindings, _ := d.store.ListBindings(ctx)
 
+	// Build dependencies status
+	dependencies := d.getDependencyStatus(ctx)
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"daemon": map[string]interface{}{
 			"version":    Version,
@@ -89,14 +92,84 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 			"ready":      d.Ready(),
 		},
 		"instances": map[string]interface{}{
-			"total":    len(instances),
+			"total":     len(instances),
 			"by_status": statusCounts,
 		},
 		"bindings": map[string]interface{}{
 			"total": len(bindings),
 		},
-		"timestamp": time.Now().Format(time.RFC3339),
+		"dependencies": dependencies,
+		"timestamp":    time.Now().Format(time.RFC3339),
 	})
+}
+
+// getDependencyStatus returns the status of all managed dependencies.
+func (d *Daemon) getDependencyStatus(ctx context.Context) map[string]interface{} {
+	deps := make(map[string]interface{})
+
+	// Container Runtime status
+	containerInfo := map[string]interface{}{
+		"available": false,
+		"runtime":   "none",
+		"version":   "",
+	}
+	if d.kbQdrant != nil && d.kbQdrant.IsAvailable() {
+		runtime := d.kbQdrant.GetContainerRuntime()
+		containerInfo["available"] = true
+		containerInfo["runtime"] = runtime
+		containerInfo["managed_by"] = "conduit"
+		containerInfo["container"] = d.kbQdrant.GetContainerName()
+	}
+	deps["container_runtime"] = containerInfo
+
+	// Qdrant (Vector DB) status
+	qdrantInfo := map[string]interface{}{
+		"available":  false,
+		"status":     "unknown",
+		"collection": "conduit_kb",
+		"vectors":    int64(0),
+	}
+	if d.kbQdrant != nil {
+		health := d.kbQdrant.CheckHealth(ctx)
+		qdrantInfo["available"] = health.ContainerRunning && health.APIReachable
+		httpPort, grpcPort := d.kbQdrant.GetPorts()
+		qdrantInfo["http_port"] = httpPort
+		qdrantInfo["grpc_port"] = grpcPort
+		if health.ContainerRunning {
+			qdrantInfo["status"] = health.CollectionStatus
+			if qdrantInfo["status"] == "" {
+				qdrantInfo["status"] = "running"
+			}
+			qdrantInfo["vectors"] = health.TotalPoints
+			qdrantInfo["indexed_vectors"] = health.IndexedVectors
+			if health.NeedsRecovery {
+				qdrantInfo["status"] = "needs_recovery"
+			}
+		} else {
+			qdrantInfo["status"] = "not_running"
+		}
+		if health.Error != "" {
+			qdrantInfo["error"] = health.Error
+		}
+	}
+	deps["qdrant"] = qdrantInfo
+
+	// Semantic Search status
+	semanticInfo := map[string]interface{}{
+		"enabled":         d.kbSemantic != nil,
+		"embedding_model": "nomic-embed-text",
+		"embedding_host":  "http://localhost:11434",
+	}
+	deps["semantic_search"] = semanticInfo
+
+	// FTS5 status (always available)
+	fts5Info := map[string]interface{}{
+		"available": true,
+		"engine":    "SQLite FTS5",
+	}
+	deps["full_text_search"] = fts5Info
+
+	return deps
 }
 
 // Instance endpoints

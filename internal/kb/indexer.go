@@ -15,9 +15,10 @@ import (
 
 // Indexer manages document indexing in SQLite with FTS5 and optional vector search.
 type Indexer struct {
-	db       *sql.DB
-	semantic *SemanticSearcher
-	logger   zerolog.Logger
+	db             *sql.DB
+	semantic       *SemanticSearcher
+	logger         zerolog.Logger
+	semanticErrors int // Counter for semantic indexing failures in current batch
 }
 
 // NewIndexer creates a new indexer.
@@ -38,6 +39,17 @@ func (idx *Indexer) SetSemanticSearcher(semantic *SemanticSearcher) {
 // HasSemanticSearch returns whether semantic search is enabled.
 func (idx *Indexer) HasSemanticSearch() bool {
 	return idx.semantic != nil
+}
+
+// ResetSemanticErrors resets the semantic error counter.
+// Call this before starting a batch operation to track errors for that batch.
+func (idx *Indexer) ResetSemanticErrors() {
+	idx.semanticErrors = 0
+}
+
+// GetSemanticErrors returns the number of semantic indexing failures since last reset.
+func (idx *Indexer) GetSemanticErrors() int {
+	return idx.semanticErrors
 }
 
 // Index indexes a document and its chunks.
@@ -125,6 +137,7 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 				Err(err).
 				Str("document_id", doc.DocumentID).
 				Msg("vector indexing failed, falling back to FTS only")
+			idx.semanticErrors++ // Track for reporting
 		} else {
 			idx.logger.Debug().
 				Str("document_id", doc.DocumentID).

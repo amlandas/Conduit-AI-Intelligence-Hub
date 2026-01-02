@@ -1,6 +1,8 @@
 # Binaries
 /bin/
 /dist/
+/conduit
+/conduit-daemon
 *.exe
 *.dll
 *.so
