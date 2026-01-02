@@ -2,6 +2,7 @@ package kb
 
 import (
 	"context"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -10,6 +11,14 @@ import (
 
 	"github.com/rs/zerolog"
 	"github.com/simpleflo/conduit/internal/observability"
+)
+
+// Default configuration values based on RAG-Playground analysis
+const (
+	DefaultMMRLambda       = 0.7  // 70% relevance, 30% diversity
+	DefaultSimilarityFloor = 0.01 // Minimum RRF score threshold (adjusted for RRF scale)
+	DefaultRerankTopN      = 30   // Rerank top 30 candidates
+	DefaultRerankKeep      = 10   // Keep top 10 after reranking
 )
 
 // HybridSearcher combines FTS5 (lexical) and vector (semantic) search using RRF.
@@ -42,24 +51,37 @@ type HybridSearchOptions struct {
 	BoostExactMatch bool             // Boost results with exact query match (default true)
 	SourceIDs       []string         // Filter by source IDs
 	MimeTypes       []string         // Filter by MIME types
+
+	// Quality enhancement options (Phase 11)
+	EnableMMR       bool    // Enable Maximal Marginal Relevance for diversity (default true)
+	MMRLambda       float64 // MMR lambda: 0=max diversity, 1=max relevance (default 0.7)
+	SimilarityFloor float64 // Minimum score threshold, reject below this (default 0.01)
+	EnableRerank    bool    // Enable reranking of top candidates (default true)
+	RerankTopN      int     // Number of candidates to consider for reranking (default 30)
 }
 
 // HybridSearchResult contains combined search results with metadata.
 type HybridSearchResult struct {
-	Results        []SearchHit       `json:"results"`
-	TotalHits      int               `json:"total_hits"`
-	Query          string            `json:"query"`
-	SearchTime     float64           `json:"search_time_ms"`
-	Mode           HybridSearchMode  `json:"mode"`
-	FTSHits        int               `json:"fts_hits"`
-	SemanticHits   int               `json:"semantic_hits"`
-	QueryAnalysis  QueryAnalysis     `json:"query_analysis,omitempty"`
+	Results        []SearchHit      `json:"results"`
+	TotalHits      int              `json:"total_hits"`
+	Query          string           `json:"query"`
+	SearchTime     float64          `json:"search_time_ms"`
+	Mode           HybridSearchMode `json:"mode"`
+	FTSHits        int              `json:"fts_hits"`
+	SemanticHits   int              `json:"semantic_hits"`
+	QueryAnalysis  QueryAnalysis    `json:"query_analysis,omitempty"`
+
+	// Quality enhancement metrics
+	RejectedByFloor int  `json:"rejected_by_floor,omitempty"` // Count of results below similarity floor
+	MMRApplied      bool `json:"mmr_applied,omitempty"`       // Whether MMR diversity was applied
+	Reranked        bool `json:"reranked,omitempty"`          // Whether reranking was applied
 }
 
 // QueryAnalysis provides insight into how the query was interpreted.
 type QueryAnalysis struct {
 	HasQuotedPhrase bool     `json:"has_quoted_phrase,omitempty"`
-	ProperNouns     []string `json:"proper_nouns,omitempty"`
+	ProperNouns     []string `json:"proper_nouns,omitempty"`     // Multi-word proper nouns (e.g., "Oak Ridge")
+	Entities        []string `json:"entities,omitempty"`         // All detected entities (single + multi-word)
 	SuggestedMode   string   `json:"suggested_mode,omitempty"`
 }
 
@@ -87,6 +109,23 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, opts HybridS
 		opts.SemanticWeight = 0.5 // Equal weight by default
 	}
 	opts.BoostExactMatch = true // Always boost exact matches
+
+	// Apply Phase 11 quality enhancement defaults
+	// Note: EnableMMR and EnableRerank default to true (zero value is false, so we check explicitly)
+	if opts.MMRLambda <= 0 {
+		opts.MMRLambda = DefaultMMRLambda
+	}
+	if opts.SimilarityFloor <= 0 {
+		opts.SimilarityFloor = DefaultSimilarityFloor
+	}
+	if opts.RerankTopN <= 0 {
+		opts.RerankTopN = DefaultRerankTopN
+	}
+	// Enable MMR and Rerank by default (only disable if explicitly set to false via API)
+	// Since Go zero value for bool is false, we use a different approach:
+	// We always enable these unless the caller explicitly passes options
+	opts.EnableMMR = true
+	opts.EnableRerank = true
 
 	// Analyze query
 	analysis := hs.analyzeQuery(query)
@@ -133,25 +172,54 @@ func (hs *HybridSearcher) analyzeQuery(query string) QueryAnalysis {
 		analysis.HasQuotedPhrase = true
 	}
 
-	// Detect proper nouns (capitalized multi-word sequences)
+	// Detect entities: both single-word and multi-word proper nouns
 	// This helps identify named entities that need exact matching
 	words := strings.Fields(query)
 	var currentProperNoun []string
+	entitySet := make(map[string]bool) // Deduplicate entities
 
-	for _, word := range words {
+	// Common words to skip (not entities even if capitalized)
+	skipWords := map[string]bool{
+		"The": true, "A": true, "An": true, "In": true, "On": true,
+		"At": true, "To": true, "For": true, "Of": true, "And": true,
+		"Or": true, "But": true, "Is": true, "Are": true, "Was": true,
+		"Were": true, "Be": true, "Been": true, "Being": true,
+		"Have": true, "Has": true, "Had": true, "Do": true, "Does": true,
+		"Did": true, "Will": true, "Would": true, "Could": true, "Should": true,
+		"May": true, "Might": true, "Must": true, "Can": true,
+		"What": true, "Where": true, "When": true, "Why": true, "How": true,
+		"Who": true, "Which": true, "That": true, "This": true, "These": true,
+		"Those": true, "I": true, "You": true, "He": true, "She": true,
+		"It": true, "We": true, "They": true, "My": true, "Your": true,
+	}
+
+	for i, word := range words {
 		// Clean punctuation
 		cleanWord := strings.Trim(word, `"'.,;:!?()[]{}`)
 		if cleanWord == "" {
 			continue
 		}
 
-		// Check if word starts with uppercase (and isn't first word or common word)
+		// Check if word starts with uppercase
 		firstRune := []rune(cleanWord)[0]
-		if unicode.IsUpper(firstRune) && len(cleanWord) > 1 {
+		isCapitalized := unicode.IsUpper(firstRune) && len(cleanWord) > 1
+
+		// Skip common words even if capitalized (unless at sentence start)
+		if isCapitalized && skipWords[cleanWord] && i > 0 {
+			isCapitalized = false
+		}
+
+		if isCapitalized {
 			currentProperNoun = append(currentProperNoun, cleanWord)
+			// Also add as single-word entity if it's a significant word
+			if len(cleanWord) >= 3 && !skipWords[cleanWord] {
+				entitySet[cleanWord] = true
+			}
 		} else {
 			if len(currentProperNoun) >= 2 {
-				analysis.ProperNouns = append(analysis.ProperNouns, strings.Join(currentProperNoun, " "))
+				multiWord := strings.Join(currentProperNoun, " ")
+				analysis.ProperNouns = append(analysis.ProperNouns, multiWord)
+				entitySet[multiWord] = true
 			}
 			currentProperNoun = nil
 		}
@@ -159,7 +227,14 @@ func (hs *HybridSearcher) analyzeQuery(query string) QueryAnalysis {
 
 	// Don't forget the last proper noun sequence
 	if len(currentProperNoun) >= 2 {
-		analysis.ProperNouns = append(analysis.ProperNouns, strings.Join(currentProperNoun, " "))
+		multiWord := strings.Join(currentProperNoun, " ")
+		analysis.ProperNouns = append(analysis.ProperNouns, multiWord)
+		entitySet[multiWord] = true
+	}
+
+	// Convert entity set to slice
+	for entity := range entitySet {
+		analysis.Entities = append(analysis.Entities, entity)
 	}
 
 	return analysis
@@ -255,22 +330,42 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	// Apply RRF fusion
 	fused := hs.applyRRF(ftsHits, semanticHits, opts.RRFConstant, opts.SemanticWeight)
 
-	// Boost exact matches for proper nouns
-	if opts.BoostExactMatch && len(analysis.ProperNouns) > 0 {
-		fused = hs.boostExactMatches(fused, analysis.ProperNouns)
+	// Boost exact matches for entities (both single-word and multi-word)
+	if opts.BoostExactMatch && len(analysis.Entities) > 0 {
+		fused = hs.boostExactMatches(fused, analysis.Entities)
 	}
 
-	// Limit results
+	result := &HybridSearchResult{
+		FTSHits:      len(ftsHits),
+		SemanticHits: len(semanticHits),
+	}
+
+	// Phase 11: Apply similarity floor (reject low-confidence results)
+	beforeFloor := len(fused)
+	fused = hs.applySimilarityFloor(fused, opts.SimilarityFloor)
+	result.RejectedByFloor = beforeFloor - len(fused)
+
+	// Phase 11: Apply reranking on top candidates
+	if opts.EnableRerank && len(fused) > 0 {
+		fused = hs.applyReranking(fused, query, opts.RerankTopN, semanticHits)
+		result.Reranked = true
+	}
+
+	// Phase 11: Apply MMR for diversity (after reranking)
+	if opts.EnableMMR && len(fused) > 1 {
+		fused = hs.applyMMR(fused, opts.MMRLambda, opts.Limit)
+		result.MMRApplied = true
+	}
+
+	// Final limit
 	if len(fused) > opts.Limit {
 		fused = fused[:opts.Limit]
 	}
 
-	return &HybridSearchResult{
-		Results:      fused,
-		TotalHits:    len(fused),
-		FTSHits:      len(ftsHits),
-		SemanticHits: len(semanticHits),
-	}
+	result.Results = fused
+	result.TotalHits = len(fused)
+
+	return result
 }
 
 // applyRRF implements Reciprocal Rank Fusion to combine ranked lists.
@@ -342,18 +437,41 @@ func (hs *HybridSearcher) applyRRF(ftsHits, semanticHits []SearchHit, k int, sem
 	return result
 }
 
-// boostExactMatches increases the score of results containing exact proper noun matches.
-func (hs *HybridSearcher) boostExactMatches(hits []SearchHit, properNouns []string) []SearchHit {
-	boostFactor := 1.5 // 50% boost for exact matches
+// boostExactMatches increases the score of results containing exact entity matches.
+// Multi-word entities (proper nouns) get a stronger boost than single-word entities.
+func (hs *HybridSearcher) boostExactMatches(hits []SearchHit, entities []string) []SearchHit {
+	// Sort entities by length (longer first) for better matching
+	sortedEntities := make([]string, len(entities))
+	copy(sortedEntities, entities)
+	sort.Slice(sortedEntities, func(i, j int) bool {
+		return len(sortedEntities[i]) > len(sortedEntities[j])
+	})
 
 	for i := range hits {
-		content := strings.ToLower(hits[i].Snippet + " " + hits[i].Title)
-		for _, pn := range properNouns {
-			if strings.Contains(content, strings.ToLower(pn)) {
-				hits[i].Score *= boostFactor
-				break // Only boost once per hit
+		content := strings.ToLower(hits[i].Snippet + " " + hits[i].Title + " " + hits[i].Path)
+		totalBoost := 1.0
+
+		for _, entity := range sortedEntities {
+			entityLower := strings.ToLower(entity)
+			if strings.Contains(content, entityLower) {
+				// Boost based on entity length: multi-word gets more boost
+				wordCount := len(strings.Fields(entity))
+				if wordCount >= 2 {
+					// Multi-word entity: 50% boost
+					totalBoost *= 1.5
+				} else {
+					// Single-word entity: 20% boost
+					totalBoost *= 1.2
+				}
 			}
 		}
+
+		// Cap total boost at 3x to avoid runaway scores
+		if totalBoost > 3.0 {
+			totalBoost = 3.0
+		}
+
+		hits[i].Score *= totalBoost
 	}
 
 	// Re-sort after boosting
@@ -362,6 +480,192 @@ func (hs *HybridSearcher) boostExactMatches(hits []SearchHit, properNouns []stri
 	})
 
 	return hits
+}
+
+// applySimilarityFloor removes results below the minimum score threshold.
+// This prevents low-confidence garbage from appearing in results.
+func (hs *HybridSearcher) applySimilarityFloor(hits []SearchHit, floor float64) []SearchHit {
+	if floor <= 0 {
+		return hits
+	}
+
+	var filtered []SearchHit
+	for _, hit := range hits {
+		if hit.Score >= floor {
+			filtered = append(filtered, hit)
+		}
+	}
+
+	if len(filtered) < len(hits) {
+		hs.logger.Debug().
+			Int("before", len(hits)).
+			Int("after", len(filtered)).
+			Float64("floor", floor).
+			Msg("similarity floor applied")
+	}
+
+	return filtered
+}
+
+// applyReranking re-scores candidates using semantic similarity signals.
+// This improves precision by leveraging the semantic scores directly.
+func (hs *HybridSearcher) applyReranking(hits []SearchHit, query string, topN int, semanticHits []SearchHit) []SearchHit {
+	if len(hits) == 0 {
+		return hits
+	}
+
+	// Limit candidates to consider
+	candidates := hits
+	if len(candidates) > topN {
+		candidates = candidates[:topN]
+	}
+
+	// Build a map of semantic scores for reranking boost
+	semScores := make(map[string]float64)
+	for _, sh := range semanticHits {
+		semScores[sh.ChunkID] = sh.Score
+	}
+
+	// Rerank by combining RRF score with semantic score
+	// Formula: final_score = rrf_score * (1 + semantic_score)
+	// This boosts results that have high semantic relevance
+	for i := range candidates {
+		if semScore, ok := semScores[candidates[i].ChunkID]; ok {
+			// Semantic scores are typically 0-1 (cosine similarity)
+			// Boost the RRF score proportionally
+			candidates[i].Score *= (1.0 + semScore)
+		}
+	}
+
+	// Re-sort by new scores
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Score > candidates[j].Score
+	})
+
+	hs.logger.Debug().
+		Int("candidates", len(candidates)).
+		Msg("reranking applied")
+
+	return candidates
+}
+
+// applyMMR implements Maximal Marginal Relevance for result diversity.
+// MMR = λ * sim(d, q) - (1-λ) * max(sim(d, d')) where d' is already selected
+// This greedily selects documents that are both relevant and diverse.
+func (hs *HybridSearcher) applyMMR(hits []SearchHit, lambda float64, limit int) []SearchHit {
+	if len(hits) <= 1 {
+		return hits
+	}
+
+	// We use text-based similarity as a proxy for embedding similarity
+	// This avoids expensive embedding computations while still promoting diversity
+
+	var selected []SearchHit
+	remaining := make([]SearchHit, len(hits))
+	copy(remaining, hits)
+
+	// Always select the top result first
+	selected = append(selected, remaining[0])
+	remaining = remaining[1:]
+
+	// Greedily select remaining results using MMR
+	for len(selected) < limit && len(remaining) > 0 {
+		bestIdx := -1
+		bestScore := math.Inf(-1)
+
+		for i, candidate := range remaining {
+			// Relevance: use the current score (already computed from RRF + reranking)
+			relevance := candidate.Score
+
+			// Diversity: compute max similarity to already selected results
+			maxSimilarity := 0.0
+			for _, sel := range selected {
+				sim := hs.textSimilarity(candidate.Snippet, sel.Snippet)
+				if sim > maxSimilarity {
+					maxSimilarity = sim
+				}
+			}
+
+			// MMR score: balance relevance vs diversity
+			mmrScore := lambda*relevance - (1-lambda)*maxSimilarity*relevance
+
+			if mmrScore > bestScore {
+				bestScore = mmrScore
+				bestIdx = i
+			}
+		}
+
+		if bestIdx >= 0 {
+			selected = append(selected, remaining[bestIdx])
+			// Remove selected from remaining
+			remaining = append(remaining[:bestIdx], remaining[bestIdx+1:]...)
+		} else {
+			break
+		}
+	}
+
+	hs.logger.Debug().
+		Int("input", len(hits)).
+		Int("output", len(selected)).
+		Float64("lambda", lambda).
+		Msg("MMR diversity applied")
+
+	return selected
+}
+
+// textSimilarity computes Jaccard similarity between two text snippets.
+// Returns a value between 0 (completely different) and 1 (identical).
+func (hs *HybridSearcher) textSimilarity(text1, text2 string) float64 {
+	// Tokenize into word sets
+	words1 := hs.tokenize(text1)
+	words2 := hs.tokenize(text2)
+
+	if len(words1) == 0 || len(words2) == 0 {
+		return 0.0
+	}
+
+	// Compute Jaccard similarity: |intersection| / |union|
+	set1 := make(map[string]bool)
+	for _, w := range words1 {
+		set1[w] = true
+	}
+
+	set2 := make(map[string]bool)
+	for _, w := range words2 {
+		set2[w] = true
+	}
+
+	intersection := 0
+	for w := range set1 {
+		if set2[w] {
+			intersection++
+		}
+	}
+
+	union := len(set1) + len(set2) - intersection
+	if union == 0 {
+		return 0.0
+	}
+
+	return float64(intersection) / float64(union)
+}
+
+// tokenize splits text into lowercase words, filtering out short words and punctuation.
+func (hs *HybridSearcher) tokenize(text string) []string {
+	text = strings.ToLower(text)
+	words := strings.Fields(text)
+
+	var tokens []string
+	for _, w := range words {
+		// Remove punctuation
+		w = strings.Trim(w, `"'.,;:!?()[]{}`)
+		// Keep words with at least 3 characters
+		if len(w) >= 3 {
+			tokens = append(tokens, w)
+		}
+	}
+
+	return tokens
 }
 
 // searchFTSOnly performs FTS5-only search.

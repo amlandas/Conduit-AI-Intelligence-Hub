@@ -310,6 +310,128 @@ Create a structured test suite with expected outcomes.
 
 ---
 
+### Phase 10: RAG-Playground Analysis and Missing Features
+**Date**: January 2026
+
+#### Context
+After implementing hybrid RRF search, testing showed improvement (Weinberg document ranked #1 for "Oak Ridge" query) but quality still not production-ready. JSTOR boilerplate still appeared in results, OCR errors visible, and repeated content in merged chunks.
+
+Rather than continuing incremental experiments, we analyzed an existing high-quality RAG implementation: the RAG-Playground project.
+
+#### Key Insight: RAG-Playground's Approach
+
+**Surprising finding**: RAG-Playground's text extraction is SIMPLER than Conduit's:
+- No OCR correction
+- Only 3 basic post-processing patterns
+- Quality comes from **retrieval-time filtering**, not extraction-time cleaning
+
+#### RAG-Playground Configuration (from config.py)
+```python
+DENSE_K: int = 40
+LEXICAL_K: int = 40
+FUSION_RRF_K: int = 60
+USE_MMR: bool = True
+MMR_LAMBDA: float = 0.7      # 70% relevance, 30% diversity
+SIMILARITY_FLOOR: float = 0.18  # Reject results below this threshold
+RERANK_TOP_N: int = 30       # Rerank top 30 candidates
+RERANK_KEEP: int = 8         # Keep top 8 after reranking
+```
+
+#### Feature Comparison
+
+| Feature | RAG-Playground | Conduit (Before) | Impact |
+|---------|---------------|------------------|--------|
+| Dense + Lexical + RRF | ✅ | ✅ | Baseline hybrid |
+| MMR diversity penalty | ✅ (λ=0.7) | ❌ | Reduces repeated content |
+| Similarity floor | ✅ (0.18) | ❌ | Rejects low-quality noise |
+| Reranking | ✅ (CrossEncoder) | ❌ | Final quality filter |
+
+#### Three Missing Features Identified
+
+1. **MMR (Maximal Marginal Relevance)**: Diversity penalty to avoid returning near-duplicate chunks
+   - Formula: `MMR = argmax[λ * sim(d, q) - (1-λ) * max(sim(d, d'))]`
+   - λ=0.7 means 70% relevance, 30% diversity
+
+2. **Similarity Floor**: Confidence threshold to reject low-quality results
+   - Results with score < 0.18 are discarded
+   - Prevents garbage from appearing in results
+
+3. **Reranking**: Full attention scoring of query-document pairs
+   - Uses CrossEncoder or LLM to re-score top candidates
+   - Expensive but high quality
+
+#### Lesson Learned
+> **Focus quality efforts at retrieval-time, not extraction-time.** Perfect extraction is impossible (OCR errors, PDF quirks). But retrieval-time filtering (MMR, floor, reranking) can compensate for noisy data. Cast a wide net, then filter aggressively.
+
+---
+
+### Phase 11: Architecture Trade-off Analysis - Graph RAG vs. Retrieval Enhancement
+**Date**: January 2026
+
+#### Context
+Before implementing the missing features, we conducted a thorough trade-off analysis. Key consideration: Conduit serves as an MCP connector feeding AI tools, with transparency for human users.
+
+#### Use Case Analysis
+
+| Aspect | Conduit | RAG-Playground |
+|--------|---------|----------------|
+| **Primary Consumer** | AI tools (Claude, GPT) | Human users |
+| **Output Format** | Raw chunks with metadata | Synthesized answers |
+| **Reasoning Location** | AI client does reasoning | Graph RAG does reasoning |
+| **Quality Bar** | Relevant chunks, minimal noise | Polished, human-readable |
+
+#### Three Options Considered
+
+**Option A: Three Features Only (MMR, Floor, Reranking)**
+- Fast, algorithmic, no LLM calls
+- Good for AI consumption
+- Missing entity awareness
+
+**Option B: Full Graph RAG**
+- Multi-hop reasoning, query decomposition, LLM summarization
+- High latency (+500-2000ms for LLM calls)
+- Overkill: AI client will re-synthesize anyway
+
+**Option C: Three Features + Lightweight Entity Enhancement (CHOSEN)**
+- MMR diversity (λ=0.7)
+- Similarity floor (0.18 threshold)
+- Reranking (embedding-based)
+- Entity extraction at index time, boosting at search time
+- No LLM in hot path
+
+#### Decision Rationale
+
+1. **Conduit feeds AI tools** → LLM summarization is redundant (client will re-synthesize)
+2. **Transparency requires "not gibberish"** → similarity floor + MMR achieve this
+3. **Proper noun handling matters** → entity boosting helps without full graph
+4. **Latency matters for MCP** → no LLM calls in retrieval path
+5. **Graph RAG's multi-hop reasoning** → handled by AI client anyway
+
+#### MCP Integration Consideration
+
+Conduit will be exposed as an MCP server for AI tools:
+```
+AI Tool ──▶ MCP Server ──▶ Conduit Daemon ──▶ Results
+```
+
+This reinforces Option C:
+- Low latency (AI is waiting on tool call)
+- Concise responses (context window budget)
+- Structured data (MCP tool response format)
+
+#### Implementation Plan
+
+1. **MMR Diversity**: Penalize results similar to already-selected ones
+2. **Similarity Floor**: Reject results below confidence threshold
+3. **Reranking**: Re-score top candidates using embeddings
+4. **Entity Extraction**: Extract proper nouns during indexing
+5. **Entity Boosting**: Boost chunks containing query entities
+
+#### Lesson Learned
+> **Match architecture to consumer.** When the consumer is an AI that will do its own reasoning, focus on precision and noise reduction rather than synthesis. LLM-in-the-loop retrieval is valuable for human-facing answers but redundant for AI-to-AI pipelines.
+
+---
+
 ## Technical Debt and Future Improvements
 
 ### Known Issues
@@ -381,6 +503,9 @@ Create a structured test suite with expected outcomes.
 | 2026-01 | Hybrid search with RRF fusion | - |
 | 2026-01 | Query understanding (proper nouns, quotes) | - |
 | 2026-01 | Retrieval test suite | - |
+| 2026-01 | RAG-Playground analysis | - |
+| 2026-01 | Architecture trade-off analysis (Graph RAG vs Option C) | - |
+| 2026-01 | MMR diversity, similarity floor, reranking, entity boosting | - |
 
 ---
 
