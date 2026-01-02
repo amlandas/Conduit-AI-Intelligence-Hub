@@ -1969,7 +1969,7 @@ Examples:
 					}
 
 					// Safely extract numeric fields with nil checks
-					var added, updated, deleted int
+					var added, updated, deleted, semanticErrors int
 					if v, ok := result["added"].(float64); ok {
 						added = int(v)
 					}
@@ -1979,12 +1979,19 @@ Examples:
 					if v, ok := result["deleted"].(float64); ok {
 						deleted = int(v)
 					}
+					if v, ok := result["semantic_errors"].(float64); ok {
+						semanticErrors = int(v)
+					}
 
 					totalAdded += added
 					totalUpdated += updated
 					totalDeleted += deleted
 
-					fmt.Printf("done (+%d/~%d/-%d)\n", added, updated, deleted)
+					if semanticErrors > 0 {
+						fmt.Printf("done (+%d/~%d/-%d) ⚠️  %d vector indexing errors\n", added, updated, deleted, semanticErrors)
+					} else {
+						fmt.Printf("done (+%d/~%d/-%d)\n", added, updated, deleted)
+					}
 				}
 
 				fmt.Println()
