@@ -497,6 +497,82 @@ func checkCommand(name string, args ...string) bool {
 	return cmd.Run() == nil
 }
 
+// checkQdrantRunning checks if Qdrant vector database is running
+func checkQdrantRunning() bool {
+	cmd := exec.Command("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:6333/collections")
+	out, err := cmd.Output()
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(out)) == "200"
+}
+
+// getQdrantVectorCount returns the number of vectors in the conduit_kb collection
+func getQdrantVectorCount() (int64, error) {
+	cmd := exec.Command("curl", "-s", "http://localhost:6333/collections/conduit_kb")
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, err
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return 0, err
+	}
+
+	if res, ok := result["result"].(map[string]interface{}); ok {
+		if count, ok := res["points_count"].(float64); ok {
+			return int64(count), nil
+		}
+	}
+	return 0, fmt.Errorf("collection not found")
+}
+
+// getOllamaModels returns a list of installed Ollama models
+func getOllamaModels() ([]string, error) {
+	cmd := exec.Command("curl", "-s", "http://localhost:11434/api/tags")
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+
+	var result map[string]interface{}
+	if err := json.Unmarshal(out, &result); err != nil {
+		return nil, err
+	}
+
+	var models []string
+	if modelsData, ok := result["models"].([]interface{}); ok {
+		for _, m := range modelsData {
+			if model, ok := m.(map[string]interface{}); ok {
+				if name, ok := model["name"].(string); ok {
+					models = append(models, name)
+				}
+			}
+		}
+	}
+	return models, nil
+}
+
+// getActiveContainerRuntime returns the name and version of the preferred container runtime
+func getActiveContainerRuntime(ctx context.Context) (name string, version string) {
+	selector := containerRuntime.NewSelector("")
+	runtimes := selector.DetectAll(ctx)
+
+	for _, rt := range runtimes {
+		if rt.Available && rt.Preferred {
+			return rt.Name, rt.Version
+		}
+	}
+	// Return first available if no preferred
+	for _, rt := range runtimes {
+		if rt.Available {
+			return rt.Name, rt.Version
+		}
+	}
+	return "none", ""
+}
+
 // statusCmd shows the overall status
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
@@ -524,6 +600,60 @@ func statusCmd() *cobra.Command {
 			}
 			if bindings, ok := status["bindings"].(map[string]interface{}); ok {
 				fmt.Printf("Bindings:  %v total\n", bindings["total"])
+			}
+
+			// Runtime Information
+			fmt.Println("\nRuntime")
+			fmt.Println("-------")
+
+			// Container runtime
+			ctx := cmd.Context()
+			rtName, rtVersion := getActiveContainerRuntime(ctx)
+			if rtName != "none" {
+				fmt.Printf("Container: %s %s\n", rtName, rtVersion)
+			} else {
+				fmt.Println("Container: none available")
+			}
+
+			// AI Provider
+			cfg, cfgErr := config.Load()
+			if cfgErr == nil {
+				if cfg.AI.Provider == "ollama" {
+					if checkOllamaRunning() {
+						fmt.Printf("AI:        Ollama (local) - %s\n", cfg.AI.Model)
+						// List installed models
+						if models, err := getOllamaModels(); err == nil && len(models) > 0 {
+							fmt.Printf("Models:    %s\n", strings.Join(models, ", "))
+						}
+					} else {
+						fmt.Printf("AI:        Ollama (not running)\n")
+					}
+				} else if cfg.AI.Provider == "anthropic" {
+					if os.Getenv("ANTHROPIC_API_KEY") != "" {
+						fmt.Printf("AI:        Anthropic (cloud) - %s\n", cfg.AI.Model)
+					} else {
+						fmt.Printf("AI:        Anthropic (API key not set)\n")
+					}
+				} else if cfg.AI.Provider == "openai" {
+					if os.Getenv("OPENAI_API_KEY") != "" {
+						fmt.Printf("AI:        OpenAI (cloud) - %s\n", cfg.AI.Model)
+					} else {
+						fmt.Printf("AI:        OpenAI (API key not set)\n")
+					}
+				} else {
+					fmt.Printf("AI:        %s - %s\n", cfg.AI.Provider, cfg.AI.Model)
+				}
+			}
+
+			// Semantic Search status
+			if checkQdrantRunning() {
+				if count, err := getQdrantVectorCount(); err == nil {
+					fmt.Printf("Vectors:   %d in Qdrant\n", count)
+				} else {
+					fmt.Println("Vectors:   Qdrant running (no collection yet)")
+				}
+			} else {
+				fmt.Println("Vectors:   Qdrant not running (FTS5 fallback)")
 			}
 
 			return nil
@@ -1789,7 +1919,8 @@ Checks:
   - Daemon connectivity and health
   - Container runtime availability (Podman/Docker)
   - Database accessibility
-  - AI provider configuration
+  - AI provider configuration and installed models
+  - Semantic search (Qdrant vector database + embeddings)
   - Client configurations
   - Knowledge base status
   - Document extraction tools (PDF, DOC, RTF, DOCX, ODT)`,
@@ -1918,6 +2049,17 @@ Checks:
 					// Check if Ollama is running
 					if checkOllamaRunning() {
 						fmt.Println("✓ Ollama is running")
+						// List installed models
+						if models, err := getOllamaModels(); err == nil && len(models) > 0 {
+							fmt.Println("   Installed models:")
+							for _, model := range models {
+								marker := "  "
+								if model == cfg.AI.Model || strings.HasPrefix(cfg.AI.Model, strings.Split(model, ":")[0]) {
+									marker = "→ " // Mark the active model
+								}
+								fmt.Printf("   %s %s\n", marker, model)
+							}
+						}
 					} else {
 						if checkCommand("ollama", "--version") {
 							fmt.Println("⚠️  Ollama is installed but not running")
@@ -1936,7 +2078,56 @@ Checks:
 						fmt.Println("❌ ANTHROPIC_API_KEY not set")
 						issues++
 					}
+				} else if cfg.AI.Provider == "openai" {
+					if os.Getenv("OPENAI_API_KEY") != "" {
+						fmt.Println("✓ OPENAI_API_KEY is set")
+					} else {
+						fmt.Println("❌ OPENAI_API_KEY not set")
+						issues++
+					}
 				}
+			}
+
+			// Check semantic search (Qdrant + embeddings)
+			fmt.Println()
+			fmt.Println("🔍 Semantic Search")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			qdrantRunning := checkQdrantRunning()
+			if qdrantRunning {
+				fmt.Println("✓ Qdrant vector database is running")
+				if count, err := getQdrantVectorCount(); err == nil {
+					fmt.Printf("   Collection: conduit_kb (%d vectors)\n", count)
+				} else {
+					fmt.Println("   Collection: not yet created (run 'conduit kb sync')")
+				}
+			} else {
+				fmt.Println("⚠️  Qdrant not running")
+				fmt.Println("   Semantic search unavailable (using FTS5 fallback)")
+				fmt.Println("   Start with: docker run -d -p 6333:6333 qdrant/qdrant")
+				warnings++
+			}
+
+			// Check for embedding model
+			embeddingModel := "nomic-embed-text"
+			if models, err := getOllamaModels(); err == nil {
+				hasEmbedding := false
+				for _, m := range models {
+					if strings.Contains(m, "nomic-embed") || strings.Contains(m, "embed") {
+						hasEmbedding = true
+						embeddingModel = m
+						break
+					}
+				}
+				if hasEmbedding {
+					fmt.Printf("✓ Embedding model: %s\n", embeddingModel)
+				} else {
+					fmt.Println("⚠️  No embedding model found")
+					fmt.Println("   Pull with: ollama pull nomic-embed-text")
+					warnings++
+				}
+			} else if !checkOllamaRunning() {
+				fmt.Println("○ Embedding model check skipped (Ollama not running)")
 			}
 
 			// Check AI clients
