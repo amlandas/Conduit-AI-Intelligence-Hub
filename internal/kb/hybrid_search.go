@@ -3,6 +3,7 @@ package kb
 import (
 	"context"
 	"math"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -19,6 +20,56 @@ const (
 	DefaultSimilarityFloor = 0.001 // Minimum RRF score threshold (lowered to avoid filtering valid results)
 	DefaultRerankTopN      = 30    // Rerank top 30 candidates
 	DefaultRerankKeep      = 10    // Keep top 10 after reranking
+)
+
+// QueryType represents the classified intent of a search query.
+type QueryType string
+
+const (
+	QueryTypeExactQuote  QueryType = "exact_quote"  // User wants literal text match
+	QueryTypeEntity      QueryType = "entity"       // Query focuses on named entities
+	QueryTypeConceptual  QueryType = "conceptual"   // User seeking understanding/explanation
+	QueryTypeFactual     QueryType = "factual"      // User wants specific data/facts
+	QueryTypeExploratory QueryType = "exploratory"  // Broad topic exploration
+)
+
+// SearchStrategy identifies which search method found a result.
+type SearchStrategy string
+
+const (
+	StrategyFTSExact   SearchStrategy = "fts_exact"   // FTS5 exact phrase match
+	StrategyFTSRelaxed SearchStrategy = "fts_relaxed" // FTS5 with wildcards/stemming
+	StrategySemantic   SearchStrategy = "semantic"    // Vector similarity search
+)
+
+// StrategyWeights defines the RRF weights for each query type.
+type StrategyWeights struct {
+	Semantic float64
+	Lexical  float64
+}
+
+// strategyWeightMatrix maps query types to optimal strategy weights.
+var strategyWeightMatrix = map[QueryType]StrategyWeights{
+	QueryTypeExactQuote:  {Semantic: 0.1, Lexical: 0.9},  // Lexical dominant
+	QueryTypeEntity:      {Semantic: 0.4, Lexical: 0.6},  // Balanced, lexical edge
+	QueryTypeConceptual:  {Semantic: 0.8, Lexical: 0.2},  // Semantic dominant
+	QueryTypeFactual:     {Semantic: 0.5, Lexical: 0.5},  // Equal weight
+	QueryTypeExploratory: {Semantic: 0.7, Lexical: 0.3},  // Semantic preferred
+}
+
+// Precompiled regex patterns for query classification
+var (
+	conceptualPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)^(how|why|what|when|where|who|which)\b`),
+		regexp.MustCompile(`(?i)\b(explain|describe|understand|concept|meaning)\b`),
+		regexp.MustCompile(`(?i)\b(difference|compare|versus|vs\.?)\b`),
+	}
+	factualPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`\b\d{4}\b`),                                    // Year
+		regexp.MustCompile(`(?i)\b(price|cost|revenue|amount|number)\b`),   // Metrics
+		regexp.MustCompile(`(?i)\b(version|release|date|when was)\b`),      // Specific data
+		regexp.MustCompile(`(?i)\b(how much|how many|percentage|ratio)\b`), // Quantities
+	}
 )
 
 // HybridSearcher combines FTS5 (lexical) and vector (semantic) search using RRF.
@@ -75,14 +126,33 @@ type HybridSearchResult struct {
 	RejectedByFloor int  `json:"rejected_by_floor,omitempty"` // Count of results below similarity floor
 	MMRApplied      bool `json:"mmr_applied,omitempty"`       // Whether MMR diversity was applied
 	Reranked        bool `json:"reranked,omitempty"`          // Whether reranking was applied
+
+	// Query-adaptive confidence model (Phase 12)
+	Confidence       string   `json:"confidence,omitempty"`         // Overall confidence: very_high, high, medium, low
+	StrategiesUsed   int      `json:"strategies_used,omitempty"`    // Number of strategies that contributed
+	DegradedMode     bool     `json:"degraded_mode,omitempty"`      // True if semantic search timed out/failed
+	Note             string   `json:"note,omitempty"`               // Human-readable note about results
+	FallbackLevel    int      `json:"fallback_level,omitempty"`     // 0=primary, 1=relaxed, 2=partial
 }
 
 // QueryAnalysis provides insight into how the query was interpreted.
 type QueryAnalysis struct {
-	HasQuotedPhrase bool     `json:"has_quoted_phrase,omitempty"`
-	ProperNouns     []string `json:"proper_nouns,omitempty"`     // Multi-word proper nouns (e.g., "Oak Ridge")
-	Entities        []string `json:"entities,omitempty"`         // All detected entities (single + multi-word)
-	SuggestedMode   string   `json:"suggested_mode,omitempty"`
+	HasQuotedPhrase bool      `json:"has_quoted_phrase,omitempty"`
+	ProperNouns     []string  `json:"proper_nouns,omitempty"`     // Multi-word proper nouns (e.g., "Oak Ridge")
+	Entities        []string  `json:"entities,omitempty"`         // All detected entities (single + multi-word)
+	SuggestedMode   string    `json:"suggested_mode,omitempty"`
+	QueryType       QueryType `json:"query_type,omitempty"`       // Classified query type
+	IsConceptual    bool      `json:"is_conceptual,omitempty"`    // True if query seeks understanding
+	IsFactual       bool      `json:"is_factual,omitempty"`       // True if query seeks specific data
+}
+
+// EnhancedSearchHit extends SearchHit with agreement metadata.
+type EnhancedSearchHit struct {
+	SearchHit
+	FoundBy      []SearchStrategy `json:"found_by,omitempty"`      // Which strategies found this result
+	Agreement    float64          `json:"agreement,omitempty"`     // Agreement score (0-1)
+	Confidence   string           `json:"confidence,omitempty"`    // Result-level confidence
+	BestRank     int              `json:"best_rank,omitempty"`     // Best rank across strategies
 }
 
 // NewHybridSearcher creates a new hybrid searcher.
@@ -237,7 +307,48 @@ func (hs *HybridSearcher) analyzeQuery(query string) QueryAnalysis {
 		analysis.Entities = append(analysis.Entities, entity)
 	}
 
+	// Phase 12: Classify query type
+	analysis.QueryType = hs.classifyQueryType(query, analysis)
+
+	// Set convenience flags
+	analysis.IsConceptual = analysis.QueryType == QueryTypeConceptual
+	analysis.IsFactual = analysis.QueryType == QueryTypeFactual
+
 	return analysis
+}
+
+// classifyQueryType determines the intent category of the query.
+func (hs *HybridSearcher) classifyQueryType(query string, analysis QueryAnalysis) QueryType {
+	// Priority 1: Exact quote - user wants literal text
+	if analysis.HasQuotedPhrase {
+		return QueryTypeExactQuote
+	}
+
+	// Priority 2: Check for conceptual patterns (understanding-seeking)
+	for _, pattern := range conceptualPatterns {
+		if pattern.MatchString(query) {
+			// If also has entities, it's a mix - still conceptual but about specific things
+			if len(analysis.Entities) > 0 {
+				return QueryTypeConceptual // Conceptual takes priority for AI consumption
+			}
+			return QueryTypeConceptual
+		}
+	}
+
+	// Priority 3: Check for factual patterns (data-seeking)
+	for _, pattern := range factualPatterns {
+		if pattern.MatchString(query) {
+			return QueryTypeFactual
+		}
+	}
+
+	// Priority 4: Entity-focused if proper nouns detected
+	if len(analysis.ProperNouns) > 0 || len(analysis.Entities) > 0 {
+		return QueryTypeEntity
+	}
+
+	// Default: exploratory
+	return QueryTypeExploratory
 }
 
 // selectMode chooses the best search mode based on query analysis.
@@ -257,6 +368,7 @@ func (hs *HybridSearcher) selectMode(analysis QueryAnalysis) HybridSearchMode {
 }
 
 // searchFusion performs parallel FTS5 and semantic search, then combines with RRF.
+// Phase 12: Enhanced with agreement analysis and query-adaptive weighting.
 func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts HybridSearchOptions, analysis QueryAnalysis) *HybridSearchResult {
 	// Fetch more candidates than needed for better fusion
 	candidateLimit := opts.Limit * 3
@@ -268,6 +380,7 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	var semanticHits []SearchHit
 	var wg sync.WaitGroup
 	var ftsErr, semErr error
+	semanticDegraded := false
 
 	// Run FTS5 search
 	wg.Add(1)
@@ -300,6 +413,7 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 			result, err := hs.semantic.Search(ctx, query, semOpts)
 			if err != nil {
 				semErr = err
+				semanticDegraded = true
 				return
 			}
 			// Convert SemanticSearchHit to SearchHit
@@ -325,20 +439,43 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	}
 	if semErr != nil {
 		hs.logger.Warn().Err(semErr).Msg("semantic search failed, using FTS5 only")
+		semanticDegraded = true
 	}
 
-	// Apply RRF fusion
-	fused := hs.applyRRF(ftsHits, semanticHits, opts.RRFConstant, opts.SemanticWeight)
+	// Phase 12: Get query-type-specific weights
+	weights := hs.getWeightsForQueryType(analysis.QueryType)
+	if opts.SemanticWeight > 0 {
+		// Allow override from options
+		weights.Semantic = opts.SemanticWeight
+		weights.Lexical = 1.0 - opts.SemanticWeight
+	}
+
+	// Phase 12: Apply RRF fusion with agreement tracking
+	fused, agreementInfo := hs.applyRRFWithAgreement(ftsHits, semanticHits, opts.RRFConstant, weights)
 
 	// Boost exact matches for entities (both single-word and multi-word)
 	if opts.BoostExactMatch && len(analysis.Entities) > 0 {
 		fused = hs.boostExactMatches(fused, analysis.Entities)
 	}
 
+	// Phase 12: Apply agreement-based boost
+	fused = hs.applyAgreementBoost(fused, agreementInfo, analysis.QueryType)
+
 	result := &HybridSearchResult{
 		FTSHits:      len(ftsHits),
 		SemanticHits: len(semanticHits),
+		DegradedMode: semanticDegraded,
 	}
+
+	// Calculate strategies used
+	strategiesUsed := 0
+	if len(ftsHits) > 0 {
+		strategiesUsed++
+	}
+	if len(semanticHits) > 0 {
+		strategiesUsed++
+	}
+	result.StrategiesUsed = strategiesUsed
 
 	// Phase 11: Apply similarity floor (reject low-confidence results)
 	beforeFloor := len(fused)
@@ -365,7 +502,194 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	result.Results = fused
 	result.TotalHits = len(fused)
 
+	// Phase 12: Calculate overall confidence
+	result.Confidence = hs.calculateOverallConfidence(fused, agreementInfo, strategiesUsed, semanticDegraded)
+
+	// Add note if degraded
+	if semanticDegraded {
+		result.Note = "Semantic search unavailable, using lexical search only"
+	}
+
 	return result
+}
+
+// getWeightsForQueryType returns the optimal weights for the given query type.
+func (hs *HybridSearcher) getWeightsForQueryType(queryType QueryType) StrategyWeights {
+	if weights, ok := strategyWeightMatrix[queryType]; ok {
+		return weights
+	}
+	// Default: equal weights
+	return StrategyWeights{Semantic: 0.5, Lexical: 0.5}
+}
+
+// agreementInfo tracks which strategies found each result.
+type agreementInfo struct {
+	chunkStrategies map[string][]SearchStrategy // chunkID -> strategies that found it
+	chunkBestRank   map[string]int              // chunkID -> best rank across strategies
+}
+
+// applyRRFWithAgreement implements RRF fusion while tracking strategy agreement.
+func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHit, k int, weights StrategyWeights) ([]SearchHit, agreementInfo) {
+	info := agreementInfo{
+		chunkStrategies: make(map[string][]SearchStrategy),
+		chunkBestRank:   make(map[string]int),
+	}
+
+	// Create maps of chunk_id -> rank for each list
+	ftsRanks := make(map[string]int)
+	for i, hit := range ftsHits {
+		rank := i + 1 // 1-indexed rank
+		ftsRanks[hit.ChunkID] = rank
+		info.chunkStrategies[hit.ChunkID] = append(info.chunkStrategies[hit.ChunkID], StrategyFTSExact)
+		if existing, ok := info.chunkBestRank[hit.ChunkID]; !ok || rank < existing {
+			info.chunkBestRank[hit.ChunkID] = rank
+		}
+	}
+
+	semRanks := make(map[string]int)
+	for i, hit := range semanticHits {
+		rank := i + 1
+		semRanks[hit.ChunkID] = rank
+		info.chunkStrategies[hit.ChunkID] = append(info.chunkStrategies[hit.ChunkID], StrategySemantic)
+		if existing, ok := info.chunkBestRank[hit.ChunkID]; !ok || rank < existing {
+			info.chunkBestRank[hit.ChunkID] = rank
+		}
+	}
+
+	// Collect all unique chunks and their data
+	allChunks := make(map[string]SearchHit)
+	for _, hit := range ftsHits {
+		allChunks[hit.ChunkID] = hit
+	}
+	for _, hit := range semanticHits {
+		if _, exists := allChunks[hit.ChunkID]; !exists {
+			allChunks[hit.ChunkID] = hit
+		}
+	}
+
+	// Calculate RRF scores with query-type-specific weights
+	type scoredHit struct {
+		hit      SearchHit
+		rrfScore float64
+	}
+
+	var scored []scoredHit
+
+	for chunkID, hit := range allChunks {
+		var rrfScore float64
+
+		// FTS5 contribution
+		if rank, ok := ftsRanks[chunkID]; ok {
+			rrfScore += weights.Lexical * (1.0 / float64(k+rank))
+		}
+
+		// Semantic contribution
+		if rank, ok := semRanks[chunkID]; ok {
+			rrfScore += weights.Semantic * (1.0 / float64(k+rank))
+		}
+
+		scored = append(scored, scoredHit{
+			hit:      hit,
+			rrfScore: rrfScore,
+		})
+	}
+
+	// Sort by RRF score descending
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].rrfScore > scored[j].rrfScore
+	})
+
+	// Convert back to SearchHit slice with RRF scores
+	result := make([]SearchHit, len(scored))
+	for i, s := range scored {
+		hit := s.hit
+		hit.Score = s.rrfScore
+		result[i] = hit
+	}
+
+	return result, info
+}
+
+// applyAgreementBoost boosts results that were found by multiple strategies.
+func (hs *HybridSearcher) applyAgreementBoost(hits []SearchHit, info agreementInfo, queryType QueryType) []SearchHit {
+	for i := range hits {
+		chunkID := hits[i].ChunkID
+		strategies := info.chunkStrategies[chunkID]
+		numStrategies := len(strategies)
+
+		// Calculate agreement score (0-1)
+		// With 2 possible strategies (FTS, Semantic), max agreement is 2
+		agreement := float64(numStrategies) / 2.0
+		if agreement > 1.0 {
+			agreement = 1.0
+		}
+
+		// Agreement bonus: up to 20% boost for full agreement
+		agreementBonus := 1.0 + (agreement * 0.2)
+
+		// Query-type-specific adjustments
+		// For conceptual queries, boost semantic-only results
+		if queryType == QueryTypeConceptual {
+			hasSemantic := false
+			for _, s := range strategies {
+				if s == StrategySemantic {
+					hasSemantic = true
+					break
+				}
+			}
+			if hasSemantic && numStrategies == 1 {
+				// Semantic-only result for conceptual query: smaller penalty
+				agreementBonus = 1.1 // 10% boost instead of no boost
+			}
+		}
+
+		hits[i].Score *= agreementBonus
+	}
+
+	// Re-sort after boosting
+	sort.Slice(hits, func(i, j int) bool {
+		return hits[i].Score > hits[j].Score
+	})
+
+	return hits
+}
+
+// calculateOverallConfidence determines the overall confidence level of results.
+func (hs *HybridSearcher) calculateOverallConfidence(hits []SearchHit, info agreementInfo, strategiesUsed int, degraded bool) string {
+	if len(hits) == 0 {
+		return "none"
+	}
+
+	// Count results with high agreement
+	highAgreementCount := 0
+	for _, hit := range hits {
+		if strategies := info.chunkStrategies[hit.ChunkID]; len(strategies) >= 2 {
+			highAgreementCount++
+		}
+	}
+
+	// Determine confidence
+	if degraded {
+		// Degraded mode: lower confidence
+		if len(hits) > 0 {
+			return "medium"
+		}
+		return "low"
+	}
+
+	if strategiesUsed >= 2 && highAgreementCount >= len(hits)/2 {
+		return "very_high"
+	}
+
+	if strategiesUsed >= 2 && highAgreementCount > 0 {
+		return "high"
+	}
+
+	if strategiesUsed >= 1 && len(hits) > 0 {
+		return "medium"
+	}
+
+	return "low"
 }
 
 // applyRRF implements Reciprocal Rank Fusion to combine ranked lists.
@@ -733,4 +1057,162 @@ func (hs *HybridSearcher) searchSemanticOnly(ctx context.Context, query string, 
 // HasSemanticSearch returns true if semantic search is available.
 func (hs *HybridSearcher) HasSemanticSearch() bool {
 	return hs.semantic != nil
+}
+
+// SearchWithFallback implements the "never zero results" principle.
+// It tries progressively more relaxed search strategies until results are found.
+// Phase 12: This ensures AI clients always get something useful.
+func (hs *HybridSearcher) SearchWithFallback(ctx context.Context, query string, opts HybridSearchOptions) (*HybridSearchResult, error) {
+	start := time.Now()
+
+	// Phase 1: Primary search (standard hybrid)
+	result, err := hs.Search(ctx, query, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(result.Results) > 0 {
+		result.FallbackLevel = 0
+		return result, nil
+	}
+
+	hs.logger.Debug().Str("query", query).Msg("primary search returned no results, trying relaxed search")
+
+	// Phase 2: Relaxed search (lower thresholds, broader matching)
+	relaxedOpts := opts
+	relaxedOpts.SimilarityFloor = 0.0001 // Very low floor
+	relaxedOpts.EnableMMR = false        // Don't filter for diversity
+	relaxedOpts.Limit = opts.Limit * 2   // Get more candidates
+
+	relaxedResult := hs.searchRelaxed(ctx, query, relaxedOpts)
+	if len(relaxedResult.Results) > 0 {
+		// Limit to original request
+		if len(relaxedResult.Results) > opts.Limit {
+			relaxedResult.Results = relaxedResult.Results[:opts.Limit]
+		}
+		relaxedResult.TotalHits = len(relaxedResult.Results)
+		relaxedResult.FallbackLevel = 1
+		relaxedResult.Confidence = "low"
+		relaxedResult.Note = "Using relaxed matching - verify relevance"
+		relaxedResult.SearchTime = float64(time.Since(start).Milliseconds())
+		return relaxedResult, nil
+	}
+
+	hs.logger.Debug().Str("query", query).Msg("relaxed search returned no results, trying partial match")
+
+	// Phase 3: Partial word matching (split query into individual words)
+	partialResult := hs.searchPartial(ctx, query, opts)
+	if len(partialResult.Results) > 0 {
+		partialResult.FallbackLevel = 2
+		partialResult.Confidence = "speculative"
+		partialResult.Note = "Partial word matching - results may not fully match query"
+		partialResult.SearchTime = float64(time.Since(start).Milliseconds())
+		return partialResult, nil
+	}
+
+	// Phase 4: No results found - return empty with suggestions
+	hs.logger.Info().Str("query", query).Msg("no results found after all fallback attempts")
+
+	return &HybridSearchResult{
+		Results:       []SearchHit{},
+		TotalHits:     0,
+		Query:         query,
+		SearchTime:    float64(time.Since(start).Milliseconds()),
+		Mode:          HybridModeFusion,
+		FallbackLevel: 3,
+		Confidence:    "none",
+		Note:          "No matching documents found. Try different search terms or verify documents are indexed.",
+	}, nil
+}
+
+// searchRelaxed performs a relaxed FTS5 search with wildcards and stemming.
+func (hs *HybridSearcher) searchRelaxed(ctx context.Context, query string, opts HybridSearchOptions) *HybridSearchResult {
+	// Modify query for relaxed matching
+	// Add wildcards to each word for prefix matching
+	words := strings.Fields(query)
+	var relaxedTerms []string
+	for _, word := range words {
+		clean := strings.Trim(word, `"'.,;:!?()[]{}`)
+		if len(clean) >= 2 {
+			// Use OR for broader matching
+			relaxedTerms = append(relaxedTerms, clean+"*")
+		}
+	}
+
+	if len(relaxedTerms) == 0 {
+		return &HybridSearchResult{}
+	}
+
+	relaxedQuery := strings.Join(relaxedTerms, " OR ")
+
+	ftsOpts := SearchOptions{
+		Limit:     opts.Limit,
+		SourceIDs: opts.SourceIDs,
+		MimeTypes: opts.MimeTypes,
+		Highlight: true,
+	}
+
+	result, err := hs.fts.Search(ctx, relaxedQuery, ftsOpts)
+	if err != nil {
+		hs.logger.Warn().Err(err).Str("query", relaxedQuery).Msg("relaxed FTS5 search failed")
+		return &HybridSearchResult{}
+	}
+
+	return &HybridSearchResult{
+		Results:   result.Results,
+		TotalHits: result.TotalHits,
+		FTSHits:   len(result.Results),
+		Mode:      HybridModeLexical,
+	}
+}
+
+// searchPartial searches for each word in the query individually and merges results.
+func (hs *HybridSearcher) searchPartial(ctx context.Context, query string, opts HybridSearchOptions) *HybridSearchResult {
+	words := strings.Fields(query)
+
+	// Collect unique results from searching each significant word
+	seen := make(map[string]bool)
+	var allHits []SearchHit
+
+	for _, word := range words {
+		clean := strings.Trim(word, `"'.,;:!?()[]{}`)
+		if len(clean) < 3 {
+			continue // Skip short words
+		}
+
+		ftsOpts := SearchOptions{
+			Limit:     5, // Small limit per word
+			SourceIDs: opts.SourceIDs,
+			MimeTypes: opts.MimeTypes,
+			Highlight: true,
+		}
+
+		result, err := hs.fts.Search(ctx, clean, ftsOpts)
+		if err != nil {
+			continue
+		}
+
+		for _, hit := range result.Results {
+			if !seen[hit.ChunkID] {
+				seen[hit.ChunkID] = true
+				allHits = append(allHits, hit)
+			}
+		}
+	}
+
+	// Sort by score and limit
+	sort.Slice(allHits, func(i, j int) bool {
+		return allHits[i].Score > allHits[j].Score
+	})
+
+	if len(allHits) > opts.Limit {
+		allHits = allHits[:opts.Limit]
+	}
+
+	return &HybridSearchResult{
+		Results:   allHits,
+		TotalHits: len(allHits),
+		FTSHits:   len(allHits),
+		Mode:      HybridModeLexical,
+	}
 }
