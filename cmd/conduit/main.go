@@ -135,6 +135,7 @@ VS Code, Gemini CLI, and more.`,
 	rootCmd.AddCommand(serviceCmd())
 	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(backupCmd())
+	rootCmd.AddCommand(qdrantCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -3088,4 +3089,452 @@ func serviceRemoveCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// qdrantCmd is the parent command for Qdrant management
+func qdrantCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "qdrant",
+		Short: "Manage Qdrant vector database",
+		Long: `Manage the Qdrant vector database for semantic search.
+
+Qdrant enables semantic search - finding documents by meaning,
+not just keywords. It runs as a container managed by Conduit.
+
+Examples:
+  conduit qdrant install     # Install and start Qdrant
+  conduit qdrant status      # Check Qdrant health
+  conduit qdrant attach      # Enable semantic search without restart`,
+	}
+
+	cmd.AddCommand(qdrantInstallCmd())
+	cmd.AddCommand(qdrantStartCmd())
+	cmd.AddCommand(qdrantStopCmd())
+	cmd.AddCommand(qdrantStatusCmd())
+	cmd.AddCommand(qdrantAttachCmd())
+
+	return cmd
+}
+
+// qdrantInstallCmd installs and starts Qdrant
+func qdrantInstallCmd() *cobra.Command {
+	var preferRuntime string
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install and start Qdrant container",
+		Long: `Install Qdrant vector database for semantic search.
+
+This command will:
+1. Detect available container runtime (Podman preferred, Docker as fallback)
+2. On macOS: Start Podman machine if needed
+3. Pull the Qdrant image
+4. Create and start the conduit-qdrant container
+5. Verify Qdrant is healthy
+
+After installation, enable semantic search with:
+  conduit qdrant attach`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit")
+
+			// Create QdrantManager
+			mgr := kb.NewQdrantManager(kb.QdrantConfig{
+				DataDir: dataDir,
+			})
+
+			// Handle runtime preference
+			if preferRuntime != "" {
+				mgr.SetContainerRuntime(preferRuntime)
+				fmt.Printf("Using %s as container runtime\n", preferRuntime)
+			} else {
+				// Try Podman first with cascading fallback
+				runtime, err := detectContainerRuntimeCascading(ctx, mgr)
+				if err != nil {
+					return fmt.Errorf("no container runtime available: %w\n\nInstall Podman or Docker first:\n  brew install podman && podman machine init && podman machine start", err)
+				}
+				fmt.Printf("Using %s as container runtime\n", runtime)
+			}
+
+			// Install Qdrant
+			fmt.Println("Installing Qdrant...")
+			if err := mgr.Install(ctx); err != nil {
+				return fmt.Errorf("failed to install Qdrant: %w", err)
+			}
+
+			fmt.Println()
+			fmt.Println("✓ Qdrant installed and running")
+			fmt.Println()
+			fmt.Println("Next steps:")
+			fmt.Println("  conduit qdrant attach    # Enable semantic search in daemon")
+			fmt.Println("  conduit kb sync          # Index documents into vector store")
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&preferRuntime, "runtime", "", "Preferred container runtime (podman or docker)")
+
+	return cmd
+}
+
+// detectContainerRuntimeCascading tries Podman first (with machine start on macOS), then Docker
+func detectContainerRuntimeCascading(ctx context.Context, mgr *kb.QdrantManager) (string, error) {
+	// Try Podman first
+	if commandExists("podman") {
+		if runtime.GOOS == "darwin" {
+			// Check if Podman machine is running
+			out, err := exec.CommandContext(ctx, "podman", "machine", "list", "--format", "{{.Running}}").Output()
+			if err == nil && strings.Contains(string(out), "true") {
+				mgr.SetContainerRuntime("podman")
+				return "podman", nil
+			}
+
+			// Machine exists but not running
+			out, _ = exec.CommandContext(ctx, "podman", "machine", "list", "--format", "{{.Name}}").Output()
+			if len(strings.TrimSpace(string(out))) > 0 {
+				fmt.Println("Podman machine exists but is not running.")
+				fmt.Print("Start Podman machine now? [Y/n]: ")
+				reader := bufio.NewReader(os.Stdin)
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(strings.ToLower(input))
+
+				if input == "" || input == "y" || input == "yes" {
+					fmt.Println("Starting Podman machine...")
+					startCmd := exec.CommandContext(ctx, "podman", "machine", "start")
+					startCmd.Stdout = os.Stdout
+					startCmd.Stderr = os.Stderr
+					if err := startCmd.Run(); err != nil {
+						fmt.Printf("⚠ Failed to start Podman machine: %v\n", err)
+						fmt.Println("Trying Docker as fallback...")
+					} else {
+						mgr.SetContainerRuntime("podman")
+						return "podman", nil
+					}
+				}
+			} else {
+				// No machine exists
+				fmt.Println("Podman is installed but no machine exists.")
+				fmt.Print("Initialize and start Podman machine? [Y/n]: ")
+				reader := bufio.NewReader(os.Stdin)
+				input, _ := reader.ReadString('\n')
+				input = strings.TrimSpace(strings.ToLower(input))
+
+				if input == "" || input == "y" || input == "yes" {
+					fmt.Println("Initializing Podman machine...")
+					initCmd := exec.CommandContext(ctx, "podman", "machine", "init")
+					initCmd.Stdout = os.Stdout
+					initCmd.Stderr = os.Stderr
+					if err := initCmd.Run(); err != nil {
+						fmt.Printf("⚠ Failed to initialize Podman machine: %v\n", err)
+					} else {
+						fmt.Println("Starting Podman machine...")
+						startCmd := exec.CommandContext(ctx, "podman", "machine", "start")
+						startCmd.Stdout = os.Stdout
+						startCmd.Stderr = os.Stderr
+						if err := startCmd.Run(); err != nil {
+							fmt.Printf("⚠ Failed to start Podman machine: %v\n", err)
+						} else {
+							mgr.SetContainerRuntime("podman")
+							return "podman", nil
+						}
+					}
+					fmt.Println("Trying Docker as fallback...")
+				}
+			}
+		} else {
+			// Linux: Podman works natively
+			testCmd := exec.CommandContext(ctx, "podman", "ps")
+			if testCmd.Run() == nil {
+				mgr.SetContainerRuntime("podman")
+				return "podman", nil
+			}
+		}
+	}
+
+	// Fallback to Docker
+	if commandExists("docker") {
+		testCmd := exec.CommandContext(ctx, "docker", "ps")
+		if testCmd.Run() == nil {
+			mgr.SetContainerRuntime("docker")
+			return "docker", nil
+		}
+		fmt.Println("Docker is installed but not running.")
+	}
+
+	return "", fmt.Errorf("neither Podman nor Docker is available and working")
+}
+
+// commandExists checks if a command is available in PATH
+func commandExists(cmd string) bool {
+	_, err := exec.LookPath(cmd)
+	return err == nil
+}
+
+// qdrantStartCmd starts an existing Qdrant container
+func qdrantStartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "start",
+		Short: "Start existing Qdrant container",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit")
+
+			mgr := kb.NewQdrantManager(kb.QdrantConfig{
+				DataDir: dataDir,
+			})
+
+			// Detect runtime
+			if _, err := mgr.DetectContainerRuntime(); err != nil {
+				return fmt.Errorf("no container runtime available: %w", err)
+			}
+
+			// Check if already running
+			health := mgr.CheckHealth(ctx)
+			if health.APIReachable {
+				fmt.Println("✓ Qdrant is already running")
+				return nil
+			}
+
+			// Start via EnsureReady which handles starting stopped containers
+			fmt.Println("Starting Qdrant...")
+			if err := mgr.EnsureReady(ctx); err != nil {
+				return fmt.Errorf("failed to start Qdrant: %w", err)
+			}
+
+			fmt.Println("✓ Qdrant started")
+			return nil
+		},
+	}
+}
+
+// qdrantStopCmd stops the Qdrant container
+func qdrantStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop Qdrant container",
+		Long: `Stop the Qdrant container (preserves data).
+
+The container can be started again with 'conduit qdrant start'.
+All indexed vectors are preserved in ~/.conduit/qdrant.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit")
+
+			mgr := kb.NewQdrantManager(kb.QdrantConfig{
+				DataDir: dataDir,
+			})
+
+			// Detect runtime
+			if _, err := mgr.DetectContainerRuntime(); err != nil {
+				return fmt.Errorf("no container runtime available: %w", err)
+			}
+
+			if err := mgr.Stop(ctx); err != nil {
+				return fmt.Errorf("failed to stop Qdrant: %w", err)
+			}
+
+			fmt.Println("✓ Qdrant stopped")
+			fmt.Println("  Data preserved in ~/.conduit/qdrant")
+			fmt.Println("  Restart with: conduit qdrant start")
+			return nil
+		},
+	}
+}
+
+// qdrantStatusCmd shows Qdrant status and health
+func qdrantStatusCmd() *cobra.Command {
+	var verbose bool
+
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Check Qdrant status and health",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit")
+
+			mgr := kb.NewQdrantManager(kb.QdrantConfig{
+				DataDir: dataDir,
+			})
+
+			// Detect runtime (don't fail if not found)
+			runtime, _ := mgr.DetectContainerRuntime()
+
+			fmt.Println("Qdrant Vector Database Status")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			// Container runtime
+			if runtime != "" {
+				fmt.Printf("Container Runtime: %s\n", runtime)
+			} else {
+				fmt.Println("Container Runtime: not available")
+				fmt.Println("  Install with: brew install podman && podman machine init && podman machine start")
+				return nil
+			}
+
+			// Health check
+			health := mgr.CheckHealth(ctx)
+
+			// API status
+			if health.APIReachable {
+				fmt.Println("API Status:        ✓ reachable")
+			} else {
+				fmt.Println("API Status:        ○ not reachable")
+				if health.ContainerRunning {
+					fmt.Println("  Container is running but API is not responding")
+					fmt.Println("  Try: conduit qdrant stop && conduit qdrant start")
+				} else {
+					fmt.Println("  Start with: conduit qdrant start")
+				}
+				return nil
+			}
+
+			// Collection status
+			fmt.Printf("Collection:        %s\n", health.CollectionStatus)
+			if health.CollectionStatus == "missing" {
+				fmt.Println("  Run 'conduit kb sync' to create collection and index documents")
+			}
+
+			// Vector count
+			fmt.Printf("Indexed Vectors:   %d\n", health.IndexedVectors)
+			fmt.Printf("Total Points:      %d\n", health.TotalPoints)
+
+			// Recovery status
+			if health.NeedsRecovery {
+				fmt.Println()
+				fmt.Println("⚠ Collection needs recovery")
+				if health.Error != "" {
+					fmt.Printf("  Error: %s\n", health.Error)
+				}
+				fmt.Println("  Run 'conduit kb sync --force' to rebuild index")
+			}
+
+			// Storage path (verbose)
+			if verbose {
+				fmt.Println()
+				fmt.Printf("Storage Path:      %s\n", mgr.GetStorageDir())
+				httpPort, grpcPort := mgr.GetPorts()
+				fmt.Printf("HTTP Port:         %d\n", httpPort)
+				fmt.Printf("gRPC Port:         %d\n", grpcPort)
+			}
+
+			// Check daemon semantic search status
+			fmt.Println()
+			c := newClient(socketPath)
+			data, err := c.get("/api/v1/status")
+			if err == nil {
+				var status map[string]interface{}
+				if json.Unmarshal(data, &status) == nil {
+					if deps, ok := status["dependencies"].(map[string]interface{}); ok {
+						if semantic, ok := deps["semantic_search"].(map[string]interface{}); ok {
+							if enabled, ok := semantic["enabled"].(bool); ok {
+								if enabled {
+									fmt.Println("Daemon Status:     ✓ semantic search enabled")
+								} else {
+									fmt.Println("Daemon Status:     ○ semantic search not enabled")
+									fmt.Println("  Enable with: conduit qdrant attach")
+								}
+							}
+						}
+					}
+				}
+			} else {
+				fmt.Println("Daemon Status:     ○ daemon not running")
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed information")
+
+	return cmd
+}
+
+// qdrantAttachCmd enables semantic search in the daemon
+func qdrantAttachCmd() *cobra.Command {
+	var reindex bool
+
+	cmd := &cobra.Command{
+		Use:   "attach",
+		Short: "Enable semantic search in daemon",
+		Long: `Attach the running daemon to Qdrant and enable semantic search.
+
+This command:
+1. Verifies Qdrant is running and healthy
+2. Notifies the daemon to initialize semantic search
+3. Optionally triggers re-indexing of existing documents
+
+Use this after installing Qdrant to enable semantic search without
+restarting the daemon.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit")
+
+			// First verify Qdrant is running
+			mgr := kb.NewQdrantManager(kb.QdrantConfig{
+				DataDir: dataDir,
+			})
+
+			health := mgr.CheckHealth(ctx)
+			if !health.APIReachable {
+				return fmt.Errorf("Qdrant is not running. Start it first with: conduit qdrant start")
+			}
+
+			fmt.Println("✓ Qdrant is running")
+
+			// Call daemon API to attach
+			c := newClient(socketPath)
+			data, err := c.post("/api/v1/qdrant/attach", nil)
+			if err != nil {
+				return fmt.Errorf("failed to connect to daemon: %w\n  Is the daemon running? Start with: conduit service start", err)
+			}
+
+			var result map[string]interface{}
+			if err := json.Unmarshal(data, &result); err != nil {
+				return fmt.Errorf("invalid response from daemon: %w", err)
+			}
+
+			if errMsg, ok := result["error"].(string); ok && errMsg != "" {
+				return fmt.Errorf("daemon error: %s", errMsg)
+			}
+
+			status := result["status"].(string)
+			message := result["message"].(string)
+
+			if status == "already_attached" {
+				fmt.Println("✓ Semantic search is already enabled")
+			} else {
+				fmt.Println("✓", message)
+			}
+
+			// Trigger reindex if requested
+			if reindex && status == "attached" {
+				fmt.Println()
+				fmt.Println("Re-indexing documents into vector store...")
+				data, err = c.post("/api/v1/qdrant/reindex", nil)
+				if err != nil {
+					fmt.Printf("⚠ Failed to trigger reindex: %v\n", err)
+					fmt.Println("  You can manually reindex with: conduit kb sync")
+				} else {
+					fmt.Println("✓ Re-indexing started in background")
+					fmt.Println("  Check progress with: conduit kb stats")
+				}
+			} else if status == "attached" {
+				fmt.Println()
+				fmt.Println("Index existing documents with: conduit kb sync")
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&reindex, "reindex", false, "Re-index existing documents after attach")
+
+	return cmd
 }

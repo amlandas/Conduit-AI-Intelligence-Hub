@@ -204,6 +204,14 @@ func (d *Daemon) setupRouter() {
 			r.Post("/migrate", d.handleKBMigrate)
 		})
 
+		// Qdrant management endpoints (for hot-reload semantic search)
+		r.Route("/qdrant", func(r chi.Router) {
+			r.Post("/attach", d.handleQdrantAttach)
+			r.Post("/detach", d.handleQdrantDetach)
+			r.Post("/reindex", d.handleQdrantReindex)
+			r.Get("/status", d.handleQdrantStatus)
+		})
+
 		// Status endpoint
 		r.Get("/status", d.handleStatus)
 	})

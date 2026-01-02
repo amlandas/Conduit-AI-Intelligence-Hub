@@ -505,3 +505,163 @@ func (m *QdrantManager) GetContainerName() string {
 func (m *QdrantManager) GetPorts() (httpPort, grpcPort int) {
 	return m.httpPort, m.grpcPort
 }
+
+// Stop stops the Qdrant container (preserves data).
+func (m *QdrantManager) Stop(ctx context.Context) error {
+	if m.containerCmd == "" {
+		return fmt.Errorf("no container runtime available")
+	}
+
+	running, err := m.isContainerRunning(ctx)
+	if err != nil {
+		return fmt.Errorf("check container status: %w", err)
+	}
+
+	if !running {
+		m.logger.Info().Str("container", m.containerName).Msg("container is not running")
+		return nil
+	}
+
+	m.logger.Info().Str("container", m.containerName).Msg("stopping container")
+	if err := m.runContainerCmd(ctx, "stop", m.containerName); err != nil {
+		return fmt.Errorf("stop container: %w", err)
+	}
+
+	m.logger.Info().Str("container", m.containerName).Msg("container stopped")
+	return nil
+}
+
+// Remove removes the Qdrant container (preserves storage data).
+func (m *QdrantManager) Remove(ctx context.Context) error {
+	if m.containerCmd == "" {
+		return fmt.Errorf("no container runtime available")
+	}
+
+	exists, err := m.containerExists(ctx)
+	if err != nil {
+		return fmt.Errorf("check container exists: %w", err)
+	}
+
+	if !exists {
+		m.logger.Info().Str("container", m.containerName).Msg("container does not exist")
+		return nil
+	}
+
+	// Stop first if running
+	running, _ := m.isContainerRunning(ctx)
+	if running {
+		m.logger.Info().Str("container", m.containerName).Msg("stopping container before removal")
+		_ = m.runContainerCmd(ctx, "stop", m.containerName)
+	}
+
+	m.logger.Info().Str("container", m.containerName).Msg("removing container")
+	if err := m.runContainerCmd(ctx, "rm", m.containerName); err != nil {
+		return fmt.Errorf("remove container: %w", err)
+	}
+
+	m.logger.Info().Str("container", m.containerName).Msg("container removed (storage data preserved)")
+	return nil
+}
+
+// Install installs and starts Qdrant (pulls image, creates and starts container).
+// If a container runtime is provided, it will be used; otherwise auto-detection occurs.
+func (m *QdrantManager) Install(ctx context.Context) error {
+	// Detect container runtime if not already set
+	if m.containerCmd == "" {
+		if err := m.detectContainerRuntime(); err != nil {
+			return fmt.Errorf("no container runtime: %w", err)
+		}
+	}
+
+	// Check if already running
+	if m.isAPIReachable() {
+		m.logger.Info().Int("port", m.httpPort).Msg("Qdrant is already running")
+		return nil
+	}
+
+	// Ensure storage directory exists
+	if err := m.ensureStorageDir(); err != nil {
+		return fmt.Errorf("ensure storage directory: %w", err)
+	}
+
+	// Remove existing container if any (to ensure clean state)
+	exists, _ := m.containerExists(ctx)
+	if exists {
+		m.logger.Info().Str("container", m.containerName).Msg("removing existing container")
+		_ = m.runContainerCmd(ctx, "stop", m.containerName)
+		_ = m.runContainerCmd(ctx, "rm", m.containerName)
+	}
+
+	// Pull the image first
+	m.logger.Info().Msg("pulling Qdrant image...")
+	if err := m.runContainerCmd(ctx, "pull", "docker.io/qdrant/qdrant:latest"); err != nil {
+		m.logger.Warn().Err(err).Msg("failed to pull image, trying with existing")
+	}
+
+	// Create and start container
+	m.logger.Info().Str("container", m.containerName).Msg("creating Qdrant container")
+	if err := m.createContainer(ctx); err != nil {
+		return fmt.Errorf("create container: %w", err)
+	}
+
+	// Wait for API to be ready
+	m.logger.Info().Msg("waiting for Qdrant to be ready...")
+	if err := m.waitForAPI(ctx, 60*time.Second); err != nil {
+		return fmt.Errorf("Qdrant failed to start: %w", err)
+	}
+
+	m.logger.Info().Msg("Qdrant installed and running")
+	return nil
+}
+
+// SetContainerRuntime explicitly sets the container runtime to use.
+// This is useful when the caller wants to override auto-detection.
+func (m *QdrantManager) SetContainerRuntime(runtime string) {
+	m.containerCmd = runtime
+}
+
+// DetectContainerRuntime detects and sets the container runtime.
+// Returns the detected runtime name ("docker" or "podman") or error if none available.
+func (m *QdrantManager) DetectContainerRuntime() (string, error) {
+	if err := m.detectContainerRuntime(); err != nil {
+		return "", err
+	}
+	return m.containerCmd, nil
+}
+
+// StartPodmanMachine attempts to start the Podman machine on macOS.
+// Returns true if started successfully or already running, false otherwise.
+func (m *QdrantManager) StartPodmanMachine(ctx context.Context) (bool, error) {
+	if runtime.GOOS != "darwin" {
+		return false, fmt.Errorf("Podman machine is only used on macOS")
+	}
+
+	if !m.commandExists("podman") {
+		return false, fmt.Errorf("Podman is not installed")
+	}
+
+	// Check if machine exists
+	out, err := exec.CommandContext(ctx, "podman", "machine", "list", "--format", "{{.Name}}").Output()
+	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
+		return false, fmt.Errorf("no Podman machine found, run: podman machine init")
+	}
+
+	// Check if already running
+	out, err = exec.CommandContext(ctx, "podman", "machine", "list", "--format", "{{.Running}}").Output()
+	if err == nil && strings.Contains(string(out), "true") {
+		m.logger.Info().Msg("Podman machine is already running")
+		m.containerCmd = "podman"
+		return true, nil
+	}
+
+	// Start the machine
+	m.logger.Info().Msg("starting Podman machine...")
+	cmd := exec.CommandContext(ctx, "podman", "machine", "start")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("failed to start Podman machine: %w (output: %s)", err, string(output))
+	}
+
+	m.containerCmd = "podman"
+	m.logger.Info().Msg("Podman machine started")
+	return true, nil
+}

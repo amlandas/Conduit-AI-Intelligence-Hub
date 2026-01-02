@@ -31,6 +31,7 @@ INSTALL_DIR="${HOME}/.local/bin"
 CONDUIT_HOME="${HOME}/.conduit"
 INSTALL_SERVICE=true
 SKIP_DEPS=false
+SKIP_QDRANT=false
 VERBOSE=false
 AI_PROVIDER=""  # Will be set during installation
 SHELL_RC=""     # Will be detected during installation
@@ -82,6 +83,10 @@ parse_args() {
                 ;;
             --skip-deps)
                 SKIP_DEPS=true
+                shift
+                ;;
+            --no-qdrant)
+                SKIP_QDRANT=true
                 shift
                 ;;
             --verbose)
@@ -848,6 +853,75 @@ install_ollama() {
     fi
 }
 
+# Detect container runtime with Podman-first cascading
+# Tries Podman first (preferred), falls back to Docker
+# On macOS, offers to start Podman machine if not running
+detect_container_runtime_cascading() {
+    # Try Podman first (preferred for rootless containers)
+    if command_exists podman; then
+        if [[ "$OS" == "darwin" ]]; then
+            # macOS: Check if Podman machine is running
+            if podman machine list --format '{{.Running}}' 2>/dev/null | grep -q "true"; then
+                echo "podman"
+                return 0
+            fi
+
+            # Machine exists but not running
+            if podman machine list --format '{{.Name}}' 2>/dev/null | grep -q .; then
+                echo "" >&2
+                warn "Podman machine exists but is not running." >&2
+                if confirm "Start Podman machine now?"; then
+                    info "Starting Podman machine..." >&2
+                    if podman machine start 2>&1 >&2; then
+                        success "Podman machine started" >&2
+                        echo "podman"
+                        return 0
+                    else
+                        warn "Failed to start Podman machine. Trying Docker..." >&2
+                    fi
+                fi
+            else
+                # No machine exists
+                echo "" >&2
+                info "Podman is installed but no machine exists." >&2
+                if confirm "Initialize and start Podman machine?"; then
+                    info "Initializing Podman machine..." >&2
+                    if podman machine init 2>&1 >&2; then
+                        info "Starting Podman machine..." >&2
+                        if podman machine start 2>&1 >&2; then
+                            success "Podman machine initialized and started" >&2
+                            echo "podman"
+                            return 0
+                        fi
+                    fi
+                    warn "Failed to initialize Podman machine. Trying Docker..." >&2
+                fi
+            fi
+        else
+            # Linux: Podman works natively
+            if podman ps >/dev/null 2>&1; then
+                echo "podman"
+                return 0
+            fi
+        fi
+    fi
+
+    # Fallback to Docker
+    if command_exists docker; then
+        if docker ps >/dev/null 2>&1; then
+            echo "docker"
+            return 0
+        fi
+        warn "Docker is installed but not running." >&2
+        if [[ "$OS" == "darwin" ]]; then
+            info "Please start Docker Desktop." >&2
+        fi
+    fi
+
+    # Neither available
+    return 1
+}
+
 # Install Qdrant vector database
 install_qdrant() {
     echo ""
@@ -858,35 +932,39 @@ install_qdrant() {
     echo "This enables finding documents by meaning, not just keywords."
     echo ""
 
+    # Check if --no-qdrant flag was passed
+    if [[ "$SKIP_QDRANT" == "true" ]]; then
+        info "Skipping Qdrant installation (--no-qdrant flag)"
+        echo "  Conduit will use FTS5 full-text search only."
+        echo "  Install Qdrant later with: conduit qdrant install"
+        return 0
+    fi
+
     # Check if Qdrant is already running
     if curl -s http://localhost:6333/collections >/dev/null 2>&1; then
         success "Qdrant is already running on port 6333"
         return 0
     fi
 
-    # Check if Docker/Podman is available and actually working
-    # We test with 'ps' command as 'info' can sometimes succeed when daemon has issues
+    # Detect container runtime with Podman-first cascading
     local CONTAINER_CMD=""
-    if command_exists docker && docker ps >/dev/null 2>&1; then
-        CONTAINER_CMD="docker"
-    elif command_exists podman && podman ps >/dev/null 2>&1; then
-        CONTAINER_CMD="podman"
-    elif command_exists podman && podman info >/dev/null 2>&1; then
-        # Fallback: podman info works but ps doesn't (e.g., fresh install)
-        CONTAINER_CMD="podman"
-    fi
+    CONTAINER_CMD=$(detect_container_runtime_cascading)
 
     if [[ -z "$CONTAINER_CMD" ]]; then
         warn "No container runtime available. Skipping Qdrant installation."
-        echo "You can install Qdrant manually later:"
-        echo "  docker run -d -p 6333:6333 -p 6334:6334 qdrant/qdrant"
         echo ""
-        echo "Or download from: https://qdrant.tech/documentation/quick-start/"
-        return 1
+        echo "  Conduit will use FTS5 full-text search (keyword matching)."
+        echo "  Install Qdrant later with: conduit qdrant install"
+        echo ""
+        echo "  Or install a container runtime first:"
+        echo "    macOS: brew install podman && podman machine init && podman machine start"
+        echo "    Linux: sudo apt install podman  (or docker.io)"
+        return 0  # Not an error - graceful degradation
     fi
 
     if ! confirm "Install Qdrant vector database via $CONTAINER_CMD?"; then
         warn "Skipping Qdrant installation. Semantic search will not be available."
+        echo "  Install later with: conduit qdrant install"
         return 0
     fi
 
@@ -1556,6 +1634,54 @@ verify_installation() {
     fi
 }
 
+# Print search capability summary
+print_capability_summary() {
+    echo "Search Capabilities"
+    echo "────────────────────────────────────────────────────────"
+
+    # FTS5 is always available (built into SQLite)
+    echo -e "  ${GREEN}✓${NC} Full-text search (FTS5): Available"
+
+    # Check if Qdrant is running
+    local QDRANT_RUNNING=false
+    if curl -s http://localhost:6333/collections >/dev/null 2>&1; then
+        QDRANT_RUNNING=true
+    fi
+
+    # Check if embedding model is installed
+    local EMBEDDING_AVAILABLE=false
+    if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+        if ollama list 2>/dev/null | grep -q "nomic-embed-text"; then
+            EMBEDDING_AVAILABLE=true
+        fi
+    fi
+
+    # Semantic search status
+    if [[ "$QDRANT_RUNNING" == "true" ]] && [[ "$EMBEDDING_AVAILABLE" == "true" ]]; then
+        echo -e "  ${GREEN}✓${NC} Semantic search (Qdrant + embeddings): Available"
+        echo ""
+        echo -e "  ${GREEN}Mode: Hybrid search (best results)${NC}"
+        echo "  Uses both keyword matching and meaning-based search"
+    elif [[ "$QDRANT_RUNNING" == "true" ]]; then
+        echo -e "  ${YELLOW}○${NC} Semantic search: Qdrant running, but embedding model missing"
+        echo "     Install with: ollama pull nomic-embed-text"
+        echo ""
+        echo "  Mode: FTS5 only (keyword matching)"
+    elif [[ "$SKIP_QDRANT" == "true" ]]; then
+        echo -e "  ${BLUE}○${NC} Semantic search: Skipped (--no-qdrant)"
+        echo "     Enable later with: conduit qdrant install"
+        echo ""
+        echo "  Mode: FTS5 only (keyword matching)"
+    else
+        echo -e "  ${YELLOW}○${NC} Semantic search: Not available"
+        echo "     Install with: conduit qdrant install"
+        echo ""
+        echo "  Mode: FTS5 only (keyword matching)"
+    fi
+
+    echo ""
+}
+
 # Print completion message
 print_completion() {
     echo ""
@@ -1565,6 +1691,9 @@ print_completion() {
     echo ""
     echo "Conduit is now installed!"
     echo ""
+
+    # Print search capability summary
+    print_capability_summary
 
     # Check if PATH needs update
     local NEEDS_PATH_UPDATE=false
