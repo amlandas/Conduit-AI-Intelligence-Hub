@@ -15,10 +15,10 @@ import (
 
 // Default configuration values based on RAG-Playground analysis
 const (
-	DefaultMMRLambda       = 0.7  // 70% relevance, 30% diversity
-	DefaultSimilarityFloor = 0.01 // Minimum RRF score threshold (adjusted for RRF scale)
-	DefaultRerankTopN      = 30   // Rerank top 30 candidates
-	DefaultRerankKeep      = 10   // Keep top 10 after reranking
+	DefaultMMRLambda       = 0.7   // 70% relevance, 30% diversity
+	DefaultSimilarityFloor = 0.001 // Minimum RRF score threshold (lowered to avoid filtering valid results)
+	DefaultRerankTopN      = 30    // Rerank top 30 candidates
+	DefaultRerankKeep      = 10    // Keep top 10 after reranking
 )
 
 // HybridSearcher combines FTS5 (lexical) and vector (semantic) search using RRF.
