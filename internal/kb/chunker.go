@@ -324,23 +324,60 @@ func (c *Chunker) chunkSentenceAware(content string, opts ChunkOptions) []Chunk 
 
 // splitIntoSentences splits text into sentences.
 func splitIntoSentences(text string) []string {
-	// Handle common sentence endings while avoiding false positives
-	// like "Dr.", "Mr.", "e.g.", "i.e.", numbers "3.14"
-	sentenceEnders := regexp.MustCompile(`([.!?]+)\s+(?=[A-Z"'\(\[])`)
-	text = sentenceEnders.ReplaceAllString(text, "$1\n")
-
-	// Also split on double newlines (paragraphs)
+	// First, normalize double newlines to single newlines for paragraph breaks
 	text = regexp.MustCompile(`\n{2,}`).ReplaceAllString(text, "\n")
 
-	sentences := strings.Split(text, "\n")
-	var result []string
-	for _, s := range sentences {
-		s = strings.TrimSpace(s)
-		if s != "" {
-			result = append(result, s)
+	// Split on sentence-ending punctuation followed by whitespace
+	// We'll process this manually since Go doesn't support lookahead
+	var sentences []string
+	var current strings.Builder
+
+	runes := []rune(text)
+	for i := 0; i < len(runes); i++ {
+		current.WriteRune(runes[i])
+
+		// Check for sentence ending: punctuation followed by space and uppercase
+		if (runes[i] == '.' || runes[i] == '!' || runes[i] == '?') && i+2 < len(runes) {
+			// Look for whitespace after punctuation
+			if unicode.IsSpace(runes[i+1]) {
+				// Look for uppercase letter or quote that starts next sentence
+				nextNonSpace := i + 2
+				for nextNonSpace < len(runes) && unicode.IsSpace(runes[nextNonSpace]) {
+					nextNonSpace++
+				}
+				if nextNonSpace < len(runes) {
+					nextChar := runes[nextNonSpace]
+					if unicode.IsUpper(nextChar) || nextChar == '"' || nextChar == '\'' || nextChar == '(' || nextChar == '[' {
+						// This is likely a sentence boundary
+						s := strings.TrimSpace(current.String())
+						if s != "" {
+							sentences = append(sentences, s)
+						}
+						current.Reset()
+						i++ // Skip the whitespace
+						continue
+					}
+				}
+			}
+		}
+
+		// Also break on newlines
+		if runes[i] == '\n' {
+			s := strings.TrimSpace(current.String())
+			if s != "" {
+				sentences = append(sentences, s)
+			}
+			current.Reset()
 		}
 	}
-	return result
+
+	// Don't forget the last sentence
+	s := strings.TrimSpace(current.String())
+	if s != "" {
+		sentences = append(sentences, s)
+	}
+
+	return sentences
 }
 
 // getOverlapFromEnd extracts overlap text from the end of content.
