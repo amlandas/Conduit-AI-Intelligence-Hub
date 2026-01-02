@@ -335,15 +335,13 @@ func (m *QdrantManager) CheckHealth(ctx context.Context) QdrantHealth {
 		return health
 	}
 
-	// Parse collection info
+	// Parse collection info - optimizer_status can be "ok" (string) or {error: "..."} (object)
 	var result struct {
 		Result struct {
-			Status               string `json:"status"`
-			IndexedVectorsCount  int64  `json:"indexed_vectors_count"`
-			PointsCount          int64  `json:"points_count"`
-			OptimizerStatus      struct {
-				Error string `json:"error"`
-			} `json:"optimizer_status"`
+			Status              string          `json:"status"`
+			IndexedVectorsCount int64           `json:"indexed_vectors_count"`
+			PointsCount         int64           `json:"points_count"`
+			OptimizerStatus     json.RawMessage `json:"optimizer_status"`
 		} `json:"result"`
 	}
 
@@ -356,9 +354,16 @@ func (m *QdrantManager) CheckHealth(ctx context.Context) QdrantHealth {
 	health.IndexedVectors = result.Result.IndexedVectorsCount
 	health.TotalPoints = result.Result.PointsCount
 
-	// Check for errors in optimizer status
-	if result.Result.OptimizerStatus.Error != "" {
-		health.Error = result.Result.OptimizerStatus.Error
+	// Check for errors in optimizer status (can be string "ok" or object {error: "..."})
+	if len(result.Result.OptimizerStatus) > 0 {
+		// Try to parse as object first
+		var optimizerObj struct {
+			Error string `json:"error"`
+		}
+		if err := json.Unmarshal(result.Result.OptimizerStatus, &optimizerObj); err == nil && optimizerObj.Error != "" {
+			health.Error = optimizerObj.Error
+		}
+		// If it's a string like "ok", no error to report
 	}
 
 	// Determine if recovery is needed
