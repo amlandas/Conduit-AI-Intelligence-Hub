@@ -888,17 +888,23 @@ install_qdrant() {
 
     info "Starting Qdrant container..."
 
-    # Create data directory for persistence
+    # Create data directory for persistence (critical for Qdrant to write collections)
     mkdir -p "${CONDUIT_HOME}/qdrant"
 
-    # Run Qdrant container
-    $CONTAINER_CMD run -d \
-        --name conduit-qdrant \
-        --restart unless-stopped \
-        -p 6333:6333 \
-        -p 6334:6334 \
-        -v "${CONDUIT_HOME}/qdrant:/qdrant/storage" \
-        qdrant/qdrant:latest
+    # Check if container already exists (stopped)
+    if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
+        info "Found existing conduit-qdrant container, restarting..."
+        $CONTAINER_CMD start conduit-qdrant 2>/dev/null || true
+    else
+        # Run new Qdrant container
+        $CONTAINER_CMD run -d \
+            --name conduit-qdrant \
+            --restart unless-stopped \
+            -p 6333:6333 \
+            -p 6334:6334 \
+            -v "${CONDUIT_HOME}/qdrant:/qdrant/storage" \
+            qdrant/qdrant:latest
+    fi
 
     # Wait for Qdrant to be ready
     local RETRIES=30
@@ -1190,7 +1196,11 @@ setup_launchd_service() {
     # Remove old socket to ensure clean start
     rm -f "${CONDUIT_HOME}/conduit.sock" 2>/dev/null || true
 
-    # Create new plist with correct paths
+    # Build PATH for launchd - include Homebrew paths and common binary locations
+    # Apple Silicon uses /opt/homebrew, Intel uses /usr/local
+    local DAEMON_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${INSTALL_DIR}"
+
+    # Create new plist with correct paths including PATH for finding tools like pdftotext
     info "Creating launchd service configuration..."
     cat > "$PLIST_PATH" << EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1216,6 +1226,8 @@ setup_launchd_service() {
     <dict>
         <key>HOME</key>
         <string>${HOME}</string>
+        <key>PATH</key>
+        <string>${DAEMON_PATH}</string>
     </dict>
 </dict>
 </plist>
@@ -1236,6 +1248,7 @@ EOF
     launchctl start com.simpleflo.conduit
 
     success "Conduit daemon installed as launchd service"
+    success "PATH configured in service (includes /opt/homebrew/bin for Homebrew tools)"
     info "Service will start automatically on login"
 }
 
@@ -1256,7 +1269,10 @@ setup_systemd_service() {
     # Remove old socket to ensure clean start
     rm -f "${CONDUIT_HOME}/conduit.sock" 2>/dev/null || true
 
-    # Create new service file
+    # Build PATH for systemd - include common binary locations
+    local DAEMON_PATH="/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:${INSTALL_DIR}"
+
+    # Create new service file with PATH for finding tools like pdftotext
     info "Creating systemd service configuration..."
     cat > "$SERVICE_PATH" << EOF
 [Unit]
@@ -1269,6 +1285,7 @@ ExecStart=${INSTALL_DIR}/conduit-daemon --foreground
 Restart=always
 RestartSec=10
 Environment=HOME=${HOME}
+Environment=PATH=${DAEMON_PATH}
 
 [Install]
 WantedBy=default.target
@@ -1293,6 +1310,7 @@ EOF
     sudo loginctl enable-linger "$USER" 2>/dev/null || true
 
     success "Conduit daemon installed as systemd user service"
+    success "PATH configured in service (includes standard binary locations)"
     info "Service will start automatically on login"
 }
 
