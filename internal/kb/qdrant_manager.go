@@ -175,7 +175,13 @@ func (m *QdrantManager) detectContainerRuntime() error {
 
 // ensureContainerRunning ensures the Qdrant container is running.
 func (m *QdrantManager) ensureContainerRunning(ctx context.Context) error {
-	// Check if container exists and is running
+	// First, check if Qdrant API is already reachable (e.g., from another container or external instance)
+	if m.isAPIReachable() {
+		m.logger.Info().Int("port", m.httpPort).Msg("Qdrant API already reachable, using existing instance")
+		return nil
+	}
+
+	// Check if our managed container exists and is running
 	running, err := m.isContainerRunning(ctx)
 	if err != nil {
 		m.logger.Debug().Err(err).Msg("error checking container status")
@@ -186,7 +192,7 @@ func (m *QdrantManager) ensureContainerRunning(ctx context.Context) error {
 		return nil
 	}
 
-	// Check if container exists but is stopped
+	// Check if our managed container exists but is stopped
 	exists, err := m.containerExists(ctx)
 	if err != nil {
 		m.logger.Debug().Err(err).Msg("error checking if container exists")
@@ -201,9 +207,35 @@ func (m *QdrantManager) ensureContainerRunning(ctx context.Context) error {
 		return nil
 	}
 
+	// Check if port is already in use by something else
+	if m.isPortInUse() {
+		m.logger.Warn().Int("port", m.httpPort).Msg("port already in use but API not reachable, cannot start Qdrant")
+		return fmt.Errorf("port %d already in use by another process", m.httpPort)
+	}
+
 	// Create and start new container
 	m.logger.Info().Str("container", m.containerName).Msg("creating new Qdrant container")
 	return m.createContainer(ctx)
+}
+
+// isAPIReachable checks if the Qdrant API is reachable without waiting.
+func (m *QdrantManager) isAPIReachable() bool {
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/collections", m.httpPort))
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+// isPortInUse checks if the HTTP port is already bound.
+func (m *QdrantManager) isPortInUse() bool {
+	client := &http.Client{Timeout: 1 * time.Second}
+	_, err := client.Get(fmt.Sprintf("http://localhost:%d/", m.httpPort))
+	// If we get any response (even error), port is in use
+	// Connection refused means port is free
+	return err == nil || !strings.Contains(err.Error(), "connection refused")
 }
 
 // createContainer creates a new Qdrant container.
@@ -278,24 +310,24 @@ func (m *QdrantManager) waitForAPI(ctx context.Context, timeout time.Duration) e
 func (m *QdrantManager) CheckHealth(ctx context.Context) QdrantHealth {
 	health := QdrantHealth{}
 
-	// Check if container is running
-	running, _ := m.isContainerRunning(ctx)
-	health.ContainerRunning = running
-
-	if !running {
-		health.Error = "container not running"
-		return health
-	}
-
-	// Check API reachability
+	// First check if API is reachable (works regardless of container name)
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Get(fmt.Sprintf("http://localhost:%d/collections/%s", m.httpPort, m.collectionName))
 	if err != nil {
-		health.Error = fmt.Sprintf("API error: %v", err)
+		// API not reachable - check if our managed container is running
+		running, _ := m.isContainerRunning(ctx)
+		health.ContainerRunning = running
+		if running {
+			health.Error = fmt.Sprintf("API error: %v", err)
+		} else {
+			health.Error = "Qdrant not running"
+		}
 		return health
 	}
 	defer resp.Body.Close()
 
+	// API is reachable
+	health.ContainerRunning = true // Qdrant is running (may not be our container)
 	health.APIReachable = true
 
 	if resp.StatusCode == http.StatusNotFound {
