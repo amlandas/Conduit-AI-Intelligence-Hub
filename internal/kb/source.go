@@ -284,7 +284,13 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 		return nil, err
 	}
 
-	result := &SyncResult{}
+	// Track semantic search status for this sync
+	semanticEnabled := sm.indexer.HasSemanticSearch()
+	sm.indexer.ResetSemanticErrors()
+
+	result := &SyncResult{
+		SemanticEnabled: semanticEnabled,
+	}
 
 	// Get existing documents for this source
 	existingDocs := make(map[string]string) // path -> hash
@@ -419,6 +425,7 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 	}
 
 	result.Duration = time.Since(start)
+	result.SemanticErrors = sm.indexer.GetSemanticErrors()
 
 	// Update source stats
 	sm.updateSourceStats(ctx, sourceID)
@@ -428,6 +435,8 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 		Int("added", result.Added).
 		Int("updated", result.Updated).
 		Int("deleted", result.Deleted).
+		Bool("semantic_enabled", result.SemanticEnabled).
+		Int("semantic_errors", result.SemanticErrors).
 		Dur("duration", result.Duration).
 		Msg("sync completed")
 

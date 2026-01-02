@@ -110,9 +110,10 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 }
 
 // prepareFTSQuery prepares a query string for FTS5.
+// This sanitizes the query to prevent FTS5 syntax errors from special characters.
 func (s *Searcher) prepareFTSQuery(query string) string {
-	// Escape special FTS5 characters
-	query = strings.ReplaceAll(query, "\"", "\"\"")
+	// Sanitize the query to remove/escape FTS5 special characters
+	query = sanitizeFTSQuery(query)
 
 	// Split into terms
 	terms := strings.Fields(query)
@@ -123,19 +124,80 @@ func (s *Searcher) prepareFTSQuery(query string) string {
 	// Build phrase or term query
 	if len(terms) == 1 {
 		// Single term - use prefix matching
-		return fmt.Sprintf("%s*", terms[0])
+		term := terms[0]
+		// Skip prefix for very short terms or terms ending with special chars
+		if len(term) >= 2 && !strings.ContainsAny(term, ".-") {
+			return fmt.Sprintf("%s*", term)
+		}
+		return term
 	}
 
 	// Multiple terms - use AND logic with prefix on last term
 	var parts []string
 	for i, term := range terms {
-		if i == len(terms)-1 {
+		if i == len(terms)-1 && len(term) >= 2 && !strings.ContainsAny(term, ".-") {
 			parts = append(parts, fmt.Sprintf("%s*", term))
 		} else {
 			parts = append(parts, term)
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// sanitizeFTSQuery removes or escapes FTS5 special characters to prevent syntax errors.
+// FTS5 has several special characters that can cause syntax errors:
+// - Double quotes (") - phrase delimiters
+// - Single quotes (') - can cause issues in some contexts
+// - Asterisk (*) - wildcard suffix
+// - Caret (^) - boost operator
+// - Parentheses () - grouping
+// - Colon (:) - column specifier (e.g., "title:search")
+// - Plus/Minus (+/-) - required/excluded terms
+// - Curly braces {} - NEAR queries
+// - Period (.) - special in column names
+func sanitizeFTSQuery(query string) string {
+	// First, handle double quotes - escape them by doubling
+	query = strings.ReplaceAll(query, "\"", "")
+
+	// Remove characters that cause syntax errors
+	// These characters have special meaning in FTS5 and will cause parse errors
+	// if not properly handled
+	specialChars := []string{
+		"'",  // Single quote - causes "syntax error near '"
+		"(",  // Open paren - grouping
+		")",  // Close paren - grouping
+		":",  // Colon - column specifier (causes "no such column" errors)
+		"^",  // Caret - boost operator
+		"{",  // Open brace - NEAR query
+		"}",  // Close brace - NEAR query
+		"[",  // Open bracket
+		"]",  // Close bracket
+		"+",  // Plus - required term
+		"*",  // Asterisk - wildcard (we add our own)
+	}
+
+	for _, char := range specialChars {
+		query = strings.ReplaceAll(query, char, " ")
+	}
+
+	// Handle hyphens specially - keep them in hyphenated words but remove standalone
+	// "self-objectification" -> "self-objectification" (keep)
+	// "- something" -> "something" (remove leading hyphen)
+	words := strings.Fields(query)
+	var cleanedWords []string
+	for _, word := range words {
+		// Remove leading/trailing hyphens
+		word = strings.Trim(word, "-")
+		if word != "" {
+			cleanedWords = append(cleanedWords, word)
+		}
+	}
+
+	// Rejoin and clean up multiple spaces
+	result := strings.Join(cleanedWords, " ")
+	result = strings.TrimSpace(result)
+
+	return result
 }
 
 // buildSearchSQL constructs the search query with filters.

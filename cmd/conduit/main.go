@@ -588,72 +588,129 @@ func statusCmd() *cobra.Command {
 			var status map[string]interface{}
 			json.Unmarshal(data, &status)
 
-			fmt.Println("Conduit Status")
-			fmt.Println("==============")
+			fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+			fmt.Println("║                     Conduit Status                           ║")
+			fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+			fmt.Println()
+
+			// Daemon Info
+			fmt.Println("📡 Daemon")
+			fmt.Println("────────────────────────────────────────────────────────")
 			if daemon, ok := status["daemon"].(map[string]interface{}); ok {
-				fmt.Printf("Version: %s\n", daemon["version"])
-				fmt.Printf("Uptime:  %s\n", daemon["uptime"])
-				fmt.Printf("Ready:   %v\n", daemon["ready"])
+				fmt.Printf("   Version: %s\n", daemon["version"])
+				fmt.Printf("   Uptime:  %s\n", daemon["uptime"])
+				ready := daemon["ready"].(bool)
+				if ready {
+					fmt.Println("   Status:  ✓ Ready")
+				} else {
+					fmt.Println("   Status:  ⚠️  Not Ready")
+				}
 			}
 			if instances, ok := status["instances"].(map[string]interface{}); ok {
-				fmt.Printf("\nInstances: %v total\n", instances["total"])
+				fmt.Printf("   Instances: %v\n", instances["total"])
 			}
 			if bindings, ok := status["bindings"].(map[string]interface{}); ok {
-				fmt.Printf("Bindings:  %v total\n", bindings["total"])
+				fmt.Printf("   Bindings:  %v\n", bindings["total"])
 			}
 
-			// Runtime Information
-			fmt.Println("\nRuntime")
-			fmt.Println("-------")
+			// Dependencies section - from daemon
+			fmt.Println()
+			fmt.Println("🔧 Managed Dependencies")
+			fmt.Println("────────────────────────────────────────────────────────")
 
-			// Container runtime
-			ctx := cmd.Context()
-			rtName, rtVersion := getActiveContainerRuntime(ctx)
-			if rtName != "none" {
-				fmt.Printf("Container: %s %s\n", rtName, rtVersion)
-			} else {
-				fmt.Println("Container: none available")
+			if deps, ok := status["dependencies"].(map[string]interface{}); ok {
+				// Container Runtime
+				if container, ok := deps["container_runtime"].(map[string]interface{}); ok {
+					available := container["available"].(bool)
+					if available {
+						runtime := container["runtime"].(string)
+						containerName := ""
+						if cn, ok := container["container"].(string); ok {
+							containerName = cn
+						}
+						fmt.Printf("   Container Runtime: ✓ %s (managed)\n", strings.Title(runtime))
+						if containerName != "" {
+							fmt.Printf("                      Container: %s\n", containerName)
+						}
+					} else {
+						fmt.Println("   Container Runtime: ○ Not available")
+					}
+				}
+
+				// Qdrant (Vector DB)
+				if qdrant, ok := deps["qdrant"].(map[string]interface{}); ok {
+					available := qdrant["available"].(bool)
+					qdrantStatus := qdrant["status"].(string)
+					if available {
+						vectors := int64(0)
+						if v, ok := qdrant["vectors"].(float64); ok {
+							vectors = int64(v)
+						}
+						fmt.Printf("   Vector Database:   ✓ Qdrant (%s, %d vectors)\n", qdrantStatus, vectors)
+					} else {
+						fmt.Printf("   Vector Database:   ○ Qdrant (%s)\n", qdrantStatus)
+					}
+				}
+
+				// Semantic Search
+				if semantic, ok := deps["semantic_search"].(map[string]interface{}); ok {
+					enabled := semantic["enabled"].(bool)
+					model := semantic["embedding_model"].(string)
+					if enabled {
+						fmt.Printf("   Semantic Search:   ✓ Enabled (%s)\n", model)
+					} else {
+						fmt.Println("   Semantic Search:   ○ Disabled")
+					}
+				}
+
+				// FTS5
+				if fts5, ok := deps["full_text_search"].(map[string]interface{}); ok {
+					available := fts5["available"].(bool)
+					if available {
+						fmt.Println("   Full-Text Search:  ✓ SQLite FTS5")
+					}
+				}
 			}
 
-			// AI Provider
+			// AI Provider section
+			fmt.Println()
+			fmt.Println("🤖 AI Provider")
+			fmt.Println("────────────────────────────────────────────────────────")
+
 			cfg, cfgErr := config.Load()
 			if cfgErr == nil {
 				if cfg.AI.Provider == "ollama" {
 					if checkOllamaRunning() {
-						fmt.Printf("AI:        Ollama (local) - %s\n", cfg.AI.Model)
+						fmt.Printf("   Provider: ✓ Ollama (local)\n")
+						fmt.Printf("   Model:    %s\n", cfg.AI.Model)
 						// List installed models
 						if models, err := getOllamaModels(); err == nil && len(models) > 0 {
-							fmt.Printf("Models:    %s\n", strings.Join(models, ", "))
+							fmt.Printf("   Available: %s\n", strings.Join(models, ", "))
 						}
 					} else {
-						fmt.Printf("AI:        Ollama (not running)\n")
+						fmt.Printf("   Provider: ⚠️  Ollama (not running)\n")
+						fmt.Println("   Hint:     Start with 'ollama serve'")
 					}
 				} else if cfg.AI.Provider == "anthropic" {
 					if os.Getenv("ANTHROPIC_API_KEY") != "" {
-						fmt.Printf("AI:        Anthropic (cloud) - %s\n", cfg.AI.Model)
+						fmt.Printf("   Provider: ✓ Anthropic (cloud)\n")
+						fmt.Printf("   Model:    %s\n", cfg.AI.Model)
 					} else {
-						fmt.Printf("AI:        Anthropic (API key not set)\n")
+						fmt.Printf("   Provider: ❌ Anthropic (API key not set)\n")
 					}
 				} else if cfg.AI.Provider == "openai" {
 					if os.Getenv("OPENAI_API_KEY") != "" {
-						fmt.Printf("AI:        OpenAI (cloud) - %s\n", cfg.AI.Model)
+						fmt.Printf("   Provider: ✓ OpenAI (cloud)\n")
+						fmt.Printf("   Model:    %s\n", cfg.AI.Model)
 					} else {
-						fmt.Printf("AI:        OpenAI (API key not set)\n")
+						fmt.Printf("   Provider: ❌ OpenAI (API key not set)\n")
 					}
 				} else {
-					fmt.Printf("AI:        %s - %s\n", cfg.AI.Provider, cfg.AI.Model)
-				}
-			}
-
-			// Semantic Search status
-			if checkQdrantRunning() {
-				if count, err := getQdrantVectorCount(); err == nil {
-					fmt.Printf("Vectors:   %d in Qdrant\n", count)
-				} else {
-					fmt.Println("Vectors:   Qdrant running (no collection yet)")
+					fmt.Printf("   Provider: %s\n", cfg.AI.Provider)
+					fmt.Printf("   Model:    %s\n", cfg.AI.Model)
 				}
 			} else {
-				fmt.Println("Vectors:   Qdrant not running (FTS5 fallback)")
+				fmt.Println("   Provider: ○ Not configured")
 			}
 
 			return nil
@@ -1839,6 +1896,23 @@ Examples:
 				fmt.Printf("  Updated: %d documents\n", updated)
 				fmt.Printf("  Deleted: %d documents\n", deleted)
 
+				// Show semantic search status
+				if semanticEnabled, ok := result["semantic_enabled"].(bool); ok {
+					if semanticEnabled {
+						semanticErrors := 0
+						if se, ok := result["semantic_errors"].(float64); ok {
+							semanticErrors = int(se)
+						}
+						if semanticErrors > 0 {
+							fmt.Printf("  Vectors: %d documents failed (FTS5 fallback used)\n", semanticErrors)
+						} else {
+							fmt.Printf("  Vectors: ✓ indexed\n")
+						}
+					} else {
+						fmt.Printf("  Vectors: disabled (Qdrant/Ollama unavailable)\n")
+					}
+				}
+
 				if errors, ok := result["errors"].([]interface{}); ok && len(errors) > 0 {
 					fmt.Printf("  Errors:  %d\n", len(errors))
 					for _, e := range errors {
@@ -2018,6 +2092,7 @@ Checks:
 
 			c := newClient(socketPath)
 			healthData, err := c.get("/api/v1/health")
+			var daemonStatus map[string]interface{} // Shared across checks
 			if err != nil {
 				fmt.Println("❌ Daemon not running or unreachable")
 				fmt.Printf("   Socket: %s\n", socketPath)
@@ -2034,19 +2109,18 @@ Checks:
 					warnings++
 				}
 
-				// Get status info
+				// Get status info (with dependencies)
 				statusData, _ := c.get("/api/v1/status")
-				var status map[string]interface{}
-				json.Unmarshal(statusData, &status)
+				json.Unmarshal(statusData, &daemonStatus)
 
-				if daemon, ok := status["daemon"].(map[string]interface{}); ok {
+				if daemon, ok := daemonStatus["daemon"].(map[string]interface{}); ok {
 					if verbose {
 						fmt.Printf("   Version: %s\n", daemon["version"])
 						fmt.Printf("   Uptime:  %s\n", daemon["uptime"])
 					}
 				}
 
-				if instances, ok := status["instances"].(map[string]interface{}); ok {
+				if instances, ok := daemonStatus["instances"].(map[string]interface{}); ok {
 					total := int(instances["total"].(float64))
 					fmt.Printf("   Instances: %d\n", total)
 				}
@@ -2061,18 +2135,44 @@ Checks:
 			selector := containerRuntime.NewSelector("")
 			runtimes := selector.DetectAll(ctx)
 
+			// Check what daemon is actually using
+			daemonRuntime := ""
+			daemonContainer := ""
+			if daemonStatus != nil {
+				if deps, ok := daemonStatus["dependencies"].(map[string]interface{}); ok {
+					if container, ok := deps["container_runtime"].(map[string]interface{}); ok {
+						if available, ok := container["available"].(bool); ok && available {
+							if rt, ok := container["runtime"].(string); ok {
+								daemonRuntime = rt
+							}
+							if cn, ok := container["container"].(string); ok {
+								daemonContainer = cn
+							}
+						}
+					}
+				}
+			}
+
 			anyAvailable := false
 			for _, rt := range runtimes {
 				if rt.Available {
 					anyAvailable = true
-					status := "✓"
-					if rt.Preferred {
-						status = "✓ (preferred)"
+					statusMark := "✓"
+					extra := ""
+					if strings.ToLower(rt.Name) == daemonRuntime {
+						statusMark = "★"
+						extra = " (used by Conduit)"
+					} else if rt.Preferred {
+						extra = " (preferred)"
 					}
-					fmt.Printf("%s %s %s\n", status, rt.Name, rt.Version)
+					fmt.Printf("%s %s %s%s\n", statusMark, rt.Name, rt.Version, extra)
 				} else {
 					fmt.Printf("○ %s (not installed)\n", rt.Name)
 				}
+			}
+
+			if daemonRuntime != "" && daemonContainer != "" {
+				fmt.Printf("   Managed container: %s\n", daemonContainer)
 			}
 
 			if !anyAvailable {
@@ -2157,19 +2257,63 @@ Checks:
 			fmt.Println("🔍 Semantic Search")
 			fmt.Println("────────────────────────────────────────────────────────")
 
+			// Get daemon's view of semantic search status
+			daemonSemanticEnabled := false
+			daemonQdrantStatus := ""
+			daemonVectorCount := int64(0)
+			if daemonStatus != nil {
+				if deps, ok := daemonStatus["dependencies"].(map[string]interface{}); ok {
+					if semantic, ok := deps["semantic_search"].(map[string]interface{}); ok {
+						if enabled, ok := semantic["enabled"].(bool); ok {
+							daemonSemanticEnabled = enabled
+						}
+					}
+					if qdrant, ok := deps["qdrant"].(map[string]interface{}); ok {
+						if qs, ok := qdrant["status"].(string); ok {
+							daemonQdrantStatus = qs
+						}
+						if vc, ok := qdrant["vectors"].(float64); ok {
+							daemonVectorCount = int64(vc)
+						}
+					}
+				}
+			}
+
 			qdrantRunning := checkQdrantRunning()
 			if qdrantRunning {
-				fmt.Println("✓ Qdrant vector database is running")
-				if count, err := getQdrantVectorCount(); err == nil {
+				if daemonQdrantStatus != "" && daemonQdrantStatus != "unknown" {
+					fmt.Printf("✓ Qdrant vector database: %s\n", daemonQdrantStatus)
+				} else {
+					fmt.Println("✓ Qdrant vector database is running")
+				}
+				if daemonVectorCount > 0 {
+					fmt.Printf("   Collection: conduit_kb (%d vectors)\n", daemonVectorCount)
+				} else if count, err := getQdrantVectorCount(); err == nil {
 					fmt.Printf("   Collection: conduit_kb (%d vectors)\n", count)
 				} else {
 					fmt.Println("   Collection: not yet created (run 'conduit kb sync')")
 				}
+				if daemonContainer != "" {
+					fmt.Println("   Managed by: Conduit (auto-started)")
+				}
 			} else {
 				fmt.Println("⚠️  Qdrant not running")
 				fmt.Println("   Semantic search unavailable (using FTS5 fallback)")
-				fmt.Println("   Start with: docker run -d -p 6333:6333 qdrant/qdrant")
+				if daemonRuntime != "" {
+					fmt.Println("   Conduit will auto-start on daemon restart")
+				} else {
+					fmt.Println("   Install Docker/Podman for auto-managed Qdrant")
+				}
 				warnings++
+			}
+
+			// Show if daemon has semantic search enabled
+			if daemonStatus != nil {
+				if daemonSemanticEnabled {
+					fmt.Println("   Daemon: Semantic search ENABLED")
+				} else {
+					fmt.Println("   Daemon: Semantic search DISABLED (FTS5 fallback)")
+				}
 			}
 
 			// Check for embedding model
