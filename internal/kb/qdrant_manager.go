@@ -130,14 +130,23 @@ func (m *QdrantManager) EnsureReady(ctx context.Context) error {
 	return nil
 }
 
-// ensureStorageDir creates the Qdrant storage directory if it doesn't exist.
+// ensureStorageDir creates the Qdrant storage directory structure if it doesn't exist.
 func (m *QdrantManager) ensureStorageDir() error {
-	// Create the main storage directory
-	if err := os.MkdirAll(m.storageDir, 0755); err != nil {
-		return fmt.Errorf("create storage directory: %w", err)
+	// Create the main storage directory and subdirectories that Qdrant expects
+	// This prevents "No such file or directory" errors when Qdrant tries to create collections
+	dirs := []string{
+		m.storageDir,
+		filepath.Join(m.storageDir, "collections"),
+		filepath.Join(m.storageDir, "snapshots"),
 	}
 
-	m.logger.Debug().Str("path", m.storageDir).Msg("storage directory ready")
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("create directory %s: %w", dir, err)
+		}
+	}
+
+	m.logger.Debug().Str("path", m.storageDir).Msg("storage directory structure ready")
 	return nil
 }
 
@@ -240,12 +249,27 @@ func (m *QdrantManager) isPortInUse() bool {
 
 // createContainer creates a new Qdrant container.
 func (m *QdrantManager) createContainer(ctx context.Context) error {
+	// Ensure storage directory structure exists before mounting
+	// Qdrant needs the collections subdirectory to exist
+	collectionsDir := filepath.Join(m.storageDir, "collections")
+	if err := os.MkdirAll(collectionsDir, 0755); err != nil {
+		return fmt.Errorf("create collections directory: %w", err)
+	}
+	m.logger.Debug().Str("path", collectionsDir).Msg("ensured collections directory exists")
+
+	// Build volume mount - use :Z for SELinux on Linux only
+	// macOS and Windows don't use SELinux and :Z can cause issues with Podman
+	volumeMount := fmt.Sprintf("%s:/qdrant/storage", m.storageDir)
+	if runtime.GOOS == "linux" {
+		volumeMount += ":Z"
+	}
+
 	args := []string{
 		"run", "-d",
 		"--name", m.containerName,
 		"-p", fmt.Sprintf("%d:%d", m.httpPort, 6333),
 		"-p", fmt.Sprintf("%d:%d", m.grpcPort, 6334),
-		"-v", fmt.Sprintf("%s:/qdrant/storage:Z", m.storageDir),
+		"-v", volumeMount,
 		"docker.io/qdrant/qdrant:latest",
 	}
 
