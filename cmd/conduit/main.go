@@ -519,6 +519,16 @@ func checkQdrantRunning() bool {
 	return strings.TrimSpace(string(out)) == "200"
 }
 
+// checkFalkorDBRunning checks if FalkorDB is accessible on localhost:6379
+func checkFalkorDBRunning() bool {
+	conn, err := net.DialTimeout("tcp", "localhost:6379", 2*time.Second)
+	if err != nil {
+		return false
+	}
+	conn.Close()
+	return true
+}
+
 // getQdrantVectorCount returns the number of vectors in the conduit_kb collection
 func getQdrantVectorCount() (int64, error) {
 	cmd := exec.Command("curl", "-s", "http://localhost:6333/collections/conduit_kb")
@@ -723,6 +733,65 @@ func statusCmd() *cobra.Command {
 				}
 			} else {
 				fmt.Println("   Provider: ○ Not configured")
+			}
+
+			// KAG (Knowledge Graph) section
+			fmt.Println()
+			fmt.Println("🔮 Knowledge Graph (KAG)")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			if cfg != nil && cfg.KB.KAG.Enabled {
+				fmt.Println("   Status:   ✓ Enabled")
+				fmt.Printf("   Provider: %s\n", cfg.KB.KAG.Provider)
+				if cfg.KB.KAG.Provider == "ollama" {
+					fmt.Printf("   Model:    %s\n", cfg.KB.KAG.Ollama.Model)
+				}
+
+				// Check FalkorDB status
+				if checkFalkorDBRunning() {
+					fmt.Println("   FalkorDB: ✓ Running")
+				} else {
+					fmt.Println("   FalkorDB: ○ Not running")
+				}
+
+				// Get KAG stats from database
+				homeDir, _ := os.UserHomeDir()
+				dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+				if db, err := store.New(dbPath); err == nil {
+					defer db.Close()
+
+					var entityCount, relationCount int
+					db.DB().QueryRow("SELECT COUNT(*) FROM kb_entities").Scan(&entityCount)
+					db.DB().QueryRow("SELECT COUNT(*) FROM kb_relations").Scan(&relationCount)
+
+					fmt.Printf("   Entities:  %d\n", entityCount)
+					fmt.Printf("   Relations: %d\n", relationCount)
+
+					// Get extraction status
+					var completed, pending, errors int
+					db.DB().QueryRow(`
+						SELECT COUNT(*) FROM kb_extraction_status WHERE status = 'completed'
+					`).Scan(&completed)
+					db.DB().QueryRow(`
+						SELECT COUNT(*) FROM kb_chunks c
+						LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+						WHERE s.status IS NULL
+					`).Scan(&pending)
+					db.DB().QueryRow(`
+						SELECT COUNT(*) FROM kb_extraction_status WHERE status = 'error'
+					`).Scan(&errors)
+
+					if pending > 0 || completed > 0 {
+						fmt.Printf("   Progress:  %d/%d chunks extracted", completed, completed+pending)
+						if errors > 0 {
+							fmt.Printf(" (%d errors)", errors)
+						}
+						fmt.Println()
+					}
+				}
+			} else {
+				fmt.Println("   Status:   ○ Disabled")
+				fmt.Println("   Enable:   Set kb.kag.enabled=true in config")
 			}
 
 			return nil
@@ -2413,6 +2482,82 @@ Checks:
 				}
 			} else if !checkOllamaRunning() {
 				fmt.Println("○ Embedding model check skipped (Ollama not running)")
+			}
+
+			// Check KAG (Knowledge Graph)
+			fmt.Println()
+			fmt.Println("🔮 Knowledge Graph (KAG)")
+			fmt.Println("────────────────────────────────────────────────────────")
+
+			if cfg != nil && cfg.KB.KAG.Enabled {
+				fmt.Println("✓ KAG is enabled")
+				fmt.Printf("   Provider: %s\n", cfg.KB.KAG.Provider)
+
+				// Check FalkorDB
+				if checkFalkorDBRunning() {
+					fmt.Println("✓ FalkorDB is running")
+				} else {
+					fmt.Println("⚠️  FalkorDB not running")
+					fmt.Println("   Graph queries will be slower (SQLite fallback)")
+					fmt.Println("   Start with: conduit falkordb start")
+					warnings++
+				}
+
+				// Check KAG extraction model
+				if cfg.KB.KAG.Provider == "ollama" {
+					kagModel := cfg.KB.KAG.Ollama.Model
+					if kagModel == "" {
+						kagModel = "mistral:7b-instruct-q4_K_M"
+					}
+					if models, err := getOllamaModels(); err == nil {
+						hasKagModel := false
+						for _, m := range models {
+							if strings.Contains(m, "mistral") {
+								hasKagModel = true
+								break
+							}
+						}
+						if hasKagModel {
+							fmt.Printf("✓ KAG model available: %s\n", kagModel)
+						} else {
+							fmt.Printf("⚠️  KAG model not installed: %s\n", kagModel)
+							fmt.Println("   Pull with: ollama pull mistral:7b-instruct-q4_K_M")
+							warnings++
+						}
+					} else if !checkOllamaRunning() {
+						fmt.Println("○ KAG model check skipped (Ollama not running)")
+					}
+				}
+
+				// Get KAG extraction stats
+				homeDir, _ := os.UserHomeDir()
+				dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+				if db, err := store.New(dbPath); err == nil {
+					defer db.Close()
+
+					var entityCount, relationCount int
+					db.DB().QueryRow("SELECT COUNT(*) FROM kb_entities").Scan(&entityCount)
+					db.DB().QueryRow("SELECT COUNT(*) FROM kb_relations").Scan(&relationCount)
+
+					var completed, pending int
+					db.DB().QueryRow(`SELECT COUNT(*) FROM kb_extraction_status WHERE status = 'completed'`).Scan(&completed)
+					db.DB().QueryRow(`
+						SELECT COUNT(*) FROM kb_chunks c
+						LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+						WHERE s.status IS NULL
+					`).Scan(&pending)
+
+					fmt.Printf("   Entities:  %d\n", entityCount)
+					fmt.Printf("   Relations: %d\n", relationCount)
+					if pending > 0 {
+						fmt.Printf("   Pending:   %d chunks (run 'conduit kb kag-sync')\n", pending)
+					} else if completed > 0 {
+						fmt.Printf("   Status:    All %d chunks extracted\n", completed)
+					}
+				}
+			} else {
+				fmt.Println("○ KAG is disabled")
+				fmt.Println("   Enable in config: kb.kag.enabled=true")
 			}
 
 			// Check AI clients
@@ -4207,8 +4352,45 @@ Examples:
 			// Create KAG config
 			kagCfg := kb.DefaultKAGConfig()
 			kagCfg.Enabled = true
+			kagCfg.Extraction.EnableBackground = false // CLI does synchronous extraction
 			if provider != "" {
 				kagCfg.Provider = provider
+			}
+
+			// Check Ollama is running and model is available
+			if kagCfg.Provider == "ollama" {
+				if !checkOllamaRunning() {
+					return fmt.Errorf("Ollama is not running.\n\nStart with: ollama serve")
+				}
+
+				// Check if model is available
+				kagModel := kagCfg.Ollama.Model
+				if kagModel == "" {
+					kagModel = "mistral:7b-instruct-q4_K_M"
+				}
+
+				models, err := getOllamaModels()
+				if err != nil {
+					return fmt.Errorf("cannot list Ollama models: %w", err)
+				}
+
+				hasModel := false
+				for _, m := range models {
+					if strings.Contains(m, "mistral") {
+						hasModel = true
+						break
+					}
+				}
+
+				if !hasModel {
+					fmt.Printf("KAG extraction model not found: %s\n\n", kagModel)
+					fmt.Println("Pull the model first:")
+					fmt.Printf("  ollama pull %s\n\n", kagModel)
+					fmt.Println("This may take a few minutes to download (~4GB).")
+					return nil
+				}
+
+				fmt.Printf("Using extraction model: %s\n", kagModel)
 			}
 
 			// Create provider
@@ -4275,9 +4457,31 @@ Examples:
 			}
 			defer rows.Close()
 
+			// Count total chunks to process
+			var totalChunks int
+			if force {
+				db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_chunks").Scan(&totalChunks)
+			} else {
+				db.DB().QueryRowContext(ctx, `
+					SELECT COUNT(*) FROM kb_chunks c
+					LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+					WHERE s.status IS NULL OR s.status = 'error'
+				`).Scan(&totalChunks)
+			}
+
+			if totalChunks == 0 {
+				fmt.Println("No chunks to process. All documents have been extracted.")
+				fmt.Println()
+				fmt.Println("Use --force to re-extract all chunks.")
+				return nil
+			}
+
 			// Process chunks
 			var processed, errors int
-			fmt.Println("Extracting entities from documents...")
+			fmt.Printf("Extracting entities from %d chunks...\n", totalChunks)
+			fmt.Println()
+			fmt.Println("NOTE: First extraction may take 1-2 minutes per chunk while the model loads.")
+			fmt.Println("      Subsequent extractions will be faster (~10-30 seconds each).")
 			fmt.Println()
 
 			for rows.Next() {
@@ -4286,20 +4490,25 @@ Examples:
 					continue
 				}
 
+				// Show progress
+				current := processed + errors + 1
+				fmt.Printf("[%d/%d] Processing chunk %s...\n", current, totalChunks, chunkID[:16])
+
 				// Get document title
 				var title string
 				db.DB().QueryRowContext(ctx, "SELECT title FROM kb_documents WHERE document_id = ?", documentID).Scan(&title)
 
+				startTime := time.Now()
 				result, err := extractor.ExtractFromChunk(ctx, chunkID, documentID, title, content)
+				elapsed := time.Since(startTime)
+
 				if err != nil {
 					errors++
-					if advanced {
-						fmt.Printf("  ✗ %s: %v\n", chunkID[:16], err)
-					}
+					fmt.Printf("        ✗ Error: %v (%.1fs)\n", err, elapsed.Seconds())
 				} else {
 					processed++
-					fmt.Printf("  ✓ %s: %d entities, %d relations\n",
-						chunkID[:16], len(result.Entities), len(result.Relations))
+					fmt.Printf("        ✓ %d entities, %d relations (%.1fs)\n",
+						len(result.Entities), len(result.Relations), elapsed.Seconds())
 				}
 			}
 

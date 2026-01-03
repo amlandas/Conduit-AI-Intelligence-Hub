@@ -41,7 +41,7 @@ func NewOllamaProvider(cfg OllamaProviderConfig) (*OllamaProvider, error) {
 		cfg.KeepAlive = "5m"
 	}
 	if cfg.Timeout == 0 {
-		cfg.Timeout = 120 * time.Second
+		cfg.Timeout = 300 * time.Second // 5 minutes - allows for model loading on first run
 	}
 
 	return &OllamaProvider{
