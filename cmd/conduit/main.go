@@ -1732,7 +1732,9 @@ Examples:
 
 func kbSearchCmd() *cobra.Command {
 	var semantic, fts5, raw bool
-	var contextChunks int
+	var contextChunks, limit int
+	var minScore, semanticWeight, mmrLambda float64
+	var disableMMR, disableRerank bool
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -1751,12 +1753,26 @@ The hybrid mode automatically detects:
 Results are processed by default (merged chunks, filtered boilerplate).
 Use --raw to get unprocessed results.
 
+ADVANCED MODE: RAG tuning flags allow fine-grained control over retrieval:
+  --min-score         Minimum similarity threshold (0.0-1.0, default 0.1)
+  --semantic-weight   Balance between semantic/lexical (0.0-1.0, default 0.5)
+  --mmr-lambda        Relevance vs diversity (0.0-1.0, default 0.7)
+
 Examples:
   conduit kb search "how does authentication work"    # Hybrid RRF (default)
   conduit kb search "Oak Ridge laboratories"          # Auto-detects proper noun
   conduit kb search "authentication" --semantic       # Force semantic only
   conduit kb search "class AuthProvider" --fts5       # Force keyword only
-  conduit kb search "query" --raw                     # Raw chunks without processing`,
+  conduit kb search "query" --raw                     # Raw chunks without processing
+
+  # Advanced: Lower threshold for more permissive matching
+  conduit kb search "ASL-3 safeguards" --min-score 0.05
+
+  # Advanced: Pure semantic search with low threshold
+  conduit kb search "AI safety deployment" --semantic --min-score 0.0
+
+  # Advanced: Higher relevance, less diversity
+  conduit kb search "authentication" --mmr-lambda 0.9`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
@@ -1780,6 +1796,26 @@ Examples:
 			}
 			if contextChunks > 0 {
 				apiURL += fmt.Sprintf("&context=%d", contextChunks)
+			}
+			if limit > 0 {
+				apiURL += fmt.Sprintf("&limit=%d", limit)
+			}
+
+			// Advanced RAG parameters
+			if minScore >= 0 {
+				apiURL += fmt.Sprintf("&min_score=%.4f", minScore)
+			}
+			if semanticWeight >= 0 {
+				apiURL += fmt.Sprintf("&semantic_weight=%.2f", semanticWeight)
+			}
+			if mmrLambda >= 0 {
+				apiURL += fmt.Sprintf("&mmr_lambda=%.2f", mmrLambda)
+			}
+			if disableMMR {
+				apiURL += "&enable_mmr=false"
+			}
+			if disableRerank {
+				apiURL += "&enable_rerank=false"
 			}
 
 			data, err := c.get(apiURL)
@@ -1871,6 +1907,14 @@ Examples:
 	cmd.Flags().BoolVar(&fts5, "fts5", false, "Force FTS5 keyword search")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Return raw chunks without processing")
 	cmd.Flags().IntVar(&contextChunks, "context", 0, "Number of adjacent chunks to include")
+	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum results to return (default: 10)")
+
+	// Advanced RAG tuning flags
+	cmd.Flags().Float64Var(&minScore, "min-score", -1, "Minimum similarity threshold (0.0-1.0)")
+	cmd.Flags().Float64Var(&semanticWeight, "semantic-weight", -1, "Semantic vs lexical weight (0.0-1.0)")
+	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", -1, "Relevance vs diversity balance (0.0-1.0)")
+	cmd.Flags().BoolVar(&disableMMR, "no-mmr", false, "Disable MMR diversity filtering")
+	cmd.Flags().BoolVar(&disableRerank, "no-rerank", false, "Disable semantic reranking")
 
 	return cmd
 }

@@ -663,14 +663,31 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 // kbHybridOpts parses hybrid search options from request.
+// Uses RAG config defaults, with query parameter overrides for advanced users.
 func (d *Daemon) kbHybridOpts(r *http.Request) kb.HybridSearchOptions {
+	ragCfg := d.cfg.KB.RAG
+
+	// Start with config defaults
 	opts := kb.HybridSearchOptions{
-		Limit:          10,
-		Mode:           kb.HybridModeAuto,
-		SemanticWeight: 0.5,
-		RRFConstant:    60,
+		Limit:           ragCfg.DefaultLimit,
+		Mode:            kb.HybridModeAuto,
+		SemanticWeight:  ragCfg.SemanticWeight,
+		RRFConstant:     60,
+		EnableMMR:       ragCfg.EnableMMR,
+		MMRLambda:       ragCfg.MMRLambda,
+		SimilarityFloor: ragCfg.MinScore,
+		EnableRerank:    ragCfg.EnableRerank,
 	}
 
+	// Fallback to safe defaults if config values are zero
+	if opts.Limit <= 0 {
+		opts.Limit = 10
+	}
+	if opts.SimilarityFloor <= 0 {
+		opts.SimilarityFloor = 0.1
+	}
+
+	// Query parameter overrides (advanced mode)
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
 			opts.Limit = limit
@@ -688,6 +705,33 @@ func (d *Daemon) kbHybridOpts(r *http.Request) kb.HybridSearchOptions {
 		default:
 			opts.Mode = kb.HybridModeAuto
 		}
+	}
+
+	// Advanced RAG parameter overrides
+	if minScoreStr := r.URL.Query().Get("min_score"); minScoreStr != "" {
+		if minScore, err := strconv.ParseFloat(minScoreStr, 64); err == nil && minScore >= 0 && minScore <= 1 {
+			opts.SimilarityFloor = minScore
+		}
+	}
+
+	if semWeightStr := r.URL.Query().Get("semantic_weight"); semWeightStr != "" {
+		if semWeight, err := strconv.ParseFloat(semWeightStr, 64); err == nil && semWeight >= 0 && semWeight <= 1 {
+			opts.SemanticWeight = semWeight
+		}
+	}
+
+	if mmrLambdaStr := r.URL.Query().Get("mmr_lambda"); mmrLambdaStr != "" {
+		if mmrLambda, err := strconv.ParseFloat(mmrLambdaStr, 64); err == nil && mmrLambda >= 0 && mmrLambda <= 1 {
+			opts.MMRLambda = mmrLambda
+		}
+	}
+
+	if mmrStr := r.URL.Query().Get("enable_mmr"); mmrStr != "" {
+		opts.EnableMMR = mmrStr == "true" || mmrStr == "1"
+	}
+
+	if rerankStr := r.URL.Query().Get("enable_rerank"); rerankStr != "" {
+		opts.EnableRerank = rerankStr == "true" || rerankStr == "1"
 	}
 
 	return opts
@@ -712,13 +756,26 @@ func (d *Daemon) processHybridResult(result *kb.HybridSearchResult) map[string]i
 }
 
 // kbSemanticOpts parses semantic search options from request.
+// Uses RAG config defaults, with query parameter overrides for advanced users.
 func (d *Daemon) kbSemanticOpts(r *http.Request) kb.SemanticSearchOptions {
+	ragCfg := d.cfg.KB.RAG
+
+	// Start with config defaults
 	opts := kb.SemanticSearchOptions{
-		Limit:      10,
-		MinScore:   0.3,
+		Limit:      ragCfg.DefaultLimit,
+		MinScore:   ragCfg.MinScore,
 		ContextLen: 300,
 	}
 
+	// Fallback to safe defaults if config values are zero
+	if opts.Limit <= 0 {
+		opts.Limit = 10
+	}
+	if opts.MinScore <= 0 {
+		opts.MinScore = 0.1
+	}
+
+	// Query parameter overrides
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {
 		if limit, err := strconv.Atoi(limitStr); err == nil && limit > 0 {
 			opts.Limit = limit
@@ -733,6 +790,13 @@ func (d *Daemon) kbSemanticOpts(r *http.Request) kb.SemanticSearchOptions {
 
 	if sourceID := r.URL.Query().Get("source_id"); sourceID != "" {
 		opts.SourceIDs = []string{sourceID}
+	}
+
+	// Advanced: min_score override
+	if minScoreStr := r.URL.Query().Get("min_score"); minScoreStr != "" {
+		if minScore, err := strconv.ParseFloat(minScoreStr, 64); err == nil && minScore >= 0 && minScore <= 1 {
+			opts.MinScore = minScore
+		}
 	}
 
 	return opts

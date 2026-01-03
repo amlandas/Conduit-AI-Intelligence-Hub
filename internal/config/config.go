@@ -101,6 +101,43 @@ type KBConfig struct {
 	ChunkSize     int           `mapstructure:"chunk_size"`
 	ChunkOverlap  int           `mapstructure:"chunk_overlap"`
 	WatchDebounce time.Duration `mapstructure:"watch_debounce"`
+
+	// RAG (Retrieval-Augmented Generation) settings
+	RAG RAGConfig `mapstructure:"rag"`
+}
+
+// RAGConfig holds advanced RAG/search tuning parameters.
+// These settings control how semantic search retrieves and ranks results.
+// Lower thresholds = more results (better recall), higher = fewer results (better precision).
+type RAGConfig struct {
+	// MinScore is the minimum similarity score threshold (0.0-1.0).
+	// Results below this score are filtered out.
+	// Default: 0.1 (permissive - let the LLM decide relevance)
+	MinScore float64 `mapstructure:"min_score"`
+
+	// SemanticWeight controls the balance between semantic and lexical search (0.0-1.0).
+	// 0.0 = pure lexical (FTS5), 1.0 = pure semantic (vectors), 0.5 = balanced
+	// Default: 0.5
+	SemanticWeight float64 `mapstructure:"semantic_weight"`
+
+	// EnableMMR enables Maximal Marginal Relevance for result diversity.
+	// When true, results are diversified to avoid redundant content.
+	// Default: true
+	EnableMMR bool `mapstructure:"enable_mmr"`
+
+	// MMRLambda controls the relevance vs diversity tradeoff (0.0-1.0).
+	// 0.0 = maximum diversity, 1.0 = maximum relevance
+	// Default: 0.7
+	MMRLambda float64 `mapstructure:"mmr_lambda"`
+
+	// EnableRerank enables semantic reranking of top candidates.
+	// Improves precision by re-scoring using semantic similarity.
+	// Default: true
+	EnableRerank bool `mapstructure:"enable_rerank"`
+
+	// DefaultLimit is the default number of results to return.
+	// Default: 10
+	DefaultLimit int `mapstructure:"default_limit"`
 }
 
 // PolicyConfig holds policy engine configuration.
@@ -146,6 +183,14 @@ func DefaultConfig() *Config {
 			ChunkSize:     1000,
 			ChunkOverlap:  100,
 			WatchDebounce: 500 * time.Millisecond,
+			RAG: RAGConfig{
+				MinScore:       0.1,  // Permissive - let the LLM decide relevance
+				SemanticWeight: 0.5,  // Balanced hybrid search
+				EnableMMR:      true, // Diversity enabled
+				MMRLambda:      0.7,  // 70% relevance, 30% diversity
+				EnableRerank:   true, // Reranking enabled
+				DefaultLimit:   10,   // 10 results by default
+			},
 		},
 
 		Policy: PolicyConfig{
