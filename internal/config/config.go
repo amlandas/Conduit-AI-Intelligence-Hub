@@ -107,6 +107,58 @@ type KBConfig struct {
 
 	// RAG (Retrieval-Augmented Generation) settings
 	RAG RAGConfig `mapstructure:"rag"`
+
+	// KAG (Knowledge-Augmented Generation) settings
+	KAG KAGConfig `mapstructure:"kag"`
+}
+
+// KAGConfig holds Knowledge-Augmented Generation configuration.
+// Note: Full config is defined in internal/kb/kag_config.go
+type KAGConfig struct {
+	// Enabled controls whether KAG pipeline is active
+	Enabled bool `mapstructure:"enabled"`
+
+	// Provider specifies the LLM provider: "ollama", "openai", "anthropic"
+	Provider string `mapstructure:"provider"`
+
+	// Graph holds graph database configuration
+	Graph KAGGraphConfig `mapstructure:"graph"`
+
+	// Extraction holds entity extraction settings
+	Extraction KAGExtractionConfig `mapstructure:"extraction"`
+
+	// Ollama holds Ollama-specific configuration
+	Ollama KAGOllamaConfig `mapstructure:"ollama"`
+}
+
+// KAGGraphConfig holds graph database configuration.
+type KAGGraphConfig struct {
+	Backend  string              `mapstructure:"backend"`
+	FalkorDB KAGFalkorDBConfig   `mapstructure:"falkordb"`
+}
+
+// KAGFalkorDBConfig holds FalkorDB configuration.
+type KAGFalkorDBConfig struct {
+	Host      string `mapstructure:"host"`
+	Port      int    `mapstructure:"port"`
+	GraphName string `mapstructure:"graph_name"`
+	Password  string `mapstructure:"password"`
+}
+
+// KAGExtractionConfig holds entity extraction settings.
+type KAGExtractionConfig struct {
+	ConfidenceThreshold  float64 `mapstructure:"confidence_threshold"`
+	MaxEntitiesPerChunk  int     `mapstructure:"max_entities_per_chunk"`
+	MaxRelationsPerChunk int     `mapstructure:"max_relations_per_chunk"`
+	BatchSize            int     `mapstructure:"batch_size"`
+	TimeoutSeconds       int     `mapstructure:"timeout_seconds"`
+}
+
+// KAGOllamaConfig holds Ollama-specific configuration.
+type KAGOllamaConfig struct {
+	Model     string `mapstructure:"model"`
+	Host      string `mapstructure:"host"`
+	KeepAlive string `mapstructure:"keep_alive"`
 }
 
 // RAGConfig holds advanced RAG/search tuning parameters.
@@ -238,6 +290,31 @@ func DefaultConfig() *Config {
 				MMRLambda:      0.7,  // 70% relevance, 30% diversity
 				EnableRerank:   true, // Reranking enabled
 				DefaultLimit:   10,   // 10 results by default
+			},
+			KAG: KAGConfig{
+				Enabled:  false, // Opt-in for security
+				Provider: "ollama",
+				Graph: KAGGraphConfig{
+					Backend: "falkordb",
+					FalkorDB: KAGFalkorDBConfig{
+						Host:      "localhost",
+						Port:      6379,
+						GraphName: "conduit_kg",
+						Password:  "",
+					},
+				},
+				Extraction: KAGExtractionConfig{
+					ConfidenceThreshold:  0.7,
+					MaxEntitiesPerChunk:  20,
+					MaxRelationsPerChunk: 50,
+					BatchSize:            10,
+					TimeoutSeconds:       60,
+				},
+				Ollama: KAGOllamaConfig{
+					Model:     "mistral:7b-instruct-q4_K_M",
+					Host:      "http://localhost:11434",
+					KeepAlive: "5m",
+				},
 			},
 		},
 

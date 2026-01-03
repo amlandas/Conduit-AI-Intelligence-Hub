@@ -743,6 +743,282 @@ In case of database corruption:
 
 ---
 
+## FalkorDB Administration
+
+FalkorDB is an optional graph database used for advanced KAG (Knowledge-Augmented Generation) queries. It enables multi-hop graph traversal that SQLite alone cannot efficiently handle.
+
+### Installing FalkorDB
+
+```bash
+# Install FalkorDB container (requires Docker/Podman)
+conduit falkordb install
+
+# This pulls falkordb/falkordb:latest and creates the container
+```
+
+### Managing FalkorDB
+
+```bash
+# Start FalkorDB
+conduit falkordb start
+
+# Stop FalkorDB
+conduit falkordb stop
+
+# Check status
+conduit falkordb status
+
+# View logs
+docker logs conduit-falkordb
+```
+
+### FalkorDB Status Output
+
+```
+FalkorDB Status
+───────────────
+Container: conduit-falkordb
+Status:    Running
+Port:      6379 (localhost only)
+Uptime:    2h 15m
+
+Graph Statistics:
+  Graph:     conduit_kg
+  Nodes:     3,456
+  Edges:     1,234
+  Memory:    45 MB
+```
+
+### Configuration
+
+Add to `~/.conduit/conduit.yaml`:
+
+```yaml
+kb:
+  kag:
+    enabled: true
+    graph:
+      backend: falkordb  # or "sqlite" for basic mode
+      falkordb:
+        host: localhost
+        port: 6379
+        graph_name: conduit_kg
+```
+
+### Security Considerations
+
+| Aspect | Default | Recommendation |
+|--------|---------|----------------|
+| Network binding | localhost only | Keep as-is for single-machine |
+| Authentication | None | Add Redis AUTH for shared environments |
+| Persistence | RDB snapshots | Enable AOF for durability |
+
+### Enabling Redis AUTH (Optional)
+
+For shared environments, enable authentication:
+
+```bash
+# Start with password
+docker run -d --name conduit-falkordb \
+  -p 127.0.0.1:6379:6379 \
+  -e REDIS_ARGS="--requirepass your-secure-password" \
+  falkordb/falkordb:latest
+```
+
+Update configuration:
+
+```yaml
+kb:
+  kag:
+    graph:
+      falkordb:
+        password: your-secure-password
+```
+
+### Backup and Restore
+
+```bash
+# Backup (RDB snapshot)
+docker exec conduit-falkordb redis-cli BGSAVE
+docker cp conduit-falkordb:/data/dump.rdb ./falkordb-backup.rdb
+
+# Restore
+docker stop conduit-falkordb
+docker cp ./falkordb-backup.rdb conduit-falkordb:/data/dump.rdb
+docker start conduit-falkordb
+```
+
+### Monitoring
+
+```bash
+# Memory usage
+docker exec conduit-falkordb redis-cli INFO memory
+
+# Graph statistics
+docker exec conduit-falkordb redis-cli GRAPH.QUERY conduit_kg "MATCH (n) RETURN count(n)"
+
+# Slow queries
+docker exec conduit-falkordb redis-cli GRAPH.SLOWLOG conduit_kg
+```
+
+### Troubleshooting FalkorDB
+
+#### Container Won't Start
+
+```bash
+# Check for port conflicts
+lsof -i :6379
+
+# Check container logs
+docker logs conduit-falkordb
+
+# Recreate container
+docker rm conduit-falkordb
+conduit falkordb install
+```
+
+#### High Memory Usage
+
+```bash
+# Check memory
+docker exec conduit-falkordb redis-cli INFO memory
+
+# Set memory limit
+docker update --memory 1g conduit-falkordb
+```
+
+#### Graph Corruption
+
+```bash
+# Drop and recreate graph
+docker exec conduit-falkordb redis-cli GRAPH.DELETE conduit_kg
+
+# Re-sync entities from SQLite
+conduit kb kag-sync --force
+```
+
+---
+
+## KAG (Knowledge-Augmented Generation) Administration
+
+### Enabling KAG
+
+KAG is disabled by default for security. To enable:
+
+```yaml
+# ~/.conduit/conduit.yaml
+kb:
+  kag:
+    enabled: true
+    provider: ollama
+    ollama:
+      host: http://localhost:11434
+      model: mistral:7b-instruct-q4_K_M
+```
+
+### LLM Provider Options
+
+**Ollama (Default - Local)**:
+```yaml
+kb:
+  kag:
+    provider: ollama
+    ollama:
+      host: http://localhost:11434
+      model: mistral:7b-instruct-q4_K_M
+```
+
+**OpenAI**:
+```yaml
+kb:
+  kag:
+    provider: openai
+    openai:
+      model: gpt-4o-mini
+      # API key from environment: OPENAI_API_KEY
+```
+
+**Anthropic**:
+```yaml
+kb:
+  kag:
+    provider: anthropic
+    anthropic:
+      model: claude-3-5-sonnet-20241022
+      # API key from environment: ANTHROPIC_API_KEY
+```
+
+### Extraction Configuration
+
+```yaml
+kb:
+  kag:
+    extraction:
+      confidence_threshold: 0.6   # Min confidence (0.0-1.0)
+      max_entities_per_chunk: 20  # Limit per chunk
+      max_relations_per_chunk: 30 # Limit per chunk
+      batch_size: 10              # Chunks per batch
+      enable_background: true     # Background extraction
+      background_workers: 2       # Worker count
+      queue_size: 1000            # Max queue size
+```
+
+### Monitoring Extraction
+
+```bash
+# Check status
+conduit kb kag-status
+
+# View extraction logs
+grep "kb.extractor" ~/.conduit/logs/conduit.log
+
+# Check queue size
+conduit kb kag-status --json | jq '.queue_size'
+```
+
+### KAG Database Tables
+
+```sql
+-- Entity storage
+SELECT COUNT(*) FROM kb_entities;
+SELECT type, COUNT(*) FROM kb_entities GROUP BY type;
+
+-- Relation storage
+SELECT predicate, COUNT(*) FROM kb_relations GROUP BY predicate;
+
+-- Extraction status
+SELECT status, COUNT(*) FROM kb_extraction_status GROUP BY status;
+
+-- Failed extractions
+SELECT chunk_id, error_message FROM kb_extraction_status WHERE status = 'failed';
+```
+
+### Re-extracting Failed Chunks
+
+```bash
+# Reset failed chunks
+sqlite3 ~/.conduit/conduit.db "UPDATE kb_extraction_status SET status = 'pending' WHERE status = 'failed';"
+
+# Re-sync
+conduit kb kag-sync
+```
+
+### Clearing KAG Data
+
+```bash
+# Clear all KAG data (entities, relations, status)
+sqlite3 ~/.conduit/conduit.db << 'EOF'
+DELETE FROM kb_entities;
+DELETE FROM kb_relations;
+DELETE FROM kb_extraction_status;
+EOF
+
+# Also clear FalkorDB if used
+docker exec conduit-falkordb redis-cli GRAPH.DELETE conduit_kg
+```
+
+---
+
 ## Performance Tuning
 
 ### SQLite Optimizations

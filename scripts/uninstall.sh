@@ -279,6 +279,7 @@ remove_all_data() {
 
     # Check what exists
     local has_qdrant_container=false
+    local has_falkordb_container=false
     local has_data_dir=false
     local qdrant_vectors=0
 
@@ -288,12 +289,16 @@ remove_all_data() {
         qdrant_vectors=$(curl -s http://localhost:6333/collections/conduit_kb 2>/dev/null | grep -o '"points_count":[0-9]*' | cut -d: -f2 || echo "0")
     fi
 
+    if [[ -n "$CONTAINER_CMD" ]] && $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-falkordb$"; then
+        has_falkordb_container=true
+    fi
+
     if [[ -d "$CONDUIT_HOME" ]]; then
         has_data_dir=true
     fi
 
     # Nothing to remove
-    if [[ "$has_qdrant_container" == "false" ]] && [[ "$has_data_dir" == "false" ]]; then
+    if [[ "$has_qdrant_container" == "false" ]] && [[ "$has_falkordb_container" == "false" ]] && [[ "$has_data_dir" == "false" ]]; then
         info "No Conduit data found"
         return 0
     fi
@@ -301,10 +306,12 @@ remove_all_data() {
     # Calculate sizes
     local data_size="0"
     local qdrant_data_size="0"
+    local falkordb_data_size="0"
     local sqlite_size="0"
     if [[ "$has_data_dir" == "true" ]]; then
         data_size=$(du -sh "$CONDUIT_HOME" 2>/dev/null | cut -f1 || echo "unknown")
         qdrant_data_size=$(du -sh "$CONDUIT_HOME/qdrant" 2>/dev/null | cut -f1 || echo "0")
+        falkordb_data_size=$(du -sh "$CONDUIT_HOME/falkordb" 2>/dev/null | cut -f1 || echo "0")
         sqlite_size=$(du -sh "$CONDUIT_HOME/conduit.db" 2>/dev/null | cut -f1 || echo "0")
     fi
 
@@ -318,8 +325,9 @@ remove_all_data() {
     echo ""
     if [[ "$has_data_dir" == "true" ]]; then
         echo "  📁 Data Directory: $CONDUIT_HOME"
-        echo "     ├── SQLite Database:     $sqlite_size (documents, sources, config)"
+        echo "     ├── SQLite Database:     $sqlite_size (documents, sources, entities, relations)"
         echo "     ├── Qdrant Vector Data:  $qdrant_data_size ($qdrant_vectors vectors)"
+        echo "     ├── FalkorDB Graph Data: $falkordb_data_size (knowledge graph)"
         echo "     ├── Daemon logs"
         echo "     └── Configuration files"
         echo "     Total size: $data_size"
@@ -329,19 +337,26 @@ remove_all_data() {
         echo "  🐳 Qdrant Container: conduit-qdrant"
         echo "     Running on ports 6333 (HTTP) and 6334 (gRPC)"
     fi
+    if [[ "$has_falkordb_container" == "true" ]]; then
+        echo ""
+        echo "  🐳 FalkorDB Container: conduit-falkordb"
+        echo "     Running on port 6379 (Redis protocol)"
+    fi
     echo ""
     echo -e "${YELLOW}────────────────────────────────────────────────────────────────${NC}"
     echo ""
     echo "Choose an option:"
     echo ""
     echo "  [1] DELETE ALL DATA - Remove everything (recommended for clean uninstall)"
-    echo "      • Stops and removes Qdrant container"
-    echo "      • Deletes all vectors, documents, and configuration"
+    echo "      • Stops and removes Qdrant container (RAG vectors)"
+    echo "      • Stops and removes FalkorDB container (KAG graph)"
+    echo "      • Deletes all vectors, documents, entities, and configuration"
     echo "      • Fresh start if you reinstall"
     echo ""
     echo "  [2] KEEP DATA - Preserve data for potential reinstall"
     echo "      • Qdrant container and vectors preserved"
-    echo "      • SQLite database and config preserved"
+    echo "      • FalkorDB container and knowledge graph preserved"
+    echo "      • SQLite database (documents, entities) and config preserved"
     echo "      • If reinstalling, run 'conduit qdrant purge' to clear stale vectors"
     echo ""
 
@@ -374,6 +389,14 @@ remove_all_data() {
                 success "Qdrant container removed"
             fi
 
+            # Remove FalkorDB container
+            if [[ "$has_falkordb_container" == "true" ]] && [[ -n "$CONTAINER_CMD" ]]; then
+                info "Stopping and removing FalkorDB container..."
+                $CONTAINER_CMD stop conduit-falkordb 2>/dev/null || true
+                $CONTAINER_CMD rm conduit-falkordb 2>/dev/null || true
+                success "FalkorDB container removed"
+            fi
+
             # Remove data directory
             if [[ "$has_data_dir" == "true" ]]; then
                 info "Removing data directory..."
@@ -391,11 +414,15 @@ remove_all_data() {
             if [[ "$has_qdrant_container" == "true" ]]; then
                 echo "  Qdrant container: conduit-qdrant (still running)"
             fi
+            if [[ "$has_falkordb_container" == "true" ]]; then
+                echo "  FalkorDB container: conduit-falkordb (still running)"
+            fi
             echo ""
             echo "  If you reinstall Conduit later:"
-            echo "    • Your KB sources and documents will be restored"
+            echo "    • Your KB sources, documents, and entities will be restored"
             echo "    • Run 'conduit qdrant purge' if vectors seem stale"
             echo "    • Run 'conduit kb sync' to re-index documents"
+            echo "    • Run 'conduit kb kag-sync' to re-extract entities"
             ;;
     esac
 }
@@ -799,12 +826,17 @@ print_summary() {
     else
         echo -e "  ${YELLOW}○${NC} Data directory preserved at $CONDUIT_HOME"
     fi
-    # Check if Qdrant container was removed
+    # Check if containers were removed
     local CONTAINER_CMD=""
     command_exists podman && CONTAINER_CMD="podman"
     command_exists docker && CONTAINER_CMD="docker"
-    if [[ -n "$CONTAINER_CMD" ]] && $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
-        echo -e "  ${YELLOW}○${NC} Qdrant container preserved"
+    if [[ -n "$CONTAINER_CMD" ]]; then
+        if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
+            echo -e "  ${YELLOW}○${NC} Qdrant container preserved"
+        fi
+        if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-falkordb$"; then
+            echo -e "  ${YELLOW}○${NC} FalkorDB container preserved"
+        fi
     fi
     ! command_exists docker && echo -e "  ${GREEN}✓${NC} Docker removed"
     ! command_exists podman && echo -e "  ${GREEN}✓${NC} Podman removed"

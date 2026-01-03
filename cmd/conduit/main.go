@@ -146,6 +146,7 @@ VS Code, Gemini CLI, and more.`,
 	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(backupCmd())
 	rootCmd.AddCommand(qdrantCmd())
+	rootCmd.AddCommand(falkordbCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -1431,6 +1432,9 @@ Examples:
 	cmd.AddCommand(kbSyncCmd())
 	cmd.AddCommand(kbStatsCmd())
 	cmd.AddCommand(kbMigrateCmd())
+	cmd.AddCommand(kbKagSyncCmd())
+	cmd.AddCommand(kbKagStatusCmd())
+	cmd.AddCommand(kbKagQueryCmd())
 
 	return cmd
 }
@@ -3913,6 +3917,591 @@ WARNING: This operation cannot be undone!`,
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
+
+	return cmd
+}
+
+// ============================================================================
+// FalkorDB Commands (KAG Graph Database)
+// ============================================================================
+
+func falkordbCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "falkordb",
+		Short: "Manage FalkorDB graph database for KAG",
+		Long: `Manage the FalkorDB graph database for Knowledge-Augmented Generation (KAG).
+
+FalkorDB stores entity-relationship graphs extracted from your documents,
+enabling multi-hop reasoning and aggregation queries.
+
+Examples:
+  conduit falkordb install     # Install and start FalkorDB
+  conduit falkordb status      # Check FalkorDB health
+  conduit falkordb stop        # Stop FalkorDB container`,
+	}
+
+	cmd.AddCommand(falkordbInstallCmd())
+	cmd.AddCommand(falkordbStartCmd())
+	cmd.AddCommand(falkordbStopCmd())
+	cmd.AddCommand(falkordbStatusCmd())
+
+	return cmd
+}
+
+func falkordbInstallCmd() *cobra.Command {
+	var preferRuntime string
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Install and start FalkorDB container",
+		Long: `Install FalkorDB graph database for KAG (Knowledge-Augmented Generation).
+
+This command will:
+1. Detect available container runtime (Podman preferred, Docker as fallback)
+2. Pull the FalkorDB image
+3. Create and start the conduit-falkordb container
+4. Verify FalkorDB is healthy
+
+After installation, enable KAG with:
+  conduit kb kag-sync`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit", "falkordb")
+
+			// Ensure data directory exists
+			if err := os.MkdirAll(dataDir, 0755); err != nil {
+				return fmt.Errorf("create data directory: %w", err)
+			}
+
+			// Detect container runtime
+			runtime := preferRuntime
+			if runtime == "" {
+				if commandExists("podman") {
+					runtime = "podman"
+				} else if commandExists("docker") {
+					runtime = "docker"
+				} else {
+					return fmt.Errorf("no container runtime available.\n\nInstall Podman or Docker first:\n  brew install podman && podman machine init && podman machine start")
+				}
+			}
+			fmt.Printf("Using %s as container runtime\n", runtime)
+
+			// Pull FalkorDB image
+			fmt.Println("Pulling FalkorDB image...")
+			pullCmd := exec.CommandContext(ctx, runtime, "pull", "falkordb/falkordb:latest")
+			pullCmd.Stdout = os.Stdout
+			pullCmd.Stderr = os.Stderr
+			if err := pullCmd.Run(); err != nil {
+				return fmt.Errorf("pull image: %w", err)
+			}
+
+			// Stop and remove existing container if any
+			exec.CommandContext(ctx, runtime, "stop", "conduit-falkordb").Run()
+			exec.CommandContext(ctx, runtime, "rm", "conduit-falkordb").Run()
+
+			// Create and start container
+			fmt.Println("Starting FalkorDB container...")
+			runArgs := []string{
+				"run", "-d",
+				"--name", "conduit-falkordb",
+				"-p", "6379:6379",
+				"-v", dataDir + ":/data",
+				"--restart", "unless-stopped",
+				"falkordb/falkordb:latest",
+			}
+			runCmd := exec.CommandContext(ctx, runtime, runArgs...)
+			if output, err := runCmd.CombinedOutput(); err != nil {
+				return fmt.Errorf("start container: %w\n%s", err, string(output))
+			}
+
+			// Wait for healthy
+			fmt.Println("Waiting for FalkorDB to be ready...")
+			for i := 0; i < 30; i++ {
+				time.Sleep(time.Second)
+				checkCmd := exec.CommandContext(ctx, runtime, "exec", "conduit-falkordb", "redis-cli", "PING")
+				if output, err := checkCmd.Output(); err == nil && strings.TrimSpace(string(output)) == "PONG" {
+					fmt.Println()
+					fmt.Println("✓ FalkorDB installed and running")
+					fmt.Println()
+					fmt.Println("Next steps:")
+					fmt.Println("  conduit kb kag-sync    # Extract entities from documents")
+					return nil
+				}
+			}
+
+			return fmt.Errorf("FalkorDB did not become healthy in time")
+		},
+	}
+
+	cmd.Flags().StringVar(&preferRuntime, "runtime", "", "Preferred container runtime (podman or docker)")
+
+	return cmd
+}
+
+func falkordbStartCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "start",
+		Short: "Start FalkorDB container",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
+			runtime := "podman"
+			if !commandExists("podman") {
+				runtime = "docker"
+			}
+
+			startCmd := exec.CommandContext(ctx, runtime, "start", "conduit-falkordb")
+			if err := startCmd.Run(); err != nil {
+				return fmt.Errorf("start container: %w\n\nContainer may not exist. Run: conduit falkordb install", err)
+			}
+
+			fmt.Println("✓ FalkorDB started")
+			return nil
+		},
+	}
+}
+
+func falkordbStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop FalkorDB container",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
+			runtime := "podman"
+			if !commandExists("podman") {
+				runtime = "docker"
+			}
+
+			stopCmd := exec.CommandContext(ctx, runtime, "stop", "conduit-falkordb")
+			if err := stopCmd.Run(); err != nil {
+				return fmt.Errorf("stop container: %w", err)
+			}
+
+			fmt.Println("✓ FalkorDB stopped")
+			return nil
+		},
+	}
+}
+
+func falkordbStatusCmd() *cobra.Command {
+	var verbose bool
+
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Check FalkorDB status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
+			runtime := "podman"
+			if !commandExists("podman") {
+				runtime = "docker"
+			}
+
+			// Check container status
+			inspectCmd := exec.CommandContext(ctx, runtime, "inspect", "--format", "{{.State.Status}}", "conduit-falkordb")
+			output, err := inspectCmd.Output()
+			if err != nil {
+				fmt.Println("FalkorDB Status")
+				fmt.Println("═══════════════════════════════════════")
+				fmt.Println("Container:    ✗ not installed")
+				fmt.Println()
+				fmt.Println("Install with: conduit falkordb install")
+				return nil
+			}
+
+			status := strings.TrimSpace(string(output))
+			fmt.Println("FalkorDB Status")
+			fmt.Println("═══════════════════════════════════════")
+
+			if status == "running" {
+				fmt.Println("Container:    ✓ running")
+
+				// Check if FalkorDB responds
+				pingCmd := exec.CommandContext(ctx, runtime, "exec", "conduit-falkordb", "redis-cli", "PING")
+				if pingOutput, err := pingCmd.Output(); err == nil && strings.TrimSpace(string(pingOutput)) == "PONG" {
+					fmt.Println("API:          ✓ responding")
+
+					// Get graph stats if verbose
+					if verbose {
+						// Get list of graphs
+						graphCmd := exec.CommandContext(ctx, runtime, "exec", "conduit-falkordb", "redis-cli", "GRAPH.LIST")
+						if graphOutput, err := graphCmd.Output(); err == nil {
+							graphs := strings.TrimSpace(string(graphOutput))
+							if graphs != "" {
+								fmt.Printf("Graphs:       %s\n", graphs)
+							}
+						}
+					}
+				} else {
+					fmt.Println("API:          ✗ not responding")
+				}
+			} else {
+				fmt.Printf("Container:    ○ %s\n", status)
+				fmt.Println()
+				fmt.Println("Start with: conduit falkordb start")
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed information")
+
+	return cmd
+}
+
+// ============================================================================
+// KAG (Knowledge-Augmented Generation) Commands
+// ============================================================================
+
+func kbKagSyncCmd() *cobra.Command {
+	var force bool
+	var provider string
+	var advanced bool
+
+	cmd := &cobra.Command{
+		Use:   "kag-sync",
+		Short: "Extract entities from indexed documents",
+		Long: `Extract entities and relationships from indexed documents into the knowledge graph.
+
+This command processes chunks from your knowledge base and extracts:
+- Named entities (concepts, people, organizations, technologies, etc.)
+- Relationships between entities (mentions, defines, relates_to, etc.)
+
+The extracted graph enables multi-hop reasoning queries.
+
+Examples:
+  conduit kb kag-sync                    # Extract from all unprocessed chunks
+  conduit kb kag-sync --force            # Re-extract from all chunks
+  conduit kb kag-sync --advanced         # Show advanced options`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Load config
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("load config: %w", err)
+			}
+
+			// Check if KAG is enabled
+			if !cfg.KB.KAG.Enabled {
+				fmt.Println("KAG is not enabled. Enable it in your config:")
+				fmt.Println()
+				fmt.Println("  kb:")
+				fmt.Println("    kag:")
+				fmt.Println("      enabled: true")
+				fmt.Println()
+				fmt.Println("Or set CONDUIT_KB_KAG_ENABLED=true")
+				return nil
+			}
+
+			// Open database
+			homeDir, _ := os.UserHomeDir()
+			dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+			db, err := store.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			// Create KAG config
+			kagCfg := kb.DefaultKAGConfig()
+			kagCfg.Enabled = true
+			if provider != "" {
+				kagCfg.Provider = provider
+			}
+
+			// Create provider
+			factory := kb.NewProviderFactory()
+			llmProvider, err := factory.CreateProvider(kagCfg)
+			if err != nil {
+				return fmt.Errorf("create LLM provider: %w", err)
+			}
+			defer llmProvider.Close()
+
+			// Create graph store (optional - extraction can work without it)
+			var graphStore *kb.FalkorDBStore
+			graphStore, err = kb.NewFalkorDBStore(kb.FalkorDBStoreConfig{
+				Host:      kagCfg.Graph.FalkorDB.Host,
+				Port:      kagCfg.Graph.FalkorDB.Port,
+				GraphName: kagCfg.Graph.FalkorDB.GraphName,
+			})
+			if err != nil {
+				fmt.Printf("⚠ FalkorDB not available: %v\n", err)
+				fmt.Println("  Entities will be stored in SQLite only")
+				graphStore = nil
+			} else {
+				ctx := cmd.Context()
+				if err := graphStore.Connect(ctx); err != nil {
+					fmt.Printf("⚠ Cannot connect to FalkorDB: %v\n", err)
+					fmt.Println("  Entities will be stored in SQLite only")
+					graphStore = nil
+				} else {
+					defer graphStore.Close()
+				}
+			}
+
+			// Create entity extractor
+			extractor, err := kb.NewEntityExtractor(kb.EntityExtractorConfig{
+				Provider:   llmProvider,
+				DB:         db.DB(),
+				GraphStore: graphStore,
+				Config:     kagCfg,
+				NumWorkers: 2,
+			})
+			if err != nil {
+				return fmt.Errorf("create extractor: %w", err)
+			}
+			defer extractor.Close()
+
+			// Get chunks to process
+			ctx := cmd.Context()
+			var query string
+			if force {
+				query = `SELECT chunk_id, document_id, content FROM kb_chunks ORDER BY chunk_id`
+			} else {
+				query = `
+					SELECT c.chunk_id, c.document_id, c.content
+					FROM kb_chunks c
+					LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+					WHERE s.status IS NULL OR s.status = 'error'
+					ORDER BY c.chunk_id
+				`
+			}
+
+			rows, err := db.DB().QueryContext(ctx, query)
+			if err != nil {
+				return fmt.Errorf("query chunks: %w", err)
+			}
+			defer rows.Close()
+
+			// Process chunks
+			var processed, errors int
+			fmt.Println("Extracting entities from documents...")
+			fmt.Println()
+
+			for rows.Next() {
+				var chunkID, documentID, content string
+				if err := rows.Scan(&chunkID, &documentID, &content); err != nil {
+					continue
+				}
+
+				// Get document title
+				var title string
+				db.DB().QueryRowContext(ctx, "SELECT title FROM kb_documents WHERE document_id = ?", documentID).Scan(&title)
+
+				result, err := extractor.ExtractFromChunk(ctx, chunkID, documentID, title, content)
+				if err != nil {
+					errors++
+					if advanced {
+						fmt.Printf("  ✗ %s: %v\n", chunkID[:16], err)
+					}
+				} else {
+					processed++
+					fmt.Printf("  ✓ %s: %d entities, %d relations\n",
+						chunkID[:16], len(result.Entities), len(result.Relations))
+				}
+			}
+
+			fmt.Println()
+			fmt.Printf("Processed: %d chunks\n", processed)
+			if errors > 0 {
+				fmt.Printf("Errors:    %d\n", errors)
+			}
+
+			// Show stats
+			stats, _ := extractor.GetExtractionStats(ctx)
+			if stats != nil {
+				fmt.Println()
+				fmt.Println("Knowledge Graph Statistics:")
+				fmt.Printf("  Entities:  %d\n", stats["total_entities"])
+				fmt.Printf("  Relations: %d\n", stats["total_relations"])
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVarP(&force, "force", "f", false, "Re-extract from all chunks, even previously processed")
+	cmd.Flags().StringVar(&provider, "provider", "", "LLM provider: ollama, openai, anthropic")
+	cmd.Flags().BoolVar(&advanced, "advanced", false, "Show advanced options and verbose output")
+
+	return cmd
+}
+
+func kbKagStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "kag-status",
+		Short: "Show KAG extraction status",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Open database
+			homeDir, _ := os.UserHomeDir()
+			dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+			db, err := store.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			ctx := cmd.Context()
+
+			fmt.Println("KAG Extraction Status")
+			fmt.Println("═══════════════════════════════════════")
+
+			// Count by status
+			rows, err := db.DB().QueryContext(ctx, `
+				SELECT status, COUNT(*) as count
+				FROM kb_extraction_status
+				GROUP BY status
+			`)
+			if err == nil {
+				defer rows.Close()
+				for rows.Next() {
+					var status string
+					var count int
+					rows.Scan(&status, &count)
+					fmt.Printf("%-12s %d chunks\n", status+":", count)
+				}
+			}
+
+			// Count pending (no status)
+			var pendingCount int
+			db.DB().QueryRowContext(ctx, `
+				SELECT COUNT(*) FROM kb_chunks c
+				LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+				WHERE s.status IS NULL
+			`).Scan(&pendingCount)
+			if pendingCount > 0 {
+				fmt.Printf("%-12s %d chunks\n", "pending:", pendingCount)
+			}
+
+			fmt.Println()
+
+			// Entity and relation counts
+			var entityCount, relationCount int
+			db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_entities").Scan(&entityCount)
+			db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_relations").Scan(&relationCount)
+
+			fmt.Println("Knowledge Graph")
+			fmt.Println("───────────────────────────────────────")
+			fmt.Printf("Entities:    %d\n", entityCount)
+			fmt.Printf("Relations:   %d\n", relationCount)
+
+			// Entity type breakdown
+			if entityCount > 0 {
+				fmt.Println()
+				fmt.Println("Entity Types:")
+				typeRows, err := db.DB().QueryContext(ctx, `
+					SELECT type, COUNT(*) as count
+					FROM kb_entities
+					GROUP BY type
+					ORDER BY count DESC
+				`)
+				if err == nil {
+					defer typeRows.Close()
+					for typeRows.Next() {
+						var entityType string
+						var count int
+						typeRows.Scan(&entityType, &count)
+						fmt.Printf("  %-15s %d\n", entityType, count)
+					}
+				}
+			}
+
+			return nil
+		},
+	}
+}
+
+func kbKagQueryCmd() *cobra.Command {
+	var maxHops int
+	var format string
+
+	cmd := &cobra.Command{
+		Use:   "kag-query <query>",
+		Short: "Query the knowledge graph",
+		Long: `Query the knowledge graph for entities and relationships.
+
+Examples:
+  conduit kb kag-query "threat models"
+  conduit kb kag-query "authentication" --max-hops 3
+  conduit kb kag-query "API security" --format json`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			query := args[0]
+
+			// Open database
+			homeDir, _ := os.UserHomeDir()
+			dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+			db, err := store.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			ctx := cmd.Context()
+
+			// Search entities matching query
+			rows, err := db.DB().QueryContext(ctx, `
+				SELECT entity_id, name, type, description, confidence
+				FROM kb_entities
+				WHERE name LIKE ? OR description LIKE ?
+				ORDER BY confidence DESC
+				LIMIT 20
+			`, "%"+query+"%", "%"+query+"%")
+			if err != nil {
+				return fmt.Errorf("search entities: %w", err)
+			}
+			defer rows.Close()
+
+			type entityResult struct {
+				ID          string  `json:"id"`
+				Name        string  `json:"name"`
+				Type        string  `json:"type"`
+				Description string  `json:"description"`
+				Confidence  float64 `json:"confidence"`
+			}
+
+			var entities []entityResult
+			for rows.Next() {
+				var e entityResult
+				rows.Scan(&e.ID, &e.Name, &e.Type, &e.Description, &e.Confidence)
+				entities = append(entities, e)
+			}
+
+			if format == "json" {
+				output := map[string]interface{}{
+					"query":    query,
+					"entities": entities,
+				}
+				data, _ := json.MarshalIndent(output, "", "  ")
+				fmt.Println(string(data))
+			} else {
+				fmt.Printf("Query: %s\n", query)
+				fmt.Println("═══════════════════════════════════════")
+				fmt.Println()
+
+				if len(entities) == 0 {
+					fmt.Println("No matching entities found.")
+					return nil
+				}
+
+				for _, e := range entities {
+					fmt.Printf("• %s (%s)\n", e.Name, e.Type)
+					if e.Description != "" {
+						fmt.Printf("  %s\n", truncate(e.Description, 80))
+					}
+					fmt.Printf("  Confidence: %.0f%%\n", e.Confidence*100)
+					fmt.Println()
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&maxHops, "max-hops", 2, "Maximum relationship hops to traverse")
+	cmd.Flags().StringVar(&format, "format", "text", "Output format: text or json")
 
 	return cmd
 }

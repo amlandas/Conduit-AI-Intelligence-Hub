@@ -15,10 +15,13 @@ import (
 
 // Indexer manages document indexing in SQLite with FTS5 and optional vector search.
 type Indexer struct {
-	db             *sql.DB
-	semantic       *SemanticSearcher
-	logger         zerolog.Logger
-	semanticErrors int // Counter for semantic indexing failures in current batch
+	db               *sql.DB
+	semantic         *SemanticSearcher
+	entityExtractor  *EntityExtractor
+	kagConfig        KAGConfig
+	logger           zerolog.Logger
+	semanticErrors   int // Counter for semantic indexing failures in current batch
+	extractionErrors int // Counter for KAG extraction failures in current batch
 }
 
 // NewIndexer creates a new indexer.
@@ -41,6 +44,19 @@ func (idx *Indexer) HasSemanticSearch() bool {
 	return idx.semantic != nil
 }
 
+// SetEntityExtractor enables KAG entity extraction during indexing.
+// When set, documents will also have entities extracted and stored in the graph.
+func (idx *Indexer) SetEntityExtractor(extractor *EntityExtractor, config KAGConfig) {
+	idx.entityExtractor = extractor
+	idx.kagConfig = config
+	idx.logger.Info().Msg("KAG entity extraction enabled for indexer")
+}
+
+// HasEntityExtraction returns whether KAG entity extraction is enabled.
+func (idx *Indexer) HasEntityExtraction() bool {
+	return idx.entityExtractor != nil && idx.kagConfig.Enabled
+}
+
 // ResetSemanticErrors resets the semantic error counter.
 // Call this before starting a batch operation to track errors for that batch.
 func (idx *Indexer) ResetSemanticErrors() {
@@ -50,6 +66,16 @@ func (idx *Indexer) ResetSemanticErrors() {
 // GetSemanticErrors returns the number of semantic indexing failures since last reset.
 func (idx *Indexer) GetSemanticErrors() int {
 	return idx.semanticErrors
+}
+
+// ResetExtractionErrors resets the KAG extraction error counter.
+func (idx *Indexer) ResetExtractionErrors() {
+	idx.extractionErrors = 0
+}
+
+// GetExtractionErrors returns the number of KAG extraction failures since last reset.
+func (idx *Indexer) GetExtractionErrors() int {
+	return idx.extractionErrors
 }
 
 // Index indexes a document and its chunks.
@@ -146,11 +172,43 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 		}
 	}
 
+	// Queue entity extraction if KAG is enabled
+	if idx.HasEntityExtraction() {
+		for _, chunk := range chunksWithIDs {
+			// Queue chunk for background extraction (non-blocking)
+			if idx.kagConfig.Extraction.EnableBackground {
+				if err := idx.entityExtractor.QueueChunk(chunk.ChunkID, doc.DocumentID, doc.Title, chunk.Content); err != nil {
+					idx.logger.Debug().
+						Err(err).
+						Str("chunk_id", chunk.ChunkID).
+						Msg("failed to queue chunk for extraction, queue may be full")
+					idx.extractionErrors++
+				}
+			} else {
+				// Synchronous extraction (slower but immediate)
+				_, err := idx.entityExtractor.ExtractFromChunk(ctx, chunk.ChunkID, doc.DocumentID, doc.Title, chunk.Content)
+				if err != nil {
+					idx.logger.Debug().
+						Err(err).
+						Str("chunk_id", chunk.ChunkID).
+						Msg("entity extraction failed for chunk")
+					idx.extractionErrors++
+				}
+			}
+		}
+		idx.logger.Debug().
+			Str("document_id", doc.DocumentID).
+			Int("chunks_queued", len(chunksWithIDs)).
+			Bool("background", idx.kagConfig.Extraction.EnableBackground).
+			Msg("queued document for entity extraction")
+	}
+
 	idx.logger.Debug().
 		Str("document_id", doc.DocumentID).
 		Str("path", doc.Path).
 		Int("chunks", len(chunks)).
 		Bool("semantic", idx.semantic != nil).
+		Bool("kag", idx.HasEntityExtraction()).
 		Msg("indexed document")
 
 	return nil
@@ -318,6 +376,16 @@ func (idx *Indexer) GetStats(ctx context.Context) (*IndexStats, error) {
 	row = idx.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kb_sources`)
 	row.Scan(&stats.TotalSources)
 
+	// KAG statistics
+	stats.KAGEnabled = idx.HasEntityExtraction()
+	if stats.KAGEnabled {
+		row = idx.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kb_entities`)
+		row.Scan(&stats.TotalEntities)
+
+		row = idx.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kb_relations`)
+		row.Scan(&stats.TotalRelations)
+	}
+
 	return stats, nil
 }
 
@@ -327,6 +395,10 @@ type IndexStats struct {
 	TotalDocuments int   `json:"total_documents"`
 	TotalChunks    int   `json:"total_chunks"`
 	TotalBytes     int64 `json:"total_bytes"`
+	// KAG statistics
+	TotalEntities  int `json:"total_entities,omitempty"`
+	TotalRelations int `json:"total_relations,omitempty"`
+	KAGEnabled     bool `json:"kag_enabled"`
 }
 
 // Optimize runs VACUUM and other optimizations on the database.

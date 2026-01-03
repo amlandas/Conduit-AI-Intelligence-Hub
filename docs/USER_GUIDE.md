@@ -594,6 +594,147 @@ The output shows both documents and vectors deleted, confirming complete cleanup
 
 ---
 
+## Knowledge Graph (KAG)
+
+Conduit includes an optional Knowledge-Augmented Generation (KAG) feature that extracts entities and relationships from your documents, enabling queries like "What technologies are mentioned?" or "How does X relate to Y?".
+
+### Enabling KAG
+
+KAG is disabled by default (privacy-first). To enable it:
+
+```bash
+# Edit configuration
+cat >> ~/.conduit/conduit.yaml << 'EOF'
+kb:
+  kag:
+    enabled: true
+    provider: ollama
+    ollama:
+      model: mistral:7b-instruct-q4_K_M
+EOF
+
+# Restart daemon
+conduit service restart
+```
+
+### Prerequisites
+
+KAG requires an LLM for entity extraction. The default uses Ollama with Mistral 7B:
+
+```bash
+# Ensure Ollama is running
+ollama serve
+
+# Pull the extraction model (if not already)
+ollama pull mistral:7b-instruct-q4_K_M
+```
+
+### Extracting Entities
+
+After indexing documents, extract entities and relationships:
+
+```bash
+# Sync entities from all indexed documents
+conduit kb kag-sync
+
+# Sync a specific source only
+conduit kb kag-sync --source <source-id>
+
+# Check extraction status
+conduit kb kag-status
+```
+
+**Example Output**:
+```
+KAG Extraction Status
+─────────────────────
+Total Chunks:     1,247
+Extracted:        1,200
+Pending:          47
+Failed:           0
+
+Entities:         3,456
+Relations:        1,234
+
+Background Workers: 2 active
+Queue Size:        47 pending
+```
+
+### Querying the Knowledge Graph
+
+Use the `kag-query` command to search entities and relationships:
+
+```bash
+# Basic query
+conduit kb kag-query "Kubernetes"
+
+# Query with entity hints
+conduit kb kag-query "container orchestration" --entities Docker,Kubernetes
+
+# Include relationships
+conduit kb kag-query "authentication" --relations
+
+# Limit results
+conduit kb kag-query "machine learning" --limit 20
+```
+
+**Example Output**:
+```
+Knowledge Graph Results for: Kubernetes
+
+## Entities
+- **Kubernetes** (technology): Container orchestration platform
+- **Docker** (technology): Container runtime
+- **Container** (concept): Isolated process environment
+
+## Relationships
+- Kubernetes → uses → Docker
+- Kubernetes → contains → Pod
+- Docker → creates → Container
+
+Found 3 entities, 3 relationships
+```
+
+### KAG vs RAG: When to Use Each
+
+| Query Type | Use This | Example |
+|------------|----------|---------|
+| Find relevant text | `kb search` (RAG) | "How to configure OAuth2" |
+| List entities | `kb kag-query` (KAG) | "What technologies are mentioned?" |
+| Find relationships | `kb kag-query` (KAG) | "How does Kubernetes relate to Docker?" |
+| Semantic search | `kb search --semantic` | "Authentication mechanisms" |
+| Exact phrase | `kb search --fts5` | "func NewHandler" |
+
+### Advanced: Using FalkorDB for Graph Traversal
+
+For advanced multi-hop queries, you can optionally use FalkorDB:
+
+```bash
+# Install FalkorDB (Docker required)
+conduit falkordb install
+
+# Start FalkorDB
+conduit falkordb start
+
+# Check status
+conduit falkordb status
+```
+
+Once running, KAG will automatically use FalkorDB for graph traversal queries.
+
+### KAG Configuration Options
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `kag.enabled` | false | Enable/disable KAG |
+| `kag.provider` | ollama | LLM provider (ollama, openai, anthropic) |
+| `kag.ollama.model` | mistral:7b-instruct-q4_K_M | Ollama model for extraction |
+| `kag.extraction.confidence_threshold` | 0.6 | Minimum confidence for entities |
+| `kag.extraction.max_entities_per_chunk` | 20 | Max entities per chunk |
+| `kag.extraction.enable_background` | true | Background extraction |
+
+---
+
 ## Security & Permissions
 
 ### Permission Model

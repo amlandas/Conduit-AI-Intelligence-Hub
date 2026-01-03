@@ -19,6 +19,8 @@ The installer will:
 - Pull the default AI model (qwen2.5-coder:7b)
 - Install Qdrant vector database (via Docker) for semantic search
 - Pull the embedding model (nomic-embed-text) for document vectorization
+- Install FalkorDB graph database (via Docker) for knowledge graphs
+- Pull the KAG extraction model (mistral:7b-instruct) for entity extraction
 - Verify the installation
 
 ### Installation Options
@@ -35,6 +37,9 @@ curl -fsSL ... | bash -s -- --verbose
 
 # Skip model download (download later)
 curl -fsSL ... | bash -s -- --skip-model
+
+# Skip KAG components (FalkorDB + Mistral model)
+curl -fsSL ... | bash -s -- --no-kag
 ```
 
 After installation, add the install location to your PATH if prompted, then run:
@@ -55,6 +60,10 @@ conduit status
   - **Semantic Search**: Find documents by meaning using Qdrant vector database + Ollama embeddings
   - **Keyword Search**: Full-text search with SQLite FTS5 as fallback
   - **RAG-Ready**: Perfect for AI client augmentation with ranked results + citations
+  - **KAG (Knowledge Graph)**: Entity extraction and graph-based reasoning using FalkorDB
+    - Multi-hop reasoning ("How is X related to Y across documents?")
+    - Aggregation queries ("List all threat models in the KB")
+    - Entity disambiguation via graph traversal
 - **AI Integration**: Local AI with Ollama for intelligent code analysis
 - **CLI**: Complete command set for all operations
 
@@ -68,6 +77,7 @@ The installer handles these automatically, but for reference:
 - Podman 4.0+ (recommended) or Docker 20.10+ (for running connectors)
 - Ollama (for local AI features)
 - Qdrant (for semantic search - auto-installed via Docker)
+- FalkorDB (for knowledge graphs - auto-installed via Docker)
 - Document extraction tools (for KB indexing):
   - pdftotext (poppler) - for PDF files
   - textutil (macOS) / antiword (Linux/Windows) - for DOC files
@@ -81,6 +91,14 @@ For full semantic search capabilities:
 - **nomic-embed-text**: Embedding model via Ollama (768 dimensions, auto-pulled)
 
 These are optional - Conduit falls back to keyword search (FTS5) if unavailable.
+
+### Knowledge Graph Components (KAG)
+
+For knowledge graph capabilities:
+- **FalkorDB**: Graph database running on localhost:6379 (auto-installed via Docker)
+- **mistral:7b-instruct**: Extraction model via Ollama (Apache 2.0 licensed, auto-pulled)
+
+These are optional - skip with `--no-kag` during installation.
 
 ## Manual Installation
 
@@ -212,6 +230,13 @@ conduit kb search <query> --min-score 0.05      # Lower similarity threshold
 conduit kb search <query> --limit 20            # More results
 conduit kb search <query> --semantic-weight 0.8 # Prefer semantic over keyword
 conduit kb search <query> --mmr-lambda 0.9      # More relevance, less diversity
+
+# KAG (Knowledge Graph) operations
+conduit kb kag-sync               # Extract entities from indexed documents
+conduit kb kag-status             # Show extraction progress and entity counts
+conduit kb kag-query <query>      # Query the knowledge graph
+conduit kb kag-query <query> --entities Docker,Kubernetes  # With entity hints
+conduit kb kag-query <query> --max-hops 3  # Multi-hop traversal (max: 3)
 ```
 
 ### Qdrant Management
@@ -222,6 +247,14 @@ conduit qdrant start          # Start existing container
 conduit qdrant stop           # Stop container (preserves data)
 conduit qdrant attach         # Enable semantic search without restart
 conduit qdrant purge          # Clear all vectors (useful after reinstall)
+```
+
+### FalkorDB Management
+```bash
+conduit falkordb status       # Check FalkorDB container and graph stats
+conduit falkordb install      # Install/start FalkorDB container
+conduit falkordb start        # Start existing container
+conduit falkordb stop         # Stop container (preserves data)
 ```
 
 **Search Modes:**
@@ -315,6 +348,7 @@ Conduit provides a **read-only** MCP server that enables AI clients (Claude Code
 | `kb_list_sources` | List all indexed sources with statistics |
 | `kb_get_document` | Retrieve full document content by ID |
 | `kb_stats` | Get knowledge base statistics |
+| `kag_query` | Query knowledge graph for entities and relationships |
 
 ### Configuration
 
@@ -426,6 +460,24 @@ kb:
     enable_rerank: true   # Re-score top candidates semantically
     default_limit: 10     # Default number of results
 
+  # KAG (Knowledge-Augmented Generation) settings
+  kag:
+    enabled: true         # Enable knowledge graph (requires FalkorDB)
+    provider: ollama      # LLM provider: ollama, openai, anthropic
+    ollama:
+      model: mistral:7b-instruct-q4_K_M  # Extraction model
+      host: http://localhost:11434
+    graph:
+      backend: falkordb
+      falkordb:
+        host: localhost
+        port: 6379
+        graph_name: conduit_kg
+    extraction:
+      confidence_threshold: 0.7  # Minimum confidence for entities
+      max_entities_per_chunk: 20
+      workers: 2                 # Background extraction workers
+
 policy:
   allow_network_egress: false
   forbidden_paths:
@@ -448,6 +500,7 @@ curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hu
 The uninstall script will:
 - Stop and remove the daemon service
 - Remove Qdrant vector database container
+- Remove FalkorDB graph database container
 - Remove binaries from your PATH
 - Optionally remove data directory
 - Clean up shell configuration
@@ -527,6 +580,27 @@ mv ~/.docker/config.json.tmp ~/.docker/config.json
 mv ~/.docker/config.json.backup ~/.docker/config.json
 ```
 
+**KAG entity extraction not working**
+```bash
+# Check if FalkorDB is running
+conduit falkordb status
+
+# Check if extraction model is available
+ollama list | grep mistral
+
+# Check extraction status
+conduit kb kag-status
+
+# Force re-extraction
+conduit kb kag-sync --force
+```
+
+**KAG query returns empty results**
+- Ensure documents have been synced: `conduit kb sync`
+- Run entity extraction: `conduit kb kag-sync`
+- Check extraction status: `conduit kb kag-status`
+- Lower confidence threshold in config if extractions are being filtered
+
 ### Diagnostic Commands
 
 ```bash
@@ -544,6 +618,12 @@ cat ~/.conduit/daemon.log | tail -50
 
 # Check Qdrant vector count
 curl -s http://localhost:6333/collections/conduit_kb | jq '.result.points_count'
+
+# Check FalkorDB graph stats
+conduit falkordb status
+
+# Check KAG extraction status
+conduit kb kag-status
 ```
 
 ## Development

@@ -100,6 +100,13 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Run migration 004 for KAG (Knowledge-Augmented Generation) tables
+	if currentVersion < 4 {
+		if err := s.runMigration004(); err != nil {
+			return fmt.Errorf("run migration 004: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -392,6 +399,96 @@ func (s *Store) runMigration003() error {
 
 	// Record migration
 	_, err = tx.Exec("INSERT INTO migrations (version) VALUES (3)")
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// runMigration004 adds KAG (Knowledge-Augmented Generation) tables for entity/relation storage.
+func (s *Store) runMigration004() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// KAG entities table - stores extracted entities from documents
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS kb_entities (
+			entity_id TEXT PRIMARY KEY,
+			name TEXT NOT NULL,
+			type TEXT NOT NULL,
+			description TEXT,
+			source_chunk_id TEXT REFERENCES kb_chunks(chunk_id) ON DELETE CASCADE,
+			source_document_id TEXT REFERENCES kb_documents(document_id) ON DELETE CASCADE,
+			confidence REAL NOT NULL DEFAULT 0.0,
+			metadata TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// KAG relations table - stores relationships between entities
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS kb_relations (
+			relation_id TEXT PRIMARY KEY,
+			subject_id TEXT NOT NULL REFERENCES kb_entities(entity_id) ON DELETE CASCADE,
+			predicate TEXT NOT NULL,
+			object_id TEXT NOT NULL REFERENCES kb_entities(entity_id) ON DELETE CASCADE,
+			source_chunk_id TEXT REFERENCES kb_chunks(chunk_id) ON DELETE CASCADE,
+			confidence REAL NOT NULL DEFAULT 0.0,
+			metadata TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// KAG extraction status table - tracks extraction progress per chunk
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS kb_extraction_status (
+			chunk_id TEXT PRIMARY KEY REFERENCES kb_chunks(chunk_id) ON DELETE CASCADE,
+			status TEXT NOT NULL DEFAULT 'pending',
+			entity_count INTEGER DEFAULT 0,
+			relation_count INTEGER DEFAULT 0,
+			processing_time_ms INTEGER,
+			error_message TEXT,
+			extracted_at TEXT,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Create indexes for efficient queries
+	_, err = tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_entities_type ON kb_entities(type);
+		CREATE INDEX IF NOT EXISTS idx_entities_document ON kb_entities(source_document_id);
+		CREATE INDEX IF NOT EXISTS idx_entities_chunk ON kb_entities(source_chunk_id);
+		CREATE INDEX IF NOT EXISTS idx_entities_name ON kb_entities(name);
+		CREATE INDEX IF NOT EXISTS idx_entities_confidence ON kb_entities(confidence);
+
+		CREATE INDEX IF NOT EXISTS idx_relations_subject ON kb_relations(subject_id);
+		CREATE INDEX IF NOT EXISTS idx_relations_object ON kb_relations(object_id);
+		CREATE INDEX IF NOT EXISTS idx_relations_predicate ON kb_relations(predicate);
+		CREATE INDEX IF NOT EXISTS idx_relations_chunk ON kb_relations(source_chunk_id);
+
+		CREATE INDEX IF NOT EXISTS idx_extraction_status ON kb_extraction_status(status);
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Record migration
+	_, err = tx.Exec("INSERT INTO migrations (version) VALUES (4)")
 	if err != nil {
 		return err
 	}

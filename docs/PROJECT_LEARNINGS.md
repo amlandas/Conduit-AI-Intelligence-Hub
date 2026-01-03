@@ -845,4 +845,148 @@ func (idx *Indexer) DeleteBySource(ctx context.Context, sourceID string) (int, e
 
 ---
 
+---
+
+### Phase 14: Knowledge-Augmented Generation (KAG) Implementation
+**Date**: January 2026
+
+#### Context
+After implementing hybrid RAG search, certain query types still performed poorly:
+- **Aggregation queries**: "List all threat models mentioned in the KB"
+- **Multi-hop reasoning**: "How does technology X relate to organization Y?"
+- **Entity disambiguation**: "Is 'Oak Ridge' the lab or the location?"
+
+These require understanding entities and their relationships, not just text similarity.
+
+#### Root Cause Analysis
+
+| Query Type | RAG Performance | Root Cause |
+|------------|-----------------|------------|
+| Aggregation | Poor | RAG retrieves chunks, not entities |
+| Multi-hop | Poor | No graph structure to traverse |
+| Entity queries | Medium | Relies on keyword/semantic match |
+
+**Key Insight**: RAG treats documents as bags of words/vectors. It doesn't understand that "Kubernetes" is a technology that "uses" "Docker" and is "part_of" "Cloud Native".
+
+#### Decision: Parallel KAG Pipeline
+
+Instead of replacing RAG, add a parallel KAG pipeline:
+
+```
+┌─────────────────────┐     ┌─────────────────────┐
+│   RAG Pipeline      │     │   KAG Pipeline      │
+│   (existing)        │     │   (new)             │
+│   ├─ FTS5          │     │   ├─ Entity Extractor│
+│   ├─ Qdrant        │     │   ├─ SQLite Graph    │
+│   └─ Hybrid Search │     │   └─ KAG Search      │
+└─────────────────────┘     └─────────────────────┘
+         │                           │
+         └───────────┬───────────────┘
+                     ▼
+              AI Client (Claude, GPT)
+              chooses best tool for query
+```
+
+**Why Parallel**:
+1. RAG excels at semantic/keyword queries
+2. KAG excels at entity/relation queries
+3. AI client can choose appropriate tool
+4. No regression in existing functionality
+
+#### Technology Selection
+
+**Graph Database: FalkorDB vs Neo4j vs NetworkX**
+
+| Criteria | FalkorDB | Neo4j | NetworkX |
+|----------|----------|-------|----------|
+| License | Apache 2.0 | GPL/Commercial | BSD |
+| Performance | 500x faster p99 | Baseline | In-memory only |
+| Query Language | Cypher | Cypher | Python API |
+| Deployment | Docker (Redis) | Docker/Native | Embedded |
+| **Decision** | **Chosen** | Too restrictive | Too limited |
+
+**LLM for Extraction: Mistral 7B vs GPT-4 vs Claude**
+
+| Criteria | Mistral 7B | GPT-4 | Claude 3.5 |
+|----------|------------|-------|------------|
+| License | Apache 2.0 | API only | API only |
+| NER F1 | 0.6376 | 0.82+ | 0.80+ |
+| Latency | ~2-5s local | ~1s API | ~1s API |
+| Cost | Free | $$/query | $$/query |
+| Privacy | Local | Cloud | Cloud |
+| **Decision** | **Default** | Optional | Optional |
+
+**RAM Budget Analysis (32GB M4)**:
+- macOS + Apps: ~8GB
+- nomic-embed-text: ~0.3GB
+- qwen2.5-coder (chat): ~4.5GB
+- mistral:7b (KAG): ~4.1GB
+- Qdrant + FalkorDB: ~3GB
+- **Total**: ~20GB, **Headroom**: ~12GB
+
+#### Security Considerations
+
+| Risk | Mitigation |
+|------|------------|
+| Prompt injection in LLM | `sanitizePromptInput()` filters patterns |
+| Malicious entity names | Validator rejects suspicious content |
+| Low-quality extractions | Confidence threshold (0.6) |
+| Network exposure | FalkorDB localhost-only by default |
+| Opt-out complexity | KAG disabled by default |
+
+#### Implementation Highlights
+
+**1. Deterministic Entity IDs**
+Problem: Same entity extracted from different chunks creates duplicates.
+Solution: Generate ID from `sha256(name + type + documentID)`.
+
+```go
+func GenerateEntityID(name, entityType, documentID string) string {
+    data := fmt.Sprintf("%s:%s:%s",
+        strings.ToLower(name), entityType, documentID)
+    h := sha256.Sum256([]byte(data))
+    return "ent_" + hex.EncodeToString(h[:8])
+}
+```
+
+**2. Background Extraction Workers**
+Problem: Synchronous extraction blocks indexing.
+Solution: Queue-based background workers with configurable parallelism.
+
+**3. Multi-Provider Support**
+Problem: Users have different preferences (local vs cloud).
+Solution: `LLMProvider` interface with Ollama, OpenAI, Anthropic implementations.
+
+#### Testing Strategy
+
+| Level | Tests | Coverage |
+|-------|-------|----------|
+| Unit | Type normalization, validation, ID generation | Core logic |
+| Integration | Extractor + SQLite | Pipeline |
+| E2E | CLI commands | User workflows |
+| Security | Prompt injection patterns | Attack surface |
+
+#### Outcome
+
+- ✅ `kag_query` MCP tool working
+- ✅ Entity/relation extraction with Ollama
+- ✅ SQLite-based graph storage
+- ✅ Security hardening (prompt sanitization, validation)
+- ✅ Graceful degradation when KAG disabled
+- ✅ All 10 unit tests passing
+
+#### Lessons Learned
+
+> **1. Parallel > Replace**: When adding new capabilities (KAG), run parallel to existing systems (RAG). Let the AI client choose the best tool for each query type.
+
+> **2. Local-first defaults matter**: Default to Ollama (local) not OpenAI (cloud). Users can opt-in to cloud for better quality, but privacy-first is the safe default.
+
+> **3. Deterministic IDs prevent deduplication headaches**: By generating IDs from content hashes, the same entity from different chunks automatically merges.
+
+> **4. Prompt injection is a real threat**: The `sanitizePromptInput()` function caught several injection patterns in test documents. Always sanitize user-provided content before sending to LLMs.
+
+> **5. Background workers need graceful shutdown**: Without proper `stopCh` handling, workers would hang on daemon shutdown. Always implement clean shutdown patterns.
+
+---
+
 *Last Updated: January 2026*
