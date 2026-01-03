@@ -1405,9 +1405,11 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 
 	fmt.Println("This will remove:")
 	fmt.Println("  • Conduit daemon service")
+	fmt.Println("  • PATH export from shell config (~/.zshrc or ~/.bashrc)")
+	fmt.Println("  • Symlinks in /usr/local/bin (if any)")
 	fmt.Println()
 	fmt.Println("This will NOT remove:")
-	fmt.Println("  • Conduit binaries (conduit, conduit-daemon)")
+	fmt.Println("  • Conduit binaries (conduit, conduit-daemon in ~/.local/bin)")
 	fmt.Println("  • Docker/Podman")
 	fmt.Println("  • Ollama")
 	fmt.Println()
@@ -1425,6 +1427,13 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 	_ = i.StopDaemonService()
 	_ = i.RemoveDaemonService()
 	fmt.Println("✓ Daemon service removed")
+
+	// Step 1.5: Clean up PATH from shell configs and symlinks
+	fmt.Println()
+	fmt.Println("Step 1.5: Clean Up Shell Config")
+	fmt.Println("──────────────────────────────────────────────────────────────")
+	i.cleanupShellConfig(homeDir)
+	i.cleanupSymlinks()
 
 	// Step 2: Data removal decision
 	fmt.Println()
@@ -1626,4 +1635,87 @@ func formatSize(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+// cleanupShellConfig removes Conduit PATH export from shell config files.
+func (i *Installer) cleanupShellConfig(homeDir string) {
+	shellConfigs := []string{
+		filepath.Join(homeDir, ".zshrc"),
+		filepath.Join(homeDir, ".bashrc"),
+		filepath.Join(homeDir, ".bash_profile"),
+	}
+
+	localBinPath := filepath.Join(homeDir, ".local", "bin")
+
+	for _, configPath := range shellConfigs {
+		if _, err := os.Stat(configPath); os.IsNotExist(err) {
+			continue
+		}
+
+		content, err := os.ReadFile(configPath)
+		if err != nil {
+			continue
+		}
+
+		lines := strings.Split(string(content), "\n")
+		var newLines []string
+		removed := false
+
+		for j := 0; j < len(lines); j++ {
+			line := lines[j]
+			// Skip the Conduit comment and PATH export lines
+			if strings.Contains(line, "# Conduit") {
+				// Skip this line and the next if it's the PATH export
+				if j+1 < len(lines) && strings.Contains(lines[j+1], localBinPath) {
+					j++ // Skip the PATH line too
+					removed = true
+					continue
+				}
+			}
+			// Also remove standalone PATH lines that reference .local/bin with Conduit
+			if strings.Contains(line, localBinPath) && strings.Contains(line, "export PATH") {
+				removed = true
+				continue
+			}
+			newLines = append(newLines, line)
+		}
+
+		if removed {
+			// Remove any trailing empty lines caused by removal
+			for len(newLines) > 0 && newLines[len(newLines)-1] == "" {
+				newLines = newLines[:len(newLines)-1]
+			}
+			newLines = append(newLines, "") // Ensure single trailing newline
+
+			if err := os.WriteFile(configPath, []byte(strings.Join(newLines, "\n")), 0644); err != nil {
+				fmt.Printf("⚠ Could not update %s: %v\n", configPath, err)
+			} else {
+				fmt.Printf("✓ Removed PATH from %s\n", configPath)
+			}
+		}
+	}
+}
+
+// cleanupSymlinks removes Conduit symlinks from /usr/local/bin.
+func (i *Installer) cleanupSymlinks() {
+	symlinks := []string{
+		"/usr/local/bin/conduit",
+		"/usr/local/bin/conduit-daemon",
+	}
+
+	for _, link := range symlinks {
+		// Check if it's a symlink pointing to our binary
+		target, err := os.Readlink(link)
+		if err != nil {
+			continue // Not a symlink or doesn't exist
+		}
+
+		if strings.Contains(target, ".local/bin") {
+			if err := os.Remove(link); err != nil {
+				fmt.Printf("⚠ Could not remove symlink %s: %v\n", link, err)
+			} else {
+				fmt.Printf("✓ Removed symlink %s\n", link)
+			}
+		}
+	}
 }

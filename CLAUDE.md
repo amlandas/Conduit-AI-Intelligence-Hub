@@ -86,6 +86,11 @@ After making code changes:
 4. Test on remote machine (full user workflow)
 5. Only then commit and push changes
 
+**Post-Fix Completion:**
+- **Always merge changes with main** in GitHub by opening, updating, and closing PRs or bug reports
+- **Always update the GitHub README**, the learnings doc locally, and any other related local docs as needed
+- **Always update the GitHub install scripts** and the `conduit uninstall` command if needed
+
 ### Documentation
 
 When updating features, ensure documentation is updated:
