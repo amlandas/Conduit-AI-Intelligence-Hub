@@ -4495,6 +4495,7 @@ Examples:
 			fmt.Println("NOTE: First extraction may take 1-2 minutes per chunk while the model loads.")
 			fmt.Println("      Subsequent extractions will be faster (~10-30 seconds each).")
 			fmt.Println()
+			os.Stdout.Sync() // Flush output before blocking extraction calls
 
 			for rows.Next() {
 				var chunkID, documentID, content string
@@ -4505,6 +4506,7 @@ Examples:
 				// Show progress
 				current := processed + errors + 1
 				fmt.Printf("[%d/%d] Processing chunk %s...\n", current, totalChunks, chunkID[:16])
+				os.Stdout.Sync() // Flush before blocking extraction call
 
 				// Get document title
 				var title string
@@ -4517,10 +4519,12 @@ Examples:
 				if err != nil {
 					errors++
 					fmt.Printf("        ✗ Error: %v (%.1fs)\n", err, elapsed.Seconds())
+					os.Stdout.Sync()
 				} else {
 					processed++
 					fmt.Printf("        ✓ %d entities, %d relations (%.1fs)\n",
 						len(result.Entities), len(result.Relations), elapsed.Seconds())
+					os.Stdout.Sync()
 				}
 			}
 

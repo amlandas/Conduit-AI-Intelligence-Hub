@@ -526,17 +526,10 @@ install_binaries() {
 
     # Check if install dir is in PATH
     if ! echo "$PATH" | grep -q "$INSTALL_DIR"; then
-        warn "Installation directory is not in your PATH"
-        echo ""
-        echo "Add this line to your shell profile (~/.bashrc, ~/.zshrc, etc.):"
-        echo ""
-        echo "  export PATH=\"\$PATH:$INSTALL_DIR\""
-        echo ""
-
         # Try to add to current session
         export PATH="$PATH:$INSTALL_DIR"
 
-        # Detect shell and offer to add automatically (set global SHELL_RC)
+        # Detect shell config file
         case "$SHELL" in
             */bash)
                 SHELL_RC="$HOME/.bashrc"
@@ -549,26 +542,37 @@ install_binaries() {
                 ;;
         esac
 
-        if [[ -n "$SHELL_RC" ]] && [[ -f "$SHELL_RC" ]]; then
-            if confirm "Add to $SHELL_RC automatically?"; then
-                # Check if already in config file
-                if ! grep -q "$INSTALL_DIR" "$SHELL_RC" 2>/dev/null; then
-                    echo "" >> "$SHELL_RC"
-                    echo "# Conduit" >> "$SHELL_RC"
-                    echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$SHELL_RC"
-                    success "Added to $SHELL_RC"
-                    warn "Please run: source $SHELL_RC"
-                    warn "Or restart your terminal for the changes to take effect"
-                else
-                    success "PATH already configured in $SHELL_RC"
-                fi
+        # Automatically add to shell config (create file if needed)
+        if [[ -n "$SHELL_RC" ]]; then
+            # Create shell config file if it doesn't exist
+            if [[ ! -f "$SHELL_RC" ]]; then
+                touch "$SHELL_RC"
+                info "Created $SHELL_RC"
+            fi
+
+            # Check if already in config file
+            if ! grep -q "$INSTALL_DIR" "$SHELL_RC" 2>/dev/null; then
+                echo "" >> "$SHELL_RC"
+                echo "# Conduit - AI Intelligence Hub" >> "$SHELL_RC"
+                echo "export PATH=\"\$PATH:$INSTALL_DIR\"" >> "$SHELL_RC"
+                success "Added $INSTALL_DIR to $SHELL_RC"
             else
-                warn "You'll need to manually add $INSTALL_DIR to your PATH"
+                success "PATH already configured in $SHELL_RC"
             fi
         fi
     else
         success "Installation directory is already in PATH"
     fi
+
+    # Create symlinks in /usr/local/bin as fallback (if writable)
+    if [[ -w "/usr/local/bin" ]]; then
+        ln -sf "$INSTALL_DIR/conduit" "/usr/local/bin/conduit" 2>/dev/null && \
+        ln -sf "$INSTALL_DIR/conduit-daemon" "/usr/local/bin/conduit-daemon" 2>/dev/null && \
+        success "Created symlinks in /usr/local/bin"
+    fi
+
+    echo ""
+    info "Restart your terminal or run: source $SHELL_RC"
 }
 
 # Install runtime dependencies
