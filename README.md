@@ -463,6 +463,7 @@ kb:
   # KAG (Knowledge-Augmented Generation) settings
   kag:
     enabled: true         # Enable knowledge graph (requires FalkorDB)
+    preload_model: false  # Preload model on daemon startup (uses ~4GB RAM)
     provider: ollama      # LLM provider: ollama, openai, anthropic
     ollama:
       model: mistral:7b-instruct-q4_K_M  # Extraction model
@@ -594,6 +595,18 @@ conduit kb kag-status
 # Force re-extraction
 conduit kb kag-sync --force
 ```
+
+**KAG first extraction takes 1-2 minutes**
+
+The Mistral extraction model (~4GB) needs to load into memory on first use. To eliminate this delay, enable model preloading in your config:
+
+```yaml
+kb:
+  kag:
+    preload_model: true  # Loads model when daemon starts
+```
+
+This uses ~4GB RAM continuously but provides instant KAG queries.
 
 **KAG query returns empty results**
 - Ensure documents have been synced: `conduit kb sync`
