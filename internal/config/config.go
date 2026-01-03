@@ -118,6 +118,11 @@ type KAGConfig struct {
 	// Enabled controls whether KAG pipeline is active
 	Enabled bool `mapstructure:"enabled"`
 
+	// PreloadModel loads the extraction model into memory on daemon startup
+	// This eliminates cold-start delays but uses ~4GB RAM continuously
+	// Default: false (opt-in)
+	PreloadModel bool `mapstructure:"preload_model"`
+
 	// Provider specifies the LLM provider: "ollama", "openai", "anthropic"
 	Provider string `mapstructure:"provider"`
 
@@ -292,8 +297,9 @@ func DefaultConfig() *Config {
 				DefaultLimit:   10,   // 10 results by default
 			},
 			KAG: KAGConfig{
-				Enabled:  false, // Opt-in for security
-				Provider: "ollama",
+				Enabled:      false, // Opt-in for security
+				PreloadModel: false, // Opt-in for RAM management
+				Provider:     "ollama",
 				Graph: KAGGraphConfig{
 					Backend: "falkordb",
 					FalkorDB: KAGFalkorDBConfig{

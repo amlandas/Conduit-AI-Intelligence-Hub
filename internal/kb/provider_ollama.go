@@ -156,6 +156,21 @@ func (p *OllamaProvider) Close() error {
 	return nil
 }
 
+// WarmUp preloads the model into memory by making a minimal extraction request.
+// This eliminates cold-start delays on first actual use.
+// The model will stay loaded based on the KeepAlive setting (default: 5 minutes).
+func (p *OllamaProvider) WarmUp(ctx context.Context) error {
+	// Make a minimal extraction request to trigger model loading
+	req := &ExtractionRequest{
+		Content:             "System warmup test.",
+		MaxEntities:         1,
+		MaxRelations:        1,
+		ConfidenceThreshold: 0.9, // High threshold to minimize processing
+	}
+	_, err := p.ExtractEntities(ctx, req)
+	return err
+}
+
 // Ollama API types
 
 type ollamaGenerateRequest struct {

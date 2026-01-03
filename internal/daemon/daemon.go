@@ -132,6 +132,34 @@ func New(cfg *config.Config) (*Daemon, error) {
 	// Create hybrid searcher (always available - falls back to FTS5 if semantic unavailable)
 	kbHybrid := kb.NewHybridSearcher(kbSearcher, kbSemantic)
 
+	// Preload KAG extraction model if enabled
+	if cfg.KB.KAG.Enabled && cfg.KB.KAG.PreloadModel && cfg.KB.KAG.Provider == "ollama" {
+		logger.Info().
+			Str("model", cfg.KB.KAG.Ollama.Model).
+			Msg("preloading KAG extraction model (this may take 1-2 minutes on first run)...")
+		go func() {
+			preloadCtx, preloadCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer preloadCancel()
+
+			provider, err := kb.NewOllamaProvider(kb.OllamaProviderConfig{
+				Host:      cfg.KB.KAG.Ollama.Host,
+				Model:     cfg.KB.KAG.Ollama.Model,
+				KeepAlive: cfg.KB.KAG.Ollama.KeepAlive,
+			})
+			if err != nil {
+				logger.Warn().Err(err).Msg("failed to create Ollama provider for preload")
+				return
+			}
+			defer provider.Close()
+
+			if err := provider.WarmUp(preloadCtx); err != nil {
+				logger.Warn().Err(err).Msg("failed to preload KAG model")
+			} else {
+				logger.Info().Str("model", cfg.KB.KAG.Ollama.Model).Msg("KAG model preloaded successfully")
+			}
+		}()
+	}
+
 	d := &Daemon{
 		cfg:        cfg,
 		store:      st,
