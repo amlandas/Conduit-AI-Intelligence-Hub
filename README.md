@@ -206,6 +206,12 @@ conduit kb search <query> --fts5      # Force keyword search only
 conduit kb remove <name>      # Remove source (cleans up FTS5 + vectors)
 conduit kb migrate            # Migrate existing docs to vector store
 conduit kb stats              # Show KB statistics
+
+# Advanced search options (RAG tuning)
+conduit kb search <query> --min-score 0.05      # Lower similarity threshold
+conduit kb search <query> --limit 20            # More results
+conduit kb search <query> --semantic-weight 0.8 # Prefer semantic over keyword
+conduit kb search <query> --mmr-lambda 0.9      # More relevance, less diversity
 ```
 
 ### Qdrant Management
@@ -309,6 +315,17 @@ kb:
   chunk_size: 1000
   chunk_overlap: 100
   max_file_size: 104857600  # 100MB
+
+  # RAG (Retrieval-Augmented Generation) tuning
+  # These control how semantic search retrieves and ranks results
+  rag:
+    min_score: 0.1        # Minimum similarity threshold (0.0-1.0)
+                          # Lower = more results, let LLM decide relevance
+    semantic_weight: 0.5  # Balance: 0.0=keyword only, 1.0=semantic only
+    enable_mmr: true      # Maximal Marginal Relevance for diversity
+    mmr_lambda: 0.7       # 0.0=max diversity, 1.0=max relevance
+    enable_rerank: true   # Re-score top candidates semantically
+    default_limit: 10     # Default number of results
 
 policy:
   allow_network_egress: false

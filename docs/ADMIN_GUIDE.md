@@ -216,6 +216,19 @@ kb:
   chunk_overlap: 100    # Overlap between chunks
   max_file_size: 104857600  # 100MB max file size
 
+  # RAG (Retrieval-Augmented Generation) tuning
+  # Controls how semantic search retrieves and ranks results
+  rag:
+    min_score: 0.1        # Minimum similarity threshold (0.0-1.0)
+                          # Lower = more results, let consuming LLM decide relevance
+    semantic_weight: 0.5  # Balance between semantic and keyword (0.0-1.0)
+                          # 0.0 = keyword only, 1.0 = semantic only
+    enable_mmr: true      # Maximal Marginal Relevance for diversity
+    mmr_lambda: 0.7       # Relevance vs diversity (0.0-1.0)
+                          # 0.0 = max diversity, 1.0 = max relevance
+    enable_rerank: true   # Re-score top candidates semantically
+    default_limit: 10     # Default number of results
+
 # Policy settings
 policy:
   allow_network_egress: false  # Default network policy
@@ -768,6 +781,43 @@ kb:
   max_results: 50         # Limit search results
 ```
 
+### RAG Tuning for AI Clients
+
+When Conduit is used as a retrieval layer for AI clients (Claude, GPT, etc.), optimize for **recall over precision**. The consuming LLM has world knowledge and can filter irrelevant results.
+
+```yaml
+kb:
+  rag:
+    # Permissive threshold - let the LLM decide relevance
+    min_score: 0.05       # Very low threshold for domain-specific terms
+
+    # Balanced retrieval
+    semantic_weight: 0.5  # Equal weight to semantic and keyword
+
+    # Maximize result diversity for AI consumption
+    enable_mmr: true
+    mmr_lambda: 0.6       # Slightly favor diversity over relevance
+
+    # Enable reranking for best quality
+    enable_rerank: true
+
+    # More results for LLM to work with
+    default_limit: 15
+```
+
+**CLI Override Examples**:
+
+```bash
+# For domain-specific terminology (ASL-3, CBRN, etc.)
+conduit kb search "ASL-3 deployment safeguards" --min-score 0.0 --limit 20
+
+# For code search (exact matches matter)
+conduit kb search "func NewAuthHandler" --fts5 --semantic-weight 0.2
+
+# Maximum diversity for exploratory queries
+conduit kb search "authentication patterns" --mmr-lambda 0.4
+```
+
 ### Health Check Tuning
 
 ```yaml
@@ -1034,4 +1084,22 @@ GET /api/v1/kb/sources
 POST /api/v1/kb/sources
 GET /api/v1/kb/search?q={query}
 GET /api/v1/kb/stats
+```
+
+**Search Query Parameters**:
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `q` | string | required | Search query text |
+| `mode` | string | `hybrid` | Search mode: `hybrid`, `semantic`, `fts5` |
+| `limit` | int | 10 | Maximum results |
+| `min_score` | float | 0.1 | Minimum similarity threshold (0.0-1.0) |
+| `semantic_weight` | float | 0.5 | Semantic vs keyword weight (0.0-1.0) |
+| `mmr_lambda` | float | 0.7 | Relevance vs diversity (0.0-1.0) |
+| `enable_mmr` | bool | true | Enable MMR diversity filtering |
+| `enable_rerank` | bool | true | Enable semantic reranking |
+
+**Example**:
+```http
+GET /api/v1/kb/search?q=authentication&mode=semantic&min_score=0.05&limit=20
 ```
