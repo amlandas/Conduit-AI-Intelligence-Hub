@@ -89,8 +89,9 @@ func (ss *SemanticSearcher) Search(ctx context.Context, query string, opts Seman
 	if opts.ContextLen <= 0 {
 		opts.ContextLen = 300
 	}
-	if opts.MinScore <= 0 {
-		opts.MinScore = 0.3 // Default minimum score for relevance
+	// MinScore of 0 is valid (no filtering) - only set default if negative
+	if opts.MinScore < 0 {
+		opts.MinScore = 0.0 // No filtering - return all results ranked by score
 	}
 
 	// Generate embedding for the query

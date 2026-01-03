@@ -514,7 +514,7 @@ For power users and AI integrations, Conduit provides fine-grained control over 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--min-score` | 0.1 | Minimum similarity threshold (0.0-1.0) |
+| `--min-score` | 0.0 | Minimum similarity threshold (0.0-1.0) |
 | `--semantic-weight` | 0.5 | Semantic vs keyword balance (0.0-1.0) |
 | `--mmr-lambda` | 0.7 | Relevance vs diversity (0.0-1.0) |
 | `--limit` | 10 | Maximum results to return |
@@ -776,7 +776,7 @@ make build  # Uses -tags "fts5" automatically
 | `conduit kb search <query>` | Search documents (hybrid by default) |
 | `conduit kb search --semantic` | Force semantic search |
 | `conduit kb search --fts5` | Force keyword search |
-| `conduit kb search --min-score 0.1` | Set similarity threshold |
+| `conduit kb search --min-score 0.0` | Set similarity threshold |
 | `conduit kb stats` | Show statistics |
 | `conduit kb remove <id>` | Remove source |
 | `conduit kb migrate` | Migrate docs to vector store |

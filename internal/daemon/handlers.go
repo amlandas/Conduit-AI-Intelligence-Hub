@@ -683,8 +683,9 @@ func (d *Daemon) kbHybridOpts(r *http.Request) kb.HybridSearchOptions {
 	if opts.Limit <= 0 {
 		opts.Limit = 10
 	}
-	if opts.SimilarityFloor <= 0 {
-		opts.SimilarityFloor = 0.1
+	// Note: SimilarityFloor of 0 is valid (no filtering), only set default if negative
+	if opts.SimilarityFloor < 0 {
+		opts.SimilarityFloor = 0.0
 	}
 
 	// Query parameter overrides (advanced mode)
@@ -771,8 +772,9 @@ func (d *Daemon) kbSemanticOpts(r *http.Request) kb.SemanticSearchOptions {
 	if opts.Limit <= 0 {
 		opts.Limit = 10
 	}
-	if opts.MinScore <= 0 {
-		opts.MinScore = 0.1
+	// Note: MinScore of 0 is valid (no filtering), only set default if negative
+	if opts.MinScore < 0 {
+		opts.MinScore = 0.0
 	}
 
 	// Query parameter overrides

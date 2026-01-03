@@ -319,8 +319,8 @@ kb:
   # RAG (Retrieval-Augmented Generation) tuning
   # These control how semantic search retrieves and ranks results
   rag:
-    min_score: 0.1        # Minimum similarity threshold (0.0-1.0)
-                          # Lower = more results, let LLM decide relevance
+    min_score: 0.0        # Minimum similarity threshold (0.0-1.0)
+                          # 0 = no filtering, return all results ranked by score
     semantic_weight: 0.5  # Balance: 0.0=keyword only, 1.0=semantic only
     enable_mmr: true      # Maximal Marginal Relevance for diversity
     mmr_lambda: 0.7       # 0.0=max diversity, 1.0=max relevance

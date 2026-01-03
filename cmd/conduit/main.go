@@ -1754,7 +1754,7 @@ Results are processed by default (merged chunks, filtered boilerplate).
 Use --raw to get unprocessed results.
 
 ADVANCED MODE: RAG tuning flags allow fine-grained control over retrieval:
-  --min-score         Minimum similarity threshold (0.0-1.0, default 0.1)
+  --min-score         Minimum similarity threshold (0.0-1.0, default 0.0)
   --semantic-weight   Balance between semantic/lexical (0.0-1.0, default 0.5)
   --mmr-lambda        Relevance vs diversity (0.0-1.0, default 0.7)
 

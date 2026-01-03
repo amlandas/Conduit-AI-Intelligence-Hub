@@ -184,7 +184,7 @@ func DefaultConfig() *Config {
 			ChunkOverlap:  100,
 			WatchDebounce: 500 * time.Millisecond,
 			RAG: RAGConfig{
-				MinScore:       0.1,  // Permissive - let the LLM decide relevance
+				MinScore:       0.0,  // No filtering - return all results, let LLM decide relevance
 				SemanticWeight: 0.5,  // Balanced hybrid search
 				EnableMMR:      true, // Diversity enabled
 				MMRLambda:      0.7,  // 70% relevance, 30% diversity

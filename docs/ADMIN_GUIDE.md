@@ -219,7 +219,7 @@ kb:
   # RAG (Retrieval-Augmented Generation) tuning
   # Controls how semantic search retrieves and ranks results
   rag:
-    min_score: 0.1        # Minimum similarity threshold (0.0-1.0)
+    min_score: 0.0        # Minimum similarity threshold (0.0-1.0)
                           # Lower = more results, let consuming LLM decide relevance
     semantic_weight: 0.5  # Balance between semantic and keyword (0.0-1.0)
                           # 0.0 = keyword only, 1.0 = semantic only
@@ -1093,7 +1093,7 @@ GET /api/v1/kb/stats
 | `q` | string | required | Search query text |
 | `mode` | string | `hybrid` | Search mode: `hybrid`, `semantic`, `fts5` |
 | `limit` | int | 10 | Maximum results |
-| `min_score` | float | 0.1 | Minimum similarity threshold (0.0-1.0) |
+| `min_score` | float | 0.0 | Minimum similarity threshold (0.0-1.0) |
 | `semantic_weight` | float | 0.5 | Semantic vs keyword weight (0.0-1.0) |
 | `mmr_lambda` | float | 0.7 | Relevance vs diversity (0.0-1.0) |
 | `enable_mmr` | bool | true | Enable MMR diversity filtering |
