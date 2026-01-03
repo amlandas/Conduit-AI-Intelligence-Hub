@@ -214,7 +214,7 @@ runtime:
 kb:
   chunk_size: 1000      # Characters per chunk
   chunk_overlap: 100    # Overlap between chunks
-  max_file_size: 10485760  # 10MB max file size
+  max_file_size: 104857600  # 100MB max file size
 
 # Policy settings
 policy:

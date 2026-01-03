@@ -70,6 +70,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	// Initialize KB services
 	kbSource := kb.NewSourceManager(st.DB())
+	kbSource.SetMaxFileSize(cfg.KB.MaxFileSize)
 	kbSearcher := kb.NewSearcher(st.DB())
 	kbIndexer := kb.NewIndexer(st.DB())
 

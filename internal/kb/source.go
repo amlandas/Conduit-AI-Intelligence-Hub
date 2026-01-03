@@ -21,24 +21,32 @@ import (
 
 // SourceManager manages KB source folders.
 type SourceManager struct {
-	db         *sql.DB
-	indexer    *Indexer
-	chunker    *Chunker
-	cleaner    *ContentCleaner
-	extractors *ExtractorRegistry
-	logger     zerolog.Logger
+	db          *sql.DB
+	indexer     *Indexer
+	chunker     *Chunker
+	cleaner     *ContentCleaner
+	extractors  *ExtractorRegistry
+	logger      zerolog.Logger
+	maxFileSize int64 // Maximum file size to index (default 100MB)
 }
 
 // NewSourceManager creates a new source manager.
 func NewSourceManager(db *sql.DB) *SourceManager {
 	return &SourceManager{
-		db:         db,
-		indexer:    NewIndexer(db),
-		chunker:    NewChunker(),
-		cleaner:    NewContentCleaner(),
-		extractors: NewExtractorRegistry(),
-		logger:     observability.Logger("kb.source"),
+		db:          db,
+		indexer:     NewIndexer(db),
+		chunker:     NewChunker(),
+		cleaner:     NewContentCleaner(),
+		extractors:  NewExtractorRegistry(),
+		logger:      observability.Logger("kb.source"),
+		maxFileSize: 100 * 1024 * 1024, // Default 100MB
 	}
+}
+
+// SetMaxFileSize sets the maximum file size for indexing.
+func (sm *SourceManager) SetMaxFileSize(size int64) {
+	sm.maxFileSize = size
+	sm.logger.Debug().Int64("max_file_size", size).Msg("max file size set")
 }
 
 // SetSemanticSearcher enables semantic search for the source manager's indexer.
@@ -510,10 +518,19 @@ func (sm *SourceManager) readFile(path string) (string, *FileMetadata, error) {
 		return "", nil, err
 	}
 
-	// Skip large files (50MB limit for binary documents like PDFs)
-	maxSize := int64(50 * 1024 * 1024)
-	if info.Size() > maxSize {
-		return "", nil, fmt.Errorf("file too large: %d bytes (max %d)", info.Size(), maxSize)
+	// Skip files exceeding max size limit
+	if info.Size() > sm.maxFileSize {
+		return "", nil, fmt.Errorf("file too large: %d bytes (max %d)", info.Size(), sm.maxFileSize)
+	}
+
+	// Warn for large files that may take a while to process
+	const largeFileThreshold = 50 * 1024 * 1024 // 50MB
+	if info.Size() > largeFileThreshold {
+		sm.logger.Warn().
+			Str("path", path).
+			Int64("size_bytes", info.Size()).
+			Str("size_human", formatBytes(info.Size())).
+			Msg("processing large file - this may take a while")
 	}
 
 	// Use extractors to get text content
@@ -669,4 +686,18 @@ func normalizePatterns(patterns []string) []string {
 		}
 	}
 	return normalized
+}
+
+// formatBytes formats bytes as human-readable string.
+func formatBytes(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }

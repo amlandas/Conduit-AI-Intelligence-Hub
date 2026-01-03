@@ -308,7 +308,7 @@ runtime:
 kb:
   chunk_size: 1000
   chunk_overlap: 100
-  max_file_size: 10485760  # 10MB
+  max_file_size: 104857600  # 100MB
 
 policy:
   allow_network_egress: false

@@ -142,7 +142,7 @@ func DefaultConfig() *Config {
 
 		KB: KBConfig{
 			Workers:       4,
-			MaxFileSize:   10 * 1024 * 1024, // 10MB
+			MaxFileSize:   100 * 1024 * 1024, // 100MB
 			ChunkSize:     1000,
 			ChunkOverlap:  100,
 			WatchDebounce: 500 * time.Millisecond,

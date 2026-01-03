@@ -91,8 +91,8 @@ func TestDefaultConfig_KBDefaults(t *testing.T) {
 	if cfg.KB.Workers != 4 {
 		t.Errorf("Workers should be 4, got %d", cfg.KB.Workers)
 	}
-	if cfg.KB.MaxFileSize != 10*1024*1024 {
-		t.Errorf("MaxFileSize should be 10MB, got %d", cfg.KB.MaxFileSize)
+	if cfg.KB.MaxFileSize != 100*1024*1024 {
+		t.Errorf("MaxFileSize should be 100MB, got %d", cfg.KB.MaxFileSize)
 	}
 	if cfg.KB.ChunkSize != 1000 {
 		t.Errorf("ChunkSize should be 1000, got %d", cfg.KB.ChunkSize)
