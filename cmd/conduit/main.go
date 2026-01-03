@@ -4448,8 +4448,27 @@ Examples:
 			}
 			defer extractor.Close()
 
-			// Get chunks to process
+			// Count total chunks to process FIRST (before opening cursor)
 			ctx := cmd.Context()
+			var totalChunks int
+			if force {
+				db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_chunks").Scan(&totalChunks)
+			} else {
+				db.DB().QueryRowContext(ctx, `
+					SELECT COUNT(*) FROM kb_chunks c
+					LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+					WHERE s.status IS NULL OR s.status = 'error'
+				`).Scan(&totalChunks)
+			}
+
+			if totalChunks == 0 {
+				fmt.Println("No chunks to process. All documents have been extracted.")
+				fmt.Println()
+				fmt.Println("Use --force to re-extract all chunks.")
+				return nil
+			}
+
+			// Now query the actual chunks to process
 			var query string
 			if force {
 				query = `SELECT chunk_id, document_id, content FROM kb_chunks ORDER BY chunk_id`
@@ -4468,25 +4487,6 @@ Examples:
 				return fmt.Errorf("query chunks: %w", err)
 			}
 			defer rows.Close()
-
-			// Count total chunks to process
-			var totalChunks int
-			if force {
-				db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_chunks").Scan(&totalChunks)
-			} else {
-				db.DB().QueryRowContext(ctx, `
-					SELECT COUNT(*) FROM kb_chunks c
-					LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
-					WHERE s.status IS NULL OR s.status = 'error'
-				`).Scan(&totalChunks)
-			}
-
-			if totalChunks == 0 {
-				fmt.Println("No chunks to process. All documents have been extracted.")
-				fmt.Println()
-				fmt.Println("Use --force to re-extract all chunks.")
-				return nil
-			}
 
 			// Process chunks
 			var processed, errors int

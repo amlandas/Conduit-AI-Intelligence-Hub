@@ -65,6 +65,27 @@ After making code changes:
 - Ensure all tests pass
 - Add tests for new features
 
+### Bug Investigation & Fix Validation (CRITICAL)
+
+**Root Cause Analysis:**
+- **Always perform in-depth investigation** to find the true root cause for bugs
+- **Never assume, guess, or use trial-and-error methods** for bug fixes
+- Only proceed with a fix when you have **high confidence** in the root cause analysis
+- **Maintain transparency** with the user about findings and reasoning
+
+**End-to-End User Experience Testing:**
+- **Always perform full-loop UX testing on this local machine** for any new features or bug fixes to validate they work
+- **Always perform full-loop UX testing on the remote machine** (`amlandas@192.168.1.60`) to validate features/fixes work on other machines
+- Testing must simulate actual user workflows, not just verify code compiles
+- Document test results before marking work as complete
+
+**Testing Workflow:**
+1. Investigate and identify root cause with high confidence
+2. Implement the fix
+3. Test on local machine (full user workflow)
+4. Test on remote machine (full user workflow)
+5. Only then commit and push changes
+
 ### Documentation
 
 When updating features, ensure documentation is updated:
@@ -145,4 +166,4 @@ Before requesting review on a PR:
 
 ---
 
-**Last Updated**: December 2025
+**Last Updated**: January 2026
