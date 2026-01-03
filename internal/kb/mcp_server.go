@@ -19,6 +19,7 @@ type MCPServer struct {
 	db       *sql.DB
 	source   *SourceManager
 	searcher *Searcher
+	hybrid   *HybridSearcher
 	indexer  *Indexer
 	logger   zerolog.Logger
 
@@ -57,11 +58,20 @@ type MCPNotification struct {
 }
 
 // NewMCPServer creates a new KB MCP server.
-func NewMCPServer(db *sql.DB) *MCPServer {
+// If hybrid is nil, a default HybridSearcher will be created with FTS5 only.
+func NewMCPServer(db *sql.DB, hybrid *HybridSearcher) *MCPServer {
+	searcher := NewSearcher(db)
+
+	// If no hybrid searcher provided, create one with just FTS5
+	if hybrid == nil {
+		hybrid = NewHybridSearcher(searcher, nil)
+	}
+
 	return &MCPServer{
 		db:       db,
 		source:   NewSourceManager(db),
-		searcher: NewSearcher(db),
+		searcher: searcher,
+		hybrid:   hybrid,
 		indexer:  NewIndexer(db),
 		logger:   observability.Logger("kb.mcp"),
 		input:    os.Stdin,
@@ -282,7 +292,7 @@ func (s *MCPServer) handleToolCall(ctx context.Context, params json.RawMessage) 
 	}
 }
 
-// toolSearch performs a search.
+// toolSearch performs a search using the hybrid searcher.
 func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (interface{}, error) {
 	var params struct {
 		Query    string `json:"query"`
@@ -304,33 +314,56 @@ func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (inter
 		params.Mode = "hybrid"
 	}
 
-	opts := SearchOptions{
-		Limit:     params.Limit,
-		Highlight: true,
+	// Determine hybrid search mode
+	var hybridMode HybridSearchMode
+	switch params.Mode {
+	case "semantic":
+		hybridMode = HybridModeSemantic
+	case "fts5", "lexical":
+		hybridMode = HybridModeLexical
+	default:
+		hybridMode = HybridModeFusion // hybrid mode
+	}
+
+	opts := HybridSearchOptions{
+		Limit: params.Limit,
+		Mode:  hybridMode,
 	}
 	if params.SourceID != "" {
 		opts.SourceIDs = []string{params.SourceID}
 	}
 
-	result, err := s.searcher.Search(ctx, params.Query, opts)
+	// Use hybrid searcher with fallback for better results
+	result, err := s.hybrid.SearchWithFallback(ctx, params.Query, opts)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}
 
 	// Format results as content blocks
 	var content []map[string]interface{}
+
+	// Add search metadata
+	modeStr := string(result.Mode)
+	if result.DegradedMode {
+		modeStr += " (degraded - semantic unavailable)"
+	}
+
 	for _, hit := range result.Results {
 		content = append(content, map[string]interface{}{
 			"type": "text",
-			"text": fmt.Sprintf("**%s** (score: %.2f)\nPath: %s\n\n%s",
+			"text": fmt.Sprintf("**%s** (score: %.4f)\nPath: %s\n\n%s",
 				hit.Title, hit.Score, hit.Path, hit.Snippet),
 		})
 	}
 
 	if len(content) == 0 {
+		noteText := "No results found for: " + params.Query
+		if result.Note != "" {
+			noteText += "\n\n" + result.Note
+		}
 		content = append(content, map[string]interface{}{
 			"type": "text",
-			"text": "No results found for: " + params.Query,
+			"text": noteText,
 		})
 	}
 
@@ -358,15 +391,27 @@ func (s *MCPServer) toolSearchWithContext(ctx context.Context, args json.RawMess
 		params.Mode = "hybrid"
 	}
 
-	opts := SearchOptions{
-		Limit:     params.Limit * 3, // Fetch more to allow for merging
-		Highlight: true,
+	// Determine hybrid search mode
+	var hybridMode HybridSearchMode
+	switch params.Mode {
+	case "semantic":
+		hybridMode = HybridModeSemantic
+	case "fts5", "lexical":
+		hybridMode = HybridModeLexical
+	default:
+		hybridMode = HybridModeFusion // hybrid mode
+	}
+
+	opts := HybridSearchOptions{
+		Limit: params.Limit * 3, // Fetch more to allow for merging
+		Mode:  hybridMode,
 	}
 	if params.SourceID != "" {
 		opts.SourceIDs = []string{params.SourceID}
 	}
 
-	result, err := s.searcher.Search(ctx, params.Query, opts)
+	// Use hybrid searcher with fallback
+	result, err := s.hybrid.SearchWithFallback(ctx, params.Query, opts)
 	if err != nil {
 		return nil, fmt.Errorf("search: %w", err)
 	}

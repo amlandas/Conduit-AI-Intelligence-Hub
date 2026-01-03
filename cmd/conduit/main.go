@@ -2659,8 +2659,36 @@ Example MCP client configuration:
 			}
 			defer st.Close()
 
-			// Create and run MCP server
-			server := kb.NewMCPServer(st.DB())
+			// Create FTS5 searcher
+			ftsSearcher := kb.NewSearcher(st.DB())
+
+			// Attempt to create semantic searcher (if Qdrant/Ollama available)
+			var semanticSearcher *kb.SemanticSearcher
+			semanticCfg := kb.SemanticSearchConfig{
+				EmbeddingConfig: kb.EmbeddingConfig{
+					OllamaHost: "http://localhost:11434",
+					Model:      "nomic-embed-text",
+					Dimension:  768,
+					BatchSize:  10,
+				},
+				VectorStoreConfig: kb.VectorStoreConfig{
+					Host:           "localhost",
+					Port:           6334, // gRPC port
+					CollectionName: "conduit_kb",
+					Dimension:      768,
+					BatchSize:      100,
+				},
+			}
+
+			// Try to create semantic searcher - if it fails, we fall back to FTS5 only
+			semanticSearcher, _ = kb.NewSemanticSearcher(st.DB(), semanticCfg)
+			// Error is ignored - hybrid searcher works with nil semantic searcher
+
+			// Create hybrid searcher (combines FTS5 + semantic when available)
+			hybridSearcher := kb.NewHybridSearcher(ftsSearcher, semanticSearcher)
+
+			// Create and run MCP server with hybrid searcher
+			server := kb.NewMCPServer(st.DB(), hybridSearcher)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
