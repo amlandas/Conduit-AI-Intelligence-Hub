@@ -1405,7 +1405,6 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 
 	fmt.Println("This will remove:")
 	fmt.Println("  • Conduit daemon service")
-	fmt.Println("  • Configuration files (~/.conduit)")
 	fmt.Println()
 	fmt.Println("This will NOT remove:")
 	fmt.Println("  • Conduit binaries (conduit, conduit-daemon)")
@@ -1418,23 +1417,140 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 		return nil
 	}
 
-	// Stop and remove daemon service
+	// Step 1: Stop and remove daemon service
 	fmt.Println()
+	fmt.Println("Step 1: Stop Daemon Service")
+	fmt.Println("──────────────────────────────────────────────────────────────")
 	fmt.Println("Stopping daemon service...")
 	_ = i.StopDaemonService()
 	_ = i.RemoveDaemonService()
 	fmt.Println("✓ Daemon service removed")
 
-	// Remove configuration
+	// Step 2: Data removal decision
 	fmt.Println()
-	if i.confirmAction(fmt.Sprintf("Remove all data in %s?", conduitHome)) {
-		if err := os.RemoveAll(conduitHome); err != nil {
-			fmt.Printf("⚠ Could not remove %s: %v\n", conduitHome, err)
-		} else {
-			fmt.Println("✓ Configuration and data removed")
+	fmt.Println("Step 2: Data Removal")
+	fmt.Println("──────────────────────────────────────────────────────────────")
+
+	// Check what exists
+	hasDataDir := false
+	hasQdrantContainer := false
+	var containerCmd string
+	var qdrantVectors int64
+
+	if _, err := os.Stat(conduitHome); err == nil {
+		hasDataDir = true
+	}
+
+	// Detect container runtime and check for Qdrant
+	if i.commandExists("podman") {
+		containerCmd = "podman"
+	} else if i.commandExists("docker") {
+		containerCmd = "docker"
+	}
+
+	if containerCmd != "" {
+		out, err := exec.Command(containerCmd, "ps", "-a", "--format", "{{.Names}}").Output()
+		if err == nil && strings.Contains(string(out), "conduit-qdrant") {
+			hasQdrantContainer = true
+			// Try to get vector count
+			qdrantVectors = i.getQdrantVectorCount()
 		}
+	}
+
+	if !hasDataDir && !hasQdrantContainer {
+		fmt.Println("No Conduit data found.")
 	} else {
-		fmt.Println("Keeping configuration files.")
+		// Show data summary
+		fmt.Println()
+		fmt.Println("════════════════════════════════════════════════════════════════")
+		fmt.Println("                    DATA REMOVAL DECISION                        ")
+		fmt.Println("════════════════════════════════════════════════════════════════")
+		fmt.Println()
+		fmt.Println("Conduit stores the following data:")
+		fmt.Println()
+
+		if hasDataDir {
+			dataSize := i.getDirSize(conduitHome)
+			sqliteSize := i.getFileSize(filepath.Join(conduitHome, "conduit.db"))
+			qdrantDataSize := i.getDirSize(filepath.Join(conduitHome, "qdrant"))
+
+			fmt.Printf("  📁 Data Directory: %s\n", conduitHome)
+			fmt.Printf("     ├── SQLite Database:     %s (documents, sources, config)\n", formatSize(sqliteSize))
+			fmt.Printf("     ├── Qdrant Vector Data:  %s (%d vectors)\n", formatSize(qdrantDataSize), qdrantVectors)
+			fmt.Println("     ├── Daemon logs")
+			fmt.Println("     └── Configuration files")
+			fmt.Printf("     Total size: %s\n", formatSize(dataSize))
+		}
+
+		if hasQdrantContainer {
+			fmt.Println()
+			fmt.Println("  🐳 Qdrant Container: conduit-qdrant")
+			fmt.Println("     Running on ports 6333 (HTTP) and 6334 (gRPC)")
+		}
+
+		fmt.Println()
+		fmt.Println("────────────────────────────────────────────────────────────────")
+		fmt.Println()
+		fmt.Println("Choose an option:")
+		fmt.Println()
+		fmt.Println("  [1] DELETE ALL DATA - Remove everything (recommended for clean uninstall)")
+		fmt.Println("      • Stops and removes Qdrant container")
+		fmt.Println("      • Deletes all vectors, documents, and configuration")
+		fmt.Println("      • Fresh start if you reinstall")
+		fmt.Println()
+		fmt.Println("  [2] KEEP DATA - Preserve data for potential reinstall")
+		fmt.Println("      • Qdrant container and vectors preserved")
+		fmt.Println("      • SQLite database and config preserved")
+		fmt.Println("      • If reinstalling, run 'conduit qdrant purge' to clear stale vectors")
+		fmt.Println()
+
+		choice := i.prompt("Enter choice [1/2]: ")
+
+		if choice == "1" {
+			fmt.Println()
+			fmt.Println("⚠ This will permanently delete all Conduit data!")
+			fmt.Println()
+
+			confirmDelete := i.prompt("Type 'DELETE' to confirm: ")
+			if confirmDelete != "DELETE" {
+				fmt.Println("Deletion cancelled. Data preserved.")
+			} else {
+				// Remove Qdrant container first
+				if hasQdrantContainer && containerCmd != "" {
+					fmt.Println()
+					fmt.Println("Stopping and removing Qdrant container...")
+					_ = exec.Command(containerCmd, "stop", "conduit-qdrant").Run()
+					_ = exec.Command(containerCmd, "rm", "conduit-qdrant").Run()
+					fmt.Println("✓ Qdrant container removed")
+				}
+
+				// Remove data directory
+				if hasDataDir {
+					fmt.Println("Removing data directory...")
+					if err := os.RemoveAll(conduitHome); err != nil {
+						fmt.Printf("⚠ Could not remove %s: %v\n", conduitHome, err)
+					} else {
+						fmt.Println("✓ Data directory removed")
+					}
+				}
+
+				fmt.Println()
+				fmt.Println("✓ All Conduit data has been removed")
+			}
+		} else {
+			fmt.Println()
+			fmt.Println("⚠ Data preserved")
+			fmt.Println()
+			fmt.Printf("  Your data remains at: %s\n", conduitHome)
+			if hasQdrantContainer {
+				fmt.Println("  Qdrant container: conduit-qdrant (still running)")
+			}
+			fmt.Println()
+			fmt.Println("  If you reinstall Conduit later:")
+			fmt.Println("    • Your KB sources and documents will be restored")
+			fmt.Println("    • Run 'conduit qdrant purge' if vectors seem stale")
+			fmt.Println("    • Run 'conduit kb sync' to re-index documents")
+		}
 	}
 
 	fmt.Println()
@@ -1447,4 +1563,67 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 	fmt.Println()
 
 	return nil
+}
+
+// getQdrantVectorCount returns the number of vectors in Qdrant.
+func (i *Installer) getQdrantVectorCount() int64 {
+	cmd := exec.Command("curl", "-s", "http://localhost:6333/collections/conduit_kb")
+	out, err := cmd.Output()
+	if err != nil {
+		return 0
+	}
+
+	// Parse points_count from JSON response
+	outStr := string(out)
+	if idx := strings.Index(outStr, `"points_count":`); idx != -1 {
+		start := idx + len(`"points_count":`)
+		end := start
+		for end < len(outStr) && (outStr[end] >= '0' && outStr[end] <= '9') {
+			end++
+		}
+		if end > start {
+			var count int64
+			fmt.Sscanf(outStr[start:end], "%d", &count)
+			return count
+		}
+	}
+	return 0
+}
+
+// getDirSize returns the size of a directory in bytes.
+func (i *Installer) getDirSize(path string) int64 {
+	var size int64
+	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			size += info.Size()
+		}
+		return nil
+	})
+	return size
+}
+
+// getFileSize returns the size of a file in bytes.
+func (i *Installer) getFileSize(path string) int64 {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0
+	}
+	return info.Size()
+}
+
+// formatSize formats bytes as human-readable string.
+func formatSize(bytes int64) string {
+	const unit = 1024
+	if bytes < unit {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	div, exp := int64(unit), 0
+	for n := bytes / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
