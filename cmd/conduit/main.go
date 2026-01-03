@@ -1888,8 +1888,8 @@ Examples:
   conduit kb sync                    # Sync all sources
   conduit kb sync abc123-def456      # Sync specific source`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// Use a longer timeout for sync (5 minutes) - PDF extraction and embedding can be slow
-			c := newClientWithTimeout(socketPath, 5*time.Minute)
+			// Use a longer timeout for sync (10 minutes) - large file embedding can be slow
+			c := newClientWithTimeout(socketPath, 10*time.Minute)
 
 			if len(args) > 0 {
 				// Sync specific source
