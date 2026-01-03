@@ -4488,15 +4488,21 @@ Examples:
 				return nil
 			}
 
-			// Now query the actual chunks to process
+			// Now query the actual chunks to process (include title to avoid nested queries)
 			var query string
 			if force {
-				query = `SELECT chunk_id, document_id, content FROM kb_chunks ORDER BY chunk_id`
+				query = `
+					SELECT c.chunk_id, c.document_id, c.content, COALESCE(d.title, '')
+					FROM kb_chunks c
+					LEFT JOIN kb_documents d ON c.document_id = d.document_id
+					ORDER BY c.chunk_id
+				`
 			} else {
 				query = `
-					SELECT c.chunk_id, c.document_id, c.content
+					SELECT c.chunk_id, c.document_id, c.content, COALESCE(d.title, '')
 					FROM kb_chunks c
 					LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+					LEFT JOIN kb_documents d ON c.document_id = d.document_id
 					WHERE s.status IS NULL OR s.status = 'error'
 					ORDER BY c.chunk_id
 				`
@@ -4506,14 +4512,55 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("query chunks: %w", err)
 			}
-			defer rows.Close()
+
+			// Collect all chunks into slice FIRST to avoid SQLite cursor conflicts
+			// (storeEntities uses transactions which conflict with open cursors)
+			type chunkData struct {
+				ChunkID    string
+				DocumentID string
+				Content    string
+				Title      string
+			}
+			var chunks []chunkData
+			for rows.Next() {
+				var c chunkData
+				if err := rows.Scan(&c.ChunkID, &c.DocumentID, &c.Content, &c.Title); err != nil {
+					continue
+				}
+				chunks = append(chunks, c)
+			}
+			rows.Close() // Close cursor BEFORE processing
 
 			// Process chunks
 			var processed, errors int
 			fmt.Printf("Extracting entities from %d chunks...\n", totalChunks)
 			fmt.Println()
-			fmt.Println("NOTE: First extraction may take 1-2 minutes per chunk while the model loads.")
-			fmt.Println("      Subsequent extractions will be faster (~10-30 seconds each).")
+
+			// Auto-warmup: Check if model is loaded and warm it up if not
+			fmt.Print("Checking model status... ")
+			os.Stdout.Sync()
+
+			ollamaBin := findOllamaBinary()
+			psOut, psErr := exec.CommandContext(ctx, ollamaBin, "ps").Output()
+			modelLoaded := psErr == nil && strings.Contains(string(psOut), "mistral")
+
+			if modelLoaded {
+				fmt.Println("✓ Model already loaded")
+			} else {
+				fmt.Println("model not loaded")
+				fmt.Print("Warming up mistral model (this may take 1-2 minutes)... ")
+				os.Stdout.Sync()
+
+				warmupStart := time.Now()
+				warmupCmd := exec.CommandContext(ctx, ollamaBin, "run", "mistral:7b-instruct-q4_K_M", "hello")
+				warmupCmd.Stdin = strings.NewReader("")
+				if err := warmupCmd.Run(); err != nil {
+					fmt.Printf("✗ warmup failed: %v\n", err)
+					fmt.Println("Continuing anyway - first extraction will be slower.")
+				} else {
+					fmt.Printf("✓ ready (%s)\n", formatDuration(time.Since(warmupStart)))
+				}
+			}
 			fmt.Println()
 			os.Stdout.Sync() // Flush output before blocking extraction calls
 
@@ -4521,11 +4568,11 @@ Examples:
 			var totalElapsed time.Duration
 			syncStartTime := time.Now()
 
-			for rows.Next() {
-				var chunkID, documentID, content string
-				if err := rows.Scan(&chunkID, &documentID, &content); err != nil {
-					continue
-				}
+			for _, chunk := range chunks {
+				chunkID := chunk.ChunkID
+				documentID := chunk.DocumentID
+				content := chunk.Content
+				title := chunk.Title
 
 				// Show progress with ETA
 				current := processed + errors + 1
@@ -4541,10 +4588,6 @@ Examples:
 
 				fmt.Printf("[%d/%d] Processing chunk %s...%s\n", current, totalChunks, chunkID[:16], etaStr)
 				os.Stdout.Sync() // Flush before blocking extraction call
-
-				// Get document title
-				var title string
-				db.DB().QueryRowContext(ctx, "SELECT title FROM kb_documents WHERE document_id = ?", documentID).Scan(&title)
 
 				startTime := time.Now()
 				result, err := extractor.ExtractFromChunk(ctx, chunkID, documentID, title, content)

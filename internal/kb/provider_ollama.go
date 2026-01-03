@@ -38,7 +38,7 @@ func NewOllamaProvider(cfg OllamaProviderConfig) (*OllamaProvider, error) {
 		cfg.Model = "mistral:7b-instruct-q4_K_M"
 	}
 	if cfg.KeepAlive == "" {
-		cfg.KeepAlive = "5m"
+		cfg.KeepAlive = "30m" // Keep model loaded for 30 minutes between requests
 	}
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 300 * time.Second // 5 minutes - allows for model loading on first run
