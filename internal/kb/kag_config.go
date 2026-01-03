@@ -11,6 +11,11 @@ type KAGConfig struct {
 	// Default: false (opt-in for security)
 	Enabled bool `mapstructure:"enabled"`
 
+	// PreloadModel loads the extraction model into memory on daemon startup
+	// This eliminates cold-start delays but uses ~4GB RAM continuously
+	// Default: false (opt-in for RAM management)
+	PreloadModel bool `mapstructure:"preload_model"`
+
 	// Provider specifies the LLM provider for entity extraction
 	// Options: "ollama" (default), "openai", "anthropic"
 	Provider string `mapstructure:"provider"`
@@ -158,8 +163,9 @@ type AnthropicConfig struct {
 // DefaultKAGConfig returns secure default configuration for KAG.
 func DefaultKAGConfig() KAGConfig {
 	return KAGConfig{
-		Enabled:  false, // Opt-in for security
-		Provider: "ollama",
+		Enabled:      false, // Opt-in for security
+		PreloadModel: false, // Opt-in for RAM management
+		Provider:     "ollama",
 
 		Graph: GraphConfig{
 			Backend: "falkordb",

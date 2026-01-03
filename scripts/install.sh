@@ -1275,12 +1275,28 @@ install_kag_model() {
     # Check if model is already installed
     if ollama list 2>/dev/null | grep -q "mistral:7b-instruct"; then
         success "KAG model (mistral:7b-instruct) already installed"
+
+        # Ask about model preloading
+        echo ""
+        echo "Model Preloading"
+        echo "────────────────────────────────────────"
+        echo "The KAG extraction model (4GB) can be preloaded when the daemon starts."
+        echo "This eliminates cold-start delays but uses ~4GB RAM continuously."
+        echo ""
+        if confirm "Preload KAG model on daemon startup?"; then
+            KAG_PRELOAD_MODEL=true
+            success "KAG model will be preloaded on daemon startup"
+        else
+            KAG_PRELOAD_MODEL=false
+            info "KAG model will load on first use (1-2 minute delay)"
+        fi
         return 0
     fi
 
     if ! confirm "Download KAG extraction model (mistral:7b-instruct-q4_K_M, ~4.1GB)?"; then
         warn "Skipping KAG model. Entity extraction will not be available."
         echo "Download later with: ollama pull mistral:7b-instruct-q4_K_M"
+        KAG_PRELOAD_MODEL=false
         return 0
     fi
 
@@ -1289,9 +1305,25 @@ install_kag_model() {
 
     if ollama list 2>/dev/null | grep -q "mistral"; then
         success "KAG extraction model installed"
+
+        # Ask about model preloading
+        echo ""
+        echo "Model Preloading"
+        echo "────────────────────────────────────────"
+        echo "The KAG extraction model (4GB) can be preloaded when the daemon starts."
+        echo "This eliminates cold-start delays but uses ~4GB RAM continuously."
+        echo ""
+        if confirm "Preload KAG model on daemon startup?"; then
+            KAG_PRELOAD_MODEL=true
+            success "KAG model will be preloaded on daemon startup"
+        else
+            KAG_PRELOAD_MODEL=false
+            info "KAG model will load on first use (1-2 minute delay)"
+        fi
     else
         warn "KAG model installation may have failed"
         echo "Try manually: ollama pull mistral:7b-instruct-q4_K_M"
+        KAG_PRELOAD_MODEL=false
     fi
 }
 
@@ -1719,6 +1751,7 @@ kb:
   # KAG Settings (knowledge graph)
   kag:
     enabled: $(if [[ "$SKIP_KAG" == "true" ]]; then echo "false"; else echo "true"; fi)
+    preload_model: ${KAG_PRELOAD_MODEL:-false}
     provider: ollama
     ollama:
       model: mistral:7b-instruct-q4_K_M

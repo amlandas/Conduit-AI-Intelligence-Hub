@@ -746,6 +746,11 @@ func statusCmd() *cobra.Command {
 				if cfg.KB.KAG.Provider == "ollama" {
 					fmt.Printf("   Model:    %s\n", cfg.KB.KAG.Ollama.Model)
 				}
+				if cfg.KB.KAG.PreloadModel {
+					fmt.Println("   Preload:  ✓ Model loaded on startup")
+				} else {
+					fmt.Println("   Preload:  ○ Load on first use")
+				}
 
 				// Check FalkorDB status
 				if checkFalkorDBRunning() {
@@ -2492,6 +2497,13 @@ Checks:
 			if cfg != nil && cfg.KB.KAG.Enabled {
 				fmt.Println("✓ KAG is enabled")
 				fmt.Printf("   Provider: %s\n", cfg.KB.KAG.Provider)
+				if cfg.KB.KAG.PreloadModel {
+					fmt.Println("✓ Model preloading is enabled")
+					fmt.Println("   Note: Model loads on daemon startup (~4GB RAM)")
+				} else {
+					fmt.Println("○ Model preloading is disabled")
+					fmt.Println("   Model loads on first use (1-2 minute delay)")
+				}
 
 				// Check FalkorDB
 				if checkFalkorDBRunning() {
