@@ -93,21 +93,44 @@ const (
 	HybridModeLexical HybridSearchMode = "lexical"
 )
 
+// RecallMode controls the precision/recall tradeoff via presets.
+// Higher recall returns more results (good for finding all variants),
+// higher precision returns fewer, more relevant results.
+type RecallMode string
+
+const (
+	// RecallModeHigh maximizes recall - returns all potentially relevant results.
+	// Good for threat intelligence, finding all variants, comprehensive searches.
+	// Disables MMR diversity filtering, no similarity floor, fetches more candidates.
+	RecallModeHigh RecallMode = "high"
+
+	// RecallModeBalanced provides a balance between recall and precision.
+	// Good for general queries where you want relevant results without too much noise.
+	// Uses moderate MMR (λ=0.7), standard similarity floor.
+	RecallModeBalanced RecallMode = "balanced"
+
+	// RecallModePrecise maximizes precision - returns fewer, highly relevant results.
+	// Good for specific lookups where you want to avoid duplicates.
+	// Aggressive MMR filtering (λ=0.5), higher similarity floor.
+	RecallModePrecise RecallMode = "precise"
+)
+
 // HybridSearchOptions configures hybrid search behavior.
 type HybridSearchOptions struct {
 	Limit           int              // Max results (default 10)
 	Mode            HybridSearchMode // Search mode (default auto)
+	RecallMode      RecallMode       // Recall/precision tradeoff preset (default balanced)
 	SemanticWeight  float64          // Weight for semantic results in fusion (0-1, default 0.5)
 	RRFConstant     int              // RRF k constant (default 60)
 	BoostExactMatch bool             // Boost results with exact query match (default true)
 	SourceIDs       []string         // Filter by source IDs
 	MimeTypes       []string         // Filter by MIME types
 
-	// Quality enhancement options (Phase 11)
-	EnableMMR       bool    // Enable Maximal Marginal Relevance for diversity (default true)
+	// Quality enhancement options (configurable via RecallMode presets)
+	EnableMMR       bool    // Enable Maximal Marginal Relevance for diversity
 	MMRLambda       float64 // MMR lambda: 0=max diversity, 1=max relevance (default 0.7)
-	SimilarityFloor float64 // Minimum score threshold, reject below this (default 0.01)
-	EnableRerank    bool    // Enable reranking of top candidates (default true)
+	SimilarityFloor float64 // Minimum score threshold, reject below this
+	EnableRerank    bool    // Enable reranking of top candidates
 	RerankTopN      int     // Number of candidates to consider for reranking (default 30)
 }
 
@@ -180,22 +203,46 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, opts HybridS
 	}
 	opts.BoostExactMatch = true // Always boost exact matches
 
-	// Apply Phase 11 quality enhancement defaults
-	// Note: EnableMMR and EnableRerank default to true (zero value is false, so we check explicitly)
-	if opts.MMRLambda <= 0 {
-		opts.MMRLambda = DefaultMMRLambda
+	// Apply RecallMode presets - these configure MMR, similarity floor, and candidates
+	// If RecallMode is not set, default to "balanced"
+	if opts.RecallMode == "" {
+		opts.RecallMode = RecallModeBalanced
 	}
-	if opts.SimilarityFloor <= 0 {
-		opts.SimilarityFloor = DefaultSimilarityFloor
+
+	// Apply preset configurations based on RecallMode
+	switch opts.RecallMode {
+	case RecallModeHigh:
+		// High recall: disable MMR, no floor, more candidates
+		opts.EnableMMR = false
+		opts.EnableRerank = true
+		opts.SimilarityFloor = 0.0
+		opts.MMRLambda = 1.0 // Not used when MMR disabled, but set for consistency
+		if opts.RerankTopN <= 0 {
+			opts.RerankTopN = 50 // More candidates for high recall
+		}
+	case RecallModePrecise:
+		// High precision: aggressive MMR, higher floor
+		opts.EnableMMR = true
+		opts.EnableRerank = true
+		opts.SimilarityFloor = 0.01
+		opts.MMRLambda = 0.5 // 50% relevance, 50% diversity
+		if opts.RerankTopN <= 0 {
+			opts.RerankTopN = 30
+		}
+	default: // RecallModeBalanced
+		// Balanced: moderate MMR, standard floor
+		opts.EnableMMR = true
+		opts.EnableRerank = true
+		if opts.SimilarityFloor <= 0 {
+			opts.SimilarityFloor = DefaultSimilarityFloor
+		}
+		if opts.MMRLambda <= 0 {
+			opts.MMRLambda = DefaultMMRLambda
+		}
+		if opts.RerankTopN <= 0 {
+			opts.RerankTopN = DefaultRerankTopN
+		}
 	}
-	if opts.RerankTopN <= 0 {
-		opts.RerankTopN = DefaultRerankTopN
-	}
-	// Enable MMR and Rerank by default (only disable if explicitly set to false via API)
-	// Since Go zero value for bool is false, we use a different approach:
-	// We always enable these unless the caller explicitly passes options
-	opts.EnableMMR = true
-	opts.EnableRerank = true
 
 	// Analyze query
 	analysis := hs.analyzeQuery(query)

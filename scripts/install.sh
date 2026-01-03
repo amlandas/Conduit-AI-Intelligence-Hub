@@ -32,6 +32,7 @@ CONDUIT_HOME="${HOME}/.conduit"
 INSTALL_SERVICE=true
 SKIP_DEPS=false
 SKIP_QDRANT=false
+SKIP_KAG=false
 VERBOSE=false
 AI_PROVIDER=""  # Will be set during installation
 SHELL_RC=""     # Will be detected during installation
@@ -89,6 +90,10 @@ parse_args() {
                 SKIP_QDRANT=true
                 shift
                 ;;
+            --no-kag)
+                SKIP_KAG=true
+                shift
+                ;;
             --verbose)
                 VERBOSE=true
                 shift
@@ -116,8 +121,20 @@ show_help() {
     echo "  --conduit-home DIR    Conduit data directory (default: ~/.conduit)"
     echo "  --no-service          Don't install as a system service"
     echo "  --skip-deps           Skip dependency installation"
+    echo "  --no-qdrant           Skip Qdrant vector database (semantic search)"
+    echo "  --no-kag              Skip KAG (Knowledge Graph) components"
     echo "  --verbose             Show verbose output"
     echo "  --help                Show this help message"
+    echo ""
+    echo "Components:"
+    echo "  RAG (Retrieval-Augmented Generation):"
+    echo "    - FTS5 full-text search (always installed)"
+    echo "    - Qdrant vector database (semantic search)"
+    echo "    - nomic-embed-text embedding model"
+    echo ""
+    echo "  KAG (Knowledge-Augmented Generation):"
+    echo "    - FalkorDB graph database"
+    echo "    - mistral:7b-instruct entity extraction model"
 }
 
 # Detect OS and architecture
@@ -580,6 +597,14 @@ install_dependencies() {
     # Install embedding model for semantic search
     if [[ "$AI_PROVIDER" == "ollama" ]]; then
         install_embedding_model
+    fi
+
+    # Install FalkorDB graph database for KAG
+    install_falkordb
+
+    # Install KAG extraction model (Mistral 7B)
+    if [[ "$AI_PROVIDER" == "ollama" ]] && [[ "$SKIP_KAG" != "true" ]]; then
+        install_kag_model
     fi
 }
 
@@ -1111,6 +1136,165 @@ install_embedding_model() {
     fi
 }
 
+# Install FalkorDB graph database for KAG
+install_falkordb() {
+    echo ""
+    echo "Step 5e: Graph Database (FalkorDB)"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Conduit's KAG (Knowledge-Augmented Generation) uses FalkorDB"
+    echo "to store entity-relationship graphs for multi-hop reasoning."
+    echo ""
+    echo "FalkorDB is a high-performance graph database (Apache 2.0 license)"
+    echo "based on Redis, supporting Cypher queries."
+    echo ""
+
+    # Check if --no-kag flag was passed
+    if [[ "$SKIP_KAG" == "true" ]]; then
+        info "Skipping FalkorDB installation (--no-kag flag)"
+        echo "  KAG features will not be available."
+        echo "  Install later with: conduit falkordb install"
+        return 0
+    fi
+
+    # Check if FalkorDB is already running
+    if command_exists redis-cli && redis-cli -p 6379 GRAPH.LIST >/dev/null 2>&1; then
+        success "FalkorDB is already running on port 6379"
+        return 0
+    fi
+
+    # Detect container runtime with Podman-first cascading
+    local CONTAINER_CMD=""
+    CONTAINER_CMD=$(detect_container_runtime_cascading)
+
+    if [[ -z "$CONTAINER_CMD" ]]; then
+        warn "No container runtime available. Skipping FalkorDB installation."
+        echo ""
+        echo "  KAG features will not be available."
+        echo "  Install FalkorDB later with: conduit falkordb install"
+        echo ""
+        echo "  Or install a container runtime first:"
+        echo "    macOS: brew install podman && podman machine init && podman machine start"
+        echo "    Linux: sudo apt install podman  (or docker.io)"
+        return 0  # Not an error - graceful degradation
+    fi
+
+    if ! confirm "Install FalkorDB graph database via $CONTAINER_CMD?"; then
+        warn "Skipping FalkorDB installation. KAG features will not be available."
+        echo "  Install later with: conduit falkordb install"
+        return 0
+    fi
+
+    info "Starting FalkorDB container..."
+
+    # Create data directory for persistence
+    mkdir -p "${CONDUIT_HOME}/falkordb"
+
+    # Handle Docker credential helper issues
+    local DOCKER_CONFIG="${HOME}/.docker/config.json"
+    local DOCKER_CONFIG_BACKUP=""
+    if [[ -f "$DOCKER_CONFIG" ]] && grep -q "credHelpers" "$DOCKER_CONFIG" 2>/dev/null; then
+        info "Temporarily disabling Docker credential helpers for container operations..."
+        DOCKER_CONFIG_BACKUP="${DOCKER_CONFIG}.install-backup"
+        cp "$DOCKER_CONFIG" "$DOCKER_CONFIG_BACKUP"
+        echo '{"auths": {}}' > "$DOCKER_CONFIG"
+    fi
+
+    # Function to restore Docker config
+    restore_docker_config() {
+        if [[ -n "$DOCKER_CONFIG_BACKUP" ]] && [[ -f "$DOCKER_CONFIG_BACKUP" ]]; then
+            mv "$DOCKER_CONFIG_BACKUP" "$DOCKER_CONFIG"
+        fi
+    }
+
+    # Remove existing container for fresh state
+    if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-falkordb$"; then
+        info "Removing existing conduit-falkordb container for fresh install..."
+        $CONTAINER_CMD stop conduit-falkordb 2>/dev/null || true
+        $CONTAINER_CMD rm conduit-falkordb 2>/dev/null || true
+    fi
+
+    # Run FalkorDB container
+    # FalkorDB uses port 6379 (Redis protocol) for graph operations
+    if ! $CONTAINER_CMD run -d \
+        --name conduit-falkordb \
+        --restart unless-stopped \
+        -p 6379:6379 \
+        -v "${CONDUIT_HOME}/falkordb:/data" \
+        docker.io/falkordb/falkordb:latest 2>&1; then
+        warn "Failed to start FalkorDB container"
+        restore_docker_config
+        echo "You may need to start FalkorDB manually:"
+        echo "  $CONTAINER_CMD run -d --name conduit-falkordb -p 6379:6379 -v ~/.conduit/falkordb:/data falkordb/falkordb"
+        return 1
+    fi
+
+    # Restore Docker config
+    restore_docker_config
+
+    # Wait for FalkorDB to be ready
+    local RETRIES=30
+    while [[ $RETRIES -gt 0 ]]; do
+        if command_exists redis-cli && redis-cli -p 6379 PING >/dev/null 2>&1; then
+            success "FalkorDB is running"
+            return 0
+        fi
+        sleep 1
+        RETRIES=$((RETRIES - 1))
+    done
+
+    warn "FalkorDB may not have started correctly. Check with: $CONTAINER_CMD logs conduit-falkordb"
+    return 1
+}
+
+# Install KAG extraction model (Mistral 7B)
+install_kag_model() {
+    echo ""
+    echo "Step 5f: KAG Extraction Model"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "KAG uses Mistral 7B Instruct for entity/relationship extraction."
+    echo "This model has the best F1 score for NER tasks among 7B models."
+    echo ""
+    echo "Model: mistral:7b-instruct-q4_K_M (~4.1GB)"
+    echo ""
+
+    # Check if --no-kag flag was passed
+    if [[ "$SKIP_KAG" == "true" ]]; then
+        info "Skipping KAG model installation (--no-kag flag)"
+        return 0
+    fi
+
+    # Check if Ollama is running
+    if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+        warn "Ollama is not running. Skipping KAG model installation."
+        echo "Start Ollama and run: ollama pull mistral:7b-instruct-q4_K_M"
+        return 1
+    fi
+
+    # Check if model is already installed
+    if ollama list 2>/dev/null | grep -q "mistral:7b-instruct"; then
+        success "KAG model (mistral:7b-instruct) already installed"
+        return 0
+    fi
+
+    if ! confirm "Download KAG extraction model (mistral:7b-instruct-q4_K_M, ~4.1GB)?"; then
+        warn "Skipping KAG model. Entity extraction will not be available."
+        echo "Download later with: ollama pull mistral:7b-instruct-q4_K_M"
+        return 0
+    fi
+
+    info "Downloading KAG extraction model..."
+    ollama pull mistral:7b-instruct-q4_K_M
+
+    if ollama list 2>/dev/null | grep -q "mistral"; then
+        success "KAG extraction model installed"
+    else
+        warn "KAG model installation may have failed"
+        echo "Try manually: ollama pull mistral:7b-instruct-q4_K_M"
+    fi
+}
+
 # Install document extraction tools
 install_document_tools() {
     echo ""
@@ -1520,6 +1704,40 @@ runtime:
 # Policy settings
 policy:
   allow_network_egress: false
+
+# Knowledge Base Settings
+kb:
+  # RAG Settings (semantic search)
+  rag:
+    enabled: true
+    semantic_weight: 0.5
+    min_score: 0.0
+    use_mmr: true
+    mmr_lambda: 0.7
+    rerank: true
+
+  # KAG Settings (knowledge graph)
+  kag:
+    enabled: $(if [[ "$SKIP_KAG" == "true" ]]; then echo "false"; else echo "true"; fi)
+    provider: ollama
+    ollama:
+      model: mistral:7b-instruct-q4_K_M
+      host: http://localhost:11434
+    # Alternative providers (uncomment to use):
+    # openai:
+    #   model: gpt-4o-mini
+    # anthropic:
+    #   model: claude-sonnet-4-20250514
+    graph:
+      backend: falkordb
+      falkordb:
+        host: localhost
+        port: 6379
+        graph_name: conduit_kg
+    extraction:
+      confidence_threshold: 0.7
+      max_entities_per_chunk: 20
+      batch_size: 10
 EOF
 
     success "Configuration created: $CONFIG_FILE"
@@ -1809,6 +2027,43 @@ verify_installation() {
     success "  DOCX: native support"
     success "  ODT:  native support"
 
+    # Check KAG components
+    echo ""
+    echo "KAG (Knowledge Graph) Components:"
+
+    if [[ "$SKIP_KAG" == "true" ]]; then
+        info "  KAG: Skipped (--no-kag flag)"
+    else
+        # Check FalkorDB
+        local FALKORDB_RUNNING=false
+        if command_exists redis-cli && redis-cli -p 6379 PING >/dev/null 2>&1; then
+            success "  FalkorDB: running on port 6379"
+            FALKORDB_RUNNING=true
+        else
+            warn "  FalkorDB: not running"
+            info "  Start with: docker run -d -p 6379:6379 falkordb/falkordb"
+        fi
+
+        # Check KAG extraction model
+        if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+            if ollama list 2>/dev/null | grep -q "mistral"; then
+                success "  Extraction model: mistral:7b-instruct installed"
+            else
+                warn "  Extraction model: not installed"
+                info "  Pull with: ollama pull mistral:7b-instruct-q4_K_M"
+            fi
+        else
+            warn "  Extraction model: Ollama not running (cannot check)"
+        fi
+
+        # Overall KAG status
+        if [[ "$FALKORDB_RUNNING" == "true" ]]; then
+            info "  KAG is ready for entity extraction"
+        else
+            warn "  KAG requires FalkorDB to be running"
+        fi
+    fi
+
     echo ""
 
     if [[ "$ALL_GOOD" == "true" ]]; then
@@ -1820,7 +2075,7 @@ verify_installation() {
 
 # Print search capability summary
 print_capability_summary() {
-    echo "Search Capabilities"
+    echo "RAG (Retrieval-Augmented Generation)"
     echo "────────────────────────────────────────────────────────"
 
     # FTS5 is always available (built into SQLite)
@@ -1861,6 +2116,52 @@ print_capability_summary() {
         echo "     Install with: conduit qdrant install"
         echo ""
         echo "  Mode: FTS5 only (keyword matching)"
+    fi
+
+    echo ""
+
+    # KAG capability summary
+    echo "KAG (Knowledge-Augmented Generation)"
+    echo "────────────────────────────────────────────────────────"
+
+    if [[ "$SKIP_KAG" == "true" ]]; then
+        echo -e "  ${BLUE}○${NC} Knowledge Graph: Skipped (--no-kag)"
+        echo "     Enable later with: conduit falkordb install"
+        echo ""
+        echo "  KAG features (multi-hop reasoning, entity queries) not available"
+    else
+        # Check FalkorDB
+        local FALKORDB_RUNNING=false
+        if command_exists redis-cli && redis-cli -p 6379 PING >/dev/null 2>&1; then
+            FALKORDB_RUNNING=true
+        fi
+
+        # Check extraction model
+        local EXTRACTION_MODEL_AVAILABLE=false
+        if curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
+            if ollama list 2>/dev/null | grep -q "mistral"; then
+                EXTRACTION_MODEL_AVAILABLE=true
+            fi
+        fi
+
+        if [[ "$FALKORDB_RUNNING" == "true" ]] && [[ "$EXTRACTION_MODEL_AVAILABLE" == "true" ]]; then
+            echo -e "  ${GREEN}✓${NC} FalkorDB graph database: Running"
+            echo -e "  ${GREEN}✓${NC} Mistral 7B extraction model: Available"
+            echo ""
+            echo -e "  ${GREEN}Mode: Full KAG capabilities${NC}"
+            echo "  Multi-hop reasoning, entity queries, relationship traversal"
+        elif [[ "$FALKORDB_RUNNING" == "true" ]]; then
+            echo -e "  ${GREEN}✓${NC} FalkorDB graph database: Running"
+            echo -e "  ${YELLOW}○${NC} Extraction model: Not installed"
+            echo "     Install with: ollama pull mistral:7b-instruct-q4_K_M"
+            echo ""
+            echo "  Graph queries available, but entity extraction disabled"
+        else
+            echo -e "  ${YELLOW}○${NC} FalkorDB: Not running"
+            echo "     Start with: conduit falkordb start"
+            echo ""
+            echo "  KAG features not available until FalkorDB is running"
+        fi
     fi
 
     echo ""

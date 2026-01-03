@@ -16,12 +16,13 @@ import (
 
 // MCPServer provides MCP protocol access to the knowledge base.
 type MCPServer struct {
-	db       *sql.DB
-	source   *SourceManager
-	searcher *Searcher
-	hybrid   *HybridSearcher
-	indexer  *Indexer
-	logger   zerolog.Logger
+	db          *sql.DB
+	source      *SourceManager
+	searcher    *Searcher
+	hybrid      *HybridSearcher
+	kagSearcher *KAGSearcher
+	indexer     *Indexer
+	logger      zerolog.Logger
 
 	input  io.Reader
 	output io.Writer
@@ -67,15 +68,19 @@ func NewMCPServer(db *sql.DB, hybrid *HybridSearcher) *MCPServer {
 		hybrid = NewHybridSearcher(searcher, nil)
 	}
 
+	// Create KAG searcher (uses SQLite by default, can connect to FalkorDB later)
+	kagSearcher := NewKAGSearcher(db, nil)
+
 	return &MCPServer{
-		db:       db,
-		source:   NewSourceManager(db),
-		searcher: searcher,
-		hybrid:   hybrid,
-		indexer:  NewIndexer(db),
-		logger:   observability.Logger("kb.mcp"),
-		input:    os.Stdin,
-		output:   os.Stdout,
+		db:          db,
+		source:      NewSourceManager(db),
+		searcher:    searcher,
+		hybrid:      hybrid,
+		kagSearcher: kagSearcher,
+		indexer:     NewIndexer(db),
+		logger:      observability.Logger("kb.mcp"),
+		input:       os.Stdin,
+		output:      os.Stdout,
 	}
 }
 
@@ -196,6 +201,11 @@ func (s *MCPServer) handleToolsList() interface{} {
 							"description": "Search mode: 'hybrid' (default, best results), 'semantic' (vector similarity only), or 'fts5' (keyword matching only)",
 							"enum":        []string{"hybrid", "semantic", "fts5"},
 						},
+						"recall_mode": map[string]interface{}{
+							"type":        "string",
+							"description": "Precision/recall tradeoff: 'high' (disable diversity filtering, get all similar results), 'balanced' (default, moderate filtering), 'precise' (aggressive deduplication)",
+							"enum":        []string{"high", "balanced", "precise"},
+						},
 					},
 					"required": []string{"query"},
 				},
@@ -258,6 +268,46 @@ func (s *MCPServer) handleToolsList() interface{} {
 							"description": "Search mode: 'hybrid' (default), 'semantic', or 'fts5'",
 							"enum":        []string{"hybrid", "semantic", "fts5"},
 						},
+						"recall_mode": map[string]interface{}{
+							"type":        "string",
+							"description": "Precision/recall tradeoff: 'high' (disable diversity filtering, get all similar results), 'balanced' (default, moderate filtering), 'precise' (aggressive deduplication)",
+							"enum":        []string{"high", "balanced", "precise"},
+						},
+					},
+					"required": []string{"query"},
+				},
+			},
+			{
+				"name":        "kag_query",
+				"description": "Query the knowledge graph for entities and their relationships. Use for multi-hop reasoning, aggregation queries, or finding connections between concepts. Complements RAG search with structured entity lookups.",
+				"inputSchema": map[string]interface{}{
+					"type": "object",
+					"properties": map[string]interface{}{
+						"query": map[string]interface{}{
+							"type":        "string",
+							"description": "Natural language query or entity name to search for",
+						},
+						"entities": map[string]interface{}{
+							"type":        "array",
+							"items":       map[string]interface{}{"type": "string"},
+							"description": "Optional list of specific entity names to find (more precise than free text)",
+						},
+						"include_relations": map[string]interface{}{
+							"type":        "boolean",
+							"description": "Include relationships between found entities (default: true)",
+						},
+						"max_hops": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum relationship hops to traverse (default: 2, max: 3)",
+						},
+						"limit": map[string]interface{}{
+							"type":        "integer",
+							"description": "Maximum entities to return (default: 20)",
+						},
+						"source_id": map[string]interface{}{
+							"type":        "string",
+							"description": "Filter to entities from a specific source",
+						},
 					},
 					"required": []string{"query"},
 				},
@@ -287,6 +337,8 @@ func (s *MCPServer) handleToolCall(ctx context.Context, params json.RawMessage) 
 		return s.toolGetDocument(ctx, call.Arguments)
 	case "kb_stats":
 		return s.toolStats(ctx, call.Arguments)
+	case "kag_query":
+		return s.toolKagQuery(ctx, call.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", call.Name)
 	}
@@ -295,10 +347,11 @@ func (s *MCPServer) handleToolCall(ctx context.Context, params json.RawMessage) 
 // toolSearch performs a search using the hybrid searcher.
 func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (interface{}, error) {
 	var params struct {
-		Query    string `json:"query"`
-		Limit    int    `json:"limit"`
-		SourceID string `json:"source_id"`
-		Mode     string `json:"mode"`
+		Query      string `json:"query"`
+		Limit      int    `json:"limit"`
+		SourceID   string `json:"source_id"`
+		Mode       string `json:"mode"`
+		RecallMode string `json:"recall_mode"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("parse search args: %w", err)
@@ -325,9 +378,21 @@ func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (inter
 		hybridMode = HybridModeFusion // hybrid mode
 	}
 
+	// Map recall_mode string to RecallMode constant
+	var recallMode RecallMode
+	switch params.RecallMode {
+	case "high":
+		recallMode = RecallModeHigh
+	case "precise":
+		recallMode = RecallModePrecise
+	default:
+		recallMode = RecallModeBalanced
+	}
+
 	opts := HybridSearchOptions{
-		Limit: params.Limit,
-		Mode:  hybridMode,
+		Limit:      params.Limit,
+		Mode:       hybridMode,
+		RecallMode: recallMode,
 	}
 	if params.SourceID != "" {
 		opts.SourceIDs = []string{params.SourceID}
@@ -375,10 +440,11 @@ func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (inter
 // toolSearchWithContext performs a search and returns processed, prompt-ready results.
 func (s *MCPServer) toolSearchWithContext(ctx context.Context, args json.RawMessage) (interface{}, error) {
 	var params struct {
-		Query    string `json:"query"`
-		SourceID string `json:"source_id"`
-		Limit    int    `json:"limit"`
-		Mode     string `json:"mode"`
+		Query      string `json:"query"`
+		SourceID   string `json:"source_id"`
+		Limit      int    `json:"limit"`
+		Mode       string `json:"mode"`
+		RecallMode string `json:"recall_mode"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("parse search args: %w", err)
@@ -402,9 +468,21 @@ func (s *MCPServer) toolSearchWithContext(ctx context.Context, args json.RawMess
 		hybridMode = HybridModeFusion // hybrid mode
 	}
 
+	// Map recall_mode string to RecallMode constant
+	var recallMode RecallMode
+	switch params.RecallMode {
+	case "high":
+		recallMode = RecallModeHigh
+	case "precise":
+		recallMode = RecallModePrecise
+	default:
+		recallMode = RecallModeBalanced
+	}
+
 	opts := HybridSearchOptions{
-		Limit: params.Limit * 3, // Fetch more to allow for merging
-		Mode:  hybridMode,
+		Limit:      params.Limit * 3, // Fetch more to allow for merging
+		Mode:       hybridMode,
+		RecallMode: recallMode,
 	}
 	if params.SourceID != "" {
 		opts.SourceIDs = []string{params.SourceID}
@@ -696,6 +774,68 @@ func (s *MCPServer) handlePromptsList() interface{} {
 			},
 		},
 	}
+}
+
+// toolKagQuery performs a knowledge graph query.
+func (s *MCPServer) toolKagQuery(ctx context.Context, args json.RawMessage) (interface{}, error) {
+	var params struct {
+		Query            string   `json:"query"`
+		Entities         []string `json:"entities"`
+		IncludeRelations *bool    `json:"include_relations"`
+		MaxHops          int      `json:"max_hops"`
+		Limit            int      `json:"limit"`
+		SourceID         string   `json:"source_id"`
+	}
+	if err := json.Unmarshal(args, &params); err != nil {
+		return nil, fmt.Errorf("parse kag_query args: %w", err)
+	}
+
+	// Set defaults
+	includeRelations := true
+	if params.IncludeRelations != nil {
+		includeRelations = *params.IncludeRelations
+	}
+
+	// Build search request
+	req := &KAGSearchRequest{
+		Query:            params.Query,
+		EntityHints:      params.Entities,
+		MaxHops:          params.MaxHops,
+		Limit:            params.Limit,
+		IncludeRelations: includeRelations,
+		SourceFilter:     params.SourceID,
+	}
+
+	// Perform search
+	result, err := s.kagSearcher.Search(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("kag search: %w", err)
+	}
+
+	// Format response for MCP
+	var content []map[string]interface{}
+
+	// Add formatted context as main content
+	content = append(content, map[string]interface{}{
+		"type": "text",
+		"text": result.Context,
+	})
+
+	// Add entity details if present
+	if len(result.Entities) > 0 {
+		entityDetails := fmt.Sprintf("\n---\nFound %d entities", len(result.Entities))
+		if len(result.Relations) > 0 {
+			entityDetails += fmt.Sprintf(" with %d relationships", len(result.Relations))
+		}
+		content = append(content, map[string]interface{}{
+			"type": "text",
+			"text": entityDetails,
+		})
+	}
+
+	return map[string]interface{}{
+		"content": content,
+	}, nil
 }
 
 // sendResponse sends an MCP response.
