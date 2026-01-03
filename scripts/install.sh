@@ -1003,6 +1003,41 @@ install_qdrant() {
         $CONTAINER_CMD rm conduit-qdrant 2>/dev/null || true
     fi
 
+    # Check for orphaned Qdrant data from previous installation
+    # This happens when user uninstalls but keeps data, then reinstalls
+    local QDRANT_DATA_DIR="${CONDUIT_HOME}/qdrant"
+    local SQLITE_DB="${CONDUIT_HOME}/conduit.db"
+    if [[ -d "$QDRANT_DATA_DIR/collections/conduit_kb" ]] && [[ ! -f "$SQLITE_DB" ]]; then
+        echo ""
+        warn "Detected orphaned Qdrant data from a previous installation!"
+        echo ""
+        echo "  Vector data exists at: $QDRANT_DATA_DIR"
+        echo "  But SQLite database is missing (fresh install)"
+        echo ""
+        echo "  This typically means vectors from a previous KB won't match"
+        echo "  the new SQLite database, causing stale search results."
+        echo ""
+        echo "  Options:"
+        echo "    [1] CLEAR - Remove old vectors and start fresh (recommended)"
+        echo "    [2] KEEP  - Keep vectors (may cause orphaned/stale results)"
+        echo ""
+
+        local qdrant_choice=""
+        read -r -p "Enter choice [1/2]: " qdrant_choice </dev/tty
+
+        if [[ "$qdrant_choice" == "1" ]]; then
+            info "Clearing orphaned Qdrant data..."
+            rm -rf "$QDRANT_DATA_DIR"
+            mkdir -p "${QDRANT_DATA_DIR}/collections"
+            mkdir -p "${QDRANT_DATA_DIR}/snapshots"
+            success "Qdrant data cleared - starting fresh"
+        else
+            warn "Keeping existing Qdrant data"
+            echo "  After installation, run 'conduit qdrant purge' if search results seem stale"
+        fi
+        echo ""
+    fi
+
     # Run new Qdrant container
     if ! $CONTAINER_CMD run -d \
         --name conduit-qdrant \
