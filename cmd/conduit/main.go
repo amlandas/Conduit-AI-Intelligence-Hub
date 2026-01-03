@@ -1592,6 +1592,25 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
+// formatDuration formats a duration as a human-readable string (e.g., "2h 15m", "45m 30s")
+func formatDuration(d time.Duration) string {
+	d = d.Round(time.Second)
+
+	h := d / time.Hour
+	d -= h * time.Hour
+	m := d / time.Minute
+	d -= m * time.Minute
+	s := d / time.Second
+
+	if h > 0 {
+		return fmt.Sprintf("%dh %dm", h, m)
+	}
+	if m > 0 {
+		return fmt.Sprintf("%dm %ds", m, s)
+	}
+	return fmt.Sprintf("%ds", s)
+}
+
 func kbAddCmd() *cobra.Command {
 	var name string
 	var patterns string
@@ -4497,15 +4516,29 @@ Examples:
 			fmt.Println()
 			os.Stdout.Sync() // Flush output before blocking extraction calls
 
+			// Track timing for ETA calculation
+			var totalElapsed time.Duration
+			syncStartTime := time.Now()
+
 			for rows.Next() {
 				var chunkID, documentID, content string
 				if err := rows.Scan(&chunkID, &documentID, &content); err != nil {
 					continue
 				}
 
-				// Show progress
+				// Show progress with ETA
 				current := processed + errors + 1
-				fmt.Printf("[%d/%d] Processing chunk %s...\n", current, totalChunks, chunkID[:16])
+				remaining := totalChunks - current + 1
+
+				// Calculate ETA based on average processing time
+				var etaStr string
+				if current > 1 && totalElapsed > 0 {
+					avgPerChunk := totalElapsed / time.Duration(current-1)
+					eta := avgPerChunk * time.Duration(remaining)
+					etaStr = fmt.Sprintf(" | ETA: %s", formatDuration(eta))
+				}
+
+				fmt.Printf("[%d/%d] Processing chunk %s...%s\n", current, totalChunks, chunkID[:16], etaStr)
 				os.Stdout.Sync() // Flush before blocking extraction call
 
 				// Get document title
@@ -4515,6 +4548,7 @@ Examples:
 				startTime := time.Now()
 				result, err := extractor.ExtractFromChunk(ctx, chunkID, documentID, title, content)
 				elapsed := time.Since(startTime)
+				totalElapsed += elapsed
 
 				if err != nil {
 					errors++
@@ -4528,8 +4562,10 @@ Examples:
 				}
 			}
 
+			// Show completion summary
+			totalTime := time.Since(syncStartTime)
 			fmt.Println()
-			fmt.Printf("Processed: %d chunks\n", processed)
+			fmt.Printf("Processed: %d chunks in %s\n", processed, formatDuration(totalTime))
 			if errors > 0 {
 				fmt.Printf("Errors:    %d\n", errors)
 			}
