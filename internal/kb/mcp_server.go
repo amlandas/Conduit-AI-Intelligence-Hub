@@ -165,21 +165,26 @@ func (s *MCPServer) handleToolsList() interface{} {
 		"tools": []map[string]interface{}{
 			{
 				"name":        "kb_search",
-				"description": "Search the knowledge base for relevant documents and information",
+				"description": "Search the knowledge base for relevant documents using hybrid search (FTS5 keyword matching + semantic similarity when available). Use short keyword phrases for best results.",
 				"inputSchema": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"query": map[string]interface{}{
 							"type":        "string",
-							"description": "The search query",
+							"description": "The search query. Use short keyword phrases (e.g., 'authentication JWT' rather than 'how does authentication work with JWT tokens').",
 						},
 						"limit": map[string]interface{}{
 							"type":        "integer",
-							"description": "Maximum number of results (default 10)",
+							"description": "Maximum number of results (default: 10, max: 50)",
 						},
 						"source_id": map[string]interface{}{
 							"type":        "string",
-							"description": "Filter by source ID",
+							"description": "Filter results to a specific knowledge base source. Use kb_list_sources to see available source IDs.",
+						},
+						"mode": map[string]interface{}{
+							"type":        "string",
+							"description": "Search mode: 'hybrid' (default, best results), 'semantic' (vector similarity only), or 'fts5' (keyword matching only)",
+							"enum":        []string{"hybrid", "semantic", "fts5"},
 						},
 					},
 					"required": []string{"query"},
@@ -187,7 +192,7 @@ func (s *MCPServer) handleToolsList() interface{} {
 			},
 			{
 				"name":        "kb_list_sources",
-				"description": "List all knowledge base sources",
+				"description": "List all knowledge base sources with their IDs, paths, document counts, and sync status. Use this to discover available sources before searching or filtering.",
 				"inputSchema": map[string]interface{}{
 					"type":       "object",
 					"properties": map[string]interface{}{},
@@ -195,13 +200,13 @@ func (s *MCPServer) handleToolsList() interface{} {
 			},
 			{
 				"name":        "kb_get_document",
-				"description": "Get full content of a document by ID",
+				"description": "Retrieve the full content of a specific document by its ID. Use document IDs from search results.",
 				"inputSchema": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"document_id": map[string]interface{}{
 							"type":        "string",
-							"description": "The document ID",
+							"description": "The document ID from search results",
 						},
 					},
 					"required": []string{"document_id"},
@@ -209,25 +214,34 @@ func (s *MCPServer) handleToolsList() interface{} {
 			},
 			{
 				"name":        "kb_stats",
-				"description": "Get knowledge base statistics",
+				"description": "Get knowledge base statistics including source counts, document counts, chunk counts, and search capability status.",
 				"inputSchema": map[string]interface{}{
-					"type":       "object",
-					"properties": map[string]interface{}{},
+					"type": "object",
+					"properties": map[string]interface{}{
+						"source_id": map[string]interface{}{
+							"type":        "string",
+							"description": "Get stats for a specific source. If omitted, returns aggregate stats for all sources.",
+						},
+					},
 				},
 			},
 			{
 				"name":        "kb_search_with_context",
-				"description": "Search knowledge base with processed, prompt-ready results. Returns merged chunks from same documents, filters boilerplate, and provides citation-ready source info.",
+				"description": "Search with processed, prompt-ready results. Returns merged chunks from same documents, filters boilerplate, and provides citation-ready source information. Best for RAG use cases.",
 				"inputSchema": map[string]interface{}{
 					"type": "object",
 					"properties": map[string]interface{}{
 						"query": map[string]interface{}{
 							"type":        "string",
-							"description": "The search query in natural language",
+							"description": "The search query for finding relevant context",
+						},
+						"source_id": map[string]interface{}{
+							"type":        "string",
+							"description": "Filter results to a specific source ID",
 						},
 						"limit": map[string]interface{}{
 							"type":        "integer",
-							"description": "Maximum number of document results (default 5)",
+							"description": "Maximum documents to return (default: 5)",
 						},
 						"mode": map[string]interface{}{
 							"type":        "string",
@@ -262,7 +276,7 @@ func (s *MCPServer) handleToolCall(ctx context.Context, params json.RawMessage) 
 	case "kb_get_document":
 		return s.toolGetDocument(ctx, call.Arguments)
 	case "kb_stats":
-		return s.toolStats(ctx)
+		return s.toolStats(ctx, call.Arguments)
 	default:
 		return nil, fmt.Errorf("unknown tool: %s", call.Name)
 	}
@@ -274,9 +288,20 @@ func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (inter
 		Query    string `json:"query"`
 		Limit    int    `json:"limit"`
 		SourceID string `json:"source_id"`
+		Mode     string `json:"mode"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("parse search args: %w", err)
+	}
+
+	if params.Limit <= 0 {
+		params.Limit = 10
+	}
+	if params.Limit > 50 {
+		params.Limit = 50 // Cap at max
+	}
+	if params.Mode == "" {
+		params.Mode = "hybrid"
 	}
 
 	opts := SearchOptions{
@@ -317,9 +342,10 @@ func (s *MCPServer) toolSearch(ctx context.Context, args json.RawMessage) (inter
 // toolSearchWithContext performs a search and returns processed, prompt-ready results.
 func (s *MCPServer) toolSearchWithContext(ctx context.Context, args json.RawMessage) (interface{}, error) {
 	var params struct {
-		Query string `json:"query"`
-		Limit int    `json:"limit"`
-		Mode  string `json:"mode"`
+		Query    string `json:"query"`
+		SourceID string `json:"source_id"`
+		Limit    int    `json:"limit"`
+		Mode     string `json:"mode"`
 	}
 	if err := json.Unmarshal(args, &params); err != nil {
 		return nil, fmt.Errorf("parse search args: %w", err)
@@ -335,6 +361,9 @@ func (s *MCPServer) toolSearchWithContext(ctx context.Context, args json.RawMess
 	opts := SearchOptions{
 		Limit:     params.Limit * 3, // Fetch more to allow for merging
 		Highlight: true,
+	}
+	if params.SourceID != "" {
+		opts.SourceIDs = []string{params.SourceID}
 	}
 
 	result, err := s.searcher.Search(ctx, params.Query, opts)
@@ -492,24 +521,60 @@ func (s *MCPServer) removeOverlaps(parts []string) string {
 }
 
 // toolStats returns KB statistics.
-func (s *MCPServer) toolStats(ctx context.Context) (interface{}, error) {
-	stats, err := s.indexer.GetStats(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("get stats: %w", err)
+func (s *MCPServer) toolStats(ctx context.Context, args json.RawMessage) (interface{}, error) {
+	var params struct {
+		SourceID string `json:"source_id"`
+	}
+	if args != nil && len(args) > 0 {
+		if err := json.Unmarshal(args, &params); err != nil {
+			return nil, fmt.Errorf("parse stats args: %w", err)
+		}
 	}
 
-	text := fmt.Sprintf(`# Knowledge Base Statistics
+	var text string
+
+	if params.SourceID != "" {
+		// Get stats for a specific source
+		source, err := s.source.Get(ctx, params.SourceID)
+		if err != nil {
+			return nil, fmt.Errorf("get source: %w", err)
+		}
+
+		text = fmt.Sprintf(`# Knowledge Base Statistics: %s
+
+- **Source ID**: %s
+- **Path**: %s
+- **Documents**: %d
+- **Chunks**: %d
+- **Status**: %s
+`,
+			source.Name,
+			source.SourceID,
+			source.Path,
+			source.DocCount,
+			source.ChunkCount,
+			source.Status,
+		)
+	} else {
+		// Get aggregate stats
+		stats, err := s.indexer.GetStats(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("get stats: %w", err)
+		}
+
+		text = fmt.Sprintf(`# Knowledge Base Statistics
 
 - **Sources**: %d
 - **Documents**: %d
 - **Chunks**: %d
 - **Total Size**: %.2f MB
 `,
-		stats.TotalSources,
-		stats.TotalDocuments,
-		stats.TotalChunks,
-		float64(stats.TotalBytes)/(1024*1024),
-	)
+			stats.TotalSources,
+			stats.TotalDocuments,
+			stats.TotalChunks,
+			float64(stats.TotalBytes)/(1024*1024),
+		)
+	}
 
 	return map[string]interface{}{
 		"content": []map[string]interface{}{

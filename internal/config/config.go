@@ -55,6 +55,9 @@ type Config struct {
 
 	// AI configuration
 	AI AIConfig `mapstructure:"ai"`
+
+	// MCP configuration
+	MCP MCPConfig `mapstructure:"mcp"`
 }
 
 // AIConfig holds AI provider configuration.
@@ -147,6 +150,51 @@ type PolicyConfig struct {
 	WarnPaths          []string `mapstructure:"warn_paths"`
 }
 
+// MCPConfig holds MCP (Model Context Protocol) server configuration.
+type MCPConfig struct {
+	// KB holds Knowledge Base MCP server settings
+	KB MCPKBConfig `mapstructure:"kb"`
+}
+
+// MCPKBConfig holds Knowledge Base MCP server settings.
+type MCPKBConfig struct {
+	// Search settings
+	Search MCPSearchConfig `mapstructure:"search"`
+
+	// Logging settings
+	Logging MCPLoggingConfig `mapstructure:"logging"`
+}
+
+// MCPSearchConfig holds MCP search behavior settings.
+type MCPSearchConfig struct {
+	// DefaultMode is the default search mode: "hybrid", "semantic", or "fts5"
+	// Default: "hybrid"
+	DefaultMode string `mapstructure:"default_mode"`
+
+	// DefaultLimit is the default number of results per search
+	// Default: 10
+	DefaultLimit int `mapstructure:"default_limit"`
+
+	// MaxLimit is the maximum allowed limit for search results
+	// Default: 50
+	MaxLimit int `mapstructure:"max_limit"`
+
+	// SemanticFallback enables fallback to FTS5 when semantic search is unavailable
+	// Default: true
+	SemanticFallback bool `mapstructure:"semantic_fallback"`
+}
+
+// MCPLoggingConfig holds MCP logging settings.
+type MCPLoggingConfig struct {
+	// Level is the log level: "debug", "info", "warn", "error"
+	// Default: "info"
+	Level string `mapstructure:"level"`
+
+	// ToStderr enables logging to stderr (visible in AI client)
+	// Default: false
+	ToStderr bool `mapstructure:"to_stderr"`
+}
+
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	homeDir, _ := os.UserHomeDir()
@@ -220,6 +268,21 @@ func DefaultConfig() *Config {
 			TimeoutSeconds:      120,
 			MaxRetries:          2,
 			ConfidenceThreshold: 0.6,
+		},
+
+		MCP: MCPConfig{
+			KB: MCPKBConfig{
+				Search: MCPSearchConfig{
+					DefaultMode:      "hybrid",
+					DefaultLimit:     10,
+					MaxLimit:         50,
+					SemanticFallback: true,
+				},
+				Logging: MCPLoggingConfig{
+					Level:    "info",
+					ToStderr: false,
+				},
+			},
 		},
 	}
 }

@@ -1525,6 +1525,155 @@ EOF
     success "Configuration created: $CONFIG_FILE"
 }
 
+# Register Conduit with Claude Code (MCP server auto-registration)
+register_claude_code() {
+    echo ""
+    echo "Step 7a: AI Client Integration"
+    echo "──────────────────────────────────────────────────────────────"
+    echo ""
+    echo "Conduit provides an MCP server for AI clients like Claude Code,"
+    echo "Cursor, and VS Code to access your knowledge base."
+    echo ""
+
+    local CLAUDE_CONFIG="$HOME/.claude.json"
+    local NEEDS_MANUAL_CONFIG=false
+
+    # Check if Claude Code is installed (by checking for config directory)
+    if [[ -d "$HOME/.claude" ]] || [[ -f "$CLAUDE_CONFIG" ]]; then
+        info "Claude Code installation detected"
+
+        if ! confirm "Register Conduit KB as MCP server with Claude Code?"; then
+            NEEDS_MANUAL_CONFIG=true
+        else
+            # Register with Claude Code
+            if register_mcp_claude_code; then
+                success "Conduit KB registered with Claude Code"
+                info "Restart Claude Code to load the MCP server"
+            else
+                NEEDS_MANUAL_CONFIG=true
+            fi
+        fi
+    else
+        info "Claude Code not detected (no ~/.claude directory)"
+        NEEDS_MANUAL_CONFIG=true
+    fi
+
+    # Show manual configuration instructions for other clients
+    if [[ "$NEEDS_MANUAL_CONFIG" == "true" ]]; then
+        echo ""
+        echo "To manually configure MCP clients, add to their config:"
+        echo ""
+    fi
+
+    # Always show the configuration snippet for reference
+    echo "────────────────────────────────────────────────────────────"
+    echo "MCP Configuration (add to your AI client's config):"
+    echo ""
+    echo '  {
+    "mcpServers": {
+      "conduit-kb": {
+        "command": "'"${INSTALL_DIR}/conduit"'",
+        "args": ["mcp", "kb"]
+      }
+    }
+  }'
+    echo ""
+    echo "Config file locations:"
+    echo "  • Claude Code: ~/.claude.json"
+    echo "  • Cursor:      .cursor/settings/extensions.json"
+    echo "  • VS Code:     .vscode/settings.json"
+    echo "────────────────────────────────────────────────────────────"
+}
+
+# Helper function to register MCP server with Claude Code
+register_mcp_claude_code() {
+    local CLAUDE_CONFIG="$HOME/.claude.json"
+    local CONDUIT_PATH="${INSTALL_DIR}/conduit"
+
+    # Check if conduit binary exists
+    if [[ ! -x "$CONDUIT_PATH" ]]; then
+        warn "Conduit binary not found at $CONDUIT_PATH"
+        return 1
+    fi
+
+    # Create config if it doesn't exist
+    if [[ ! -f "$CLAUDE_CONFIG" ]]; then
+        info "Creating new Claude Code configuration..."
+        cat > "$CLAUDE_CONFIG" << EOF
+{
+  "mcpServers": {
+    "conduit-kb": {
+      "command": "${CONDUIT_PATH}",
+      "args": ["mcp", "kb"]
+    }
+  }
+}
+EOF
+        return 0
+    fi
+
+    # Check if jq is available for JSON manipulation
+    if ! command_exists jq; then
+        # Try to install jq
+        if [[ "$OS" == "darwin" ]] && command_exists brew; then
+            info "Installing jq for JSON manipulation..."
+            brew install jq >/dev/null 2>&1 || true
+        fi
+    fi
+
+    if command_exists jq; then
+        # Use jq for safe JSON manipulation
+        local TMP_CONFIG=$(mktemp)
+
+        # Check if mcpServers exists
+        if jq -e '.mcpServers' "$CLAUDE_CONFIG" >/dev/null 2>&1; then
+            # Check if conduit-kb already exists
+            if jq -e '.mcpServers["conduit-kb"]' "$CLAUDE_CONFIG" >/dev/null 2>&1; then
+                info "conduit-kb already registered, updating..."
+            fi
+
+            # Add or update conduit-kb server
+            jq --arg cmd "$CONDUIT_PATH" \
+               '.mcpServers["conduit-kb"] = {"command": $cmd, "args": ["mcp", "kb"]}' \
+               "$CLAUDE_CONFIG" > "$TMP_CONFIG"
+        else
+            # Add mcpServers object
+            jq --arg cmd "$CONDUIT_PATH" \
+               '. + {"mcpServers": {"conduit-kb": {"command": $cmd, "args": ["mcp", "kb"]}}}' \
+               "$CLAUDE_CONFIG" > "$TMP_CONFIG"
+        fi
+
+        # Verify and move
+        if jq empty "$TMP_CONFIG" 2>/dev/null; then
+            mv "$TMP_CONFIG" "$CLAUDE_CONFIG"
+            return 0
+        else
+            rm -f "$TMP_CONFIG"
+            warn "Failed to update config (invalid JSON generated)"
+            return 1
+        fi
+    else
+        # Fallback: Simple check and append (less safe but works without jq)
+        warn "jq not available - using simple registration method"
+
+        # Check if conduit-kb is already in config
+        if grep -q '"conduit-kb"' "$CLAUDE_CONFIG" 2>/dev/null; then
+            info "conduit-kb appears to be registered (verify manually)"
+            return 0
+        fi
+
+        # Backup existing config
+        cp "$CLAUDE_CONFIG" "${CLAUDE_CONFIG}.backup"
+
+        echo ""
+        warn "Cannot safely modify existing JSON without jq"
+        echo "Please add conduit-kb manually to ~/.claude.json"
+        echo ""
+        echo "Your existing config has been backed up to: ${CLAUDE_CONFIG}.backup"
+        return 1
+    fi
+}
+
 # Verify installation
 verify_installation() {
     echo ""
@@ -1753,10 +1902,16 @@ print_completion() {
     echo "  1. Check status:"
     echo "     conduit status"
     echo ""
-    echo "  2. Run diagnostics:"
+    echo "  2. Check MCP server capabilities:"
+    echo "     conduit mcp status"
+    echo ""
+    echo "  3. Add documents to knowledge base:"
+    echo "     conduit kb add ~/Documents/my-docs"
+    echo ""
+    echo "  4. Run diagnostics:"
     echo "     conduit doctor"
     echo ""
-    echo "  3. View all commands:"
+    echo "  5. View all commands:"
     echo "     conduit --help"
     echo ""
     echo "Documentation: https://github.com/amlandas/Conduit-AI-Intelligence-Hub"
@@ -1796,6 +1951,7 @@ main() {
     install_binaries
     install_dependencies
     create_config
+    register_claude_code
     setup_service
     verify_installation
     print_completion

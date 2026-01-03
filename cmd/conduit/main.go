@@ -2525,6 +2525,8 @@ func mcpCmd() *cobra.Command {
 
 	cmd.AddCommand(mcpStdioCmd())
 	cmd.AddCommand(mcpKBCmd())
+	cmd.AddCommand(mcpStatusCmd())
+	cmd.AddCommand(mcpLogsCmd())
 
 	return cmd
 }
@@ -2674,6 +2676,204 @@ Example MCP client configuration:
 			return server.Run(ctx)
 		},
 	}
+}
+
+// mcpStatusCmd shows MCP server status and capabilities
+func mcpStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show MCP server status and capabilities",
+		Long: `Display the status and capabilities of the MCP KB server.
+
+Shows:
+- Search capabilities (FTS5, semantic search availability)
+- Qdrant and Ollama connectivity status
+- Knowledge base sources and statistics
+- MCP client configuration snippets`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+
+			// Open database
+			homeDir, _ := os.UserHomeDir()
+			dataDir := filepath.Join(homeDir, ".conduit")
+			dbPath := filepath.Join(dataDir, "conduit.db")
+
+			st, err := store.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer st.Close()
+
+			// Detect capabilities
+			caps := kb.DetectCapabilities(ctx, st.DB())
+
+			fmt.Println("MCP KB Server Status")
+			fmt.Println("════════════════════════════════════════════════════════")
+
+			// Capabilities
+			fmt.Println("\n📋 Search Capabilities:")
+			fmt.Println("────────────────────────────────────────────────────────")
+			if caps.FTS5Available {
+				fmt.Println("  ✓ FTS5 (keyword search): available")
+			} else {
+				fmt.Println("  ✗ FTS5 (keyword search): not available")
+			}
+
+			if caps.SemanticAvailable {
+				fmt.Printf("  ✓ Semantic search: available (model: %s)\n", caps.EmbeddingModel)
+			} else {
+				fmt.Println("  ✗ Semantic search: not available")
+			}
+
+			fmt.Printf("  → Recommended mode: %s\n", caps.SearchMode())
+
+			// Service status
+			fmt.Println("\n🔌 Service Connectivity:")
+			fmt.Println("────────────────────────────────────────────────────────")
+			fmt.Printf("  Qdrant (localhost:6333): %s\n", caps.QdrantStatus)
+			fmt.Printf("  Ollama (localhost:11434): %s\n", caps.OllamaStatus)
+
+			// Knowledge base stats
+			fmt.Println("\n📚 Knowledge Base:")
+			fmt.Println("────────────────────────────────────────────────────────")
+			sourceMgr := kb.NewSourceManager(st.DB())
+			sources, err := sourceMgr.List(ctx)
+			if err != nil {
+				fmt.Printf("  Error listing sources: %v\n", err)
+			} else if len(sources) == 0 {
+				fmt.Println("  No sources indexed. Use 'conduit kb add <path>' to add sources.")
+			} else {
+				fmt.Printf("  Sources: %d\n", len(sources))
+				for _, src := range sources {
+					fmt.Printf("    • %s (%d docs, %d chunks)\n", src.Name, src.DocCount, src.ChunkCount)
+				}
+			}
+
+			// MCP configuration
+			fmt.Println("\n⚙️  MCP Client Configuration:")
+			fmt.Println("────────────────────────────────────────────────────────")
+			fmt.Println("Add to your AI client's MCP configuration:")
+			fmt.Println()
+			fmt.Println(`  {
+    "mcpServers": {
+      "conduit-kb": {
+        "command": "conduit",
+        "args": ["mcp", "kb"]
+      }
+    }
+  }`)
+			fmt.Println()
+			fmt.Println("Locations:")
+			fmt.Println("  • Claude Code: ~/.claude.json")
+			fmt.Println("  • Cursor: .cursor/settings/extensions.json")
+			fmt.Println("  • VS Code: .vscode/settings.json")
+
+			return nil
+		},
+	}
+}
+
+// mcpLogsCmd shows MCP-related logs
+func mcpLogsCmd() *cobra.Command {
+	var tail int
+	var follow bool
+
+	cmd := &cobra.Command{
+		Use:   "logs",
+		Short: "Show MCP server logs",
+		Long: `Display logs from MCP server operations.
+
+Note: The MCP KB server runs synchronously when invoked by an AI client.
+This command shows daemon logs related to MCP operations.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// MCP server logs are typically in the daemon log or stderr
+			homeDir, _ := os.UserHomeDir()
+			logPath := filepath.Join(homeDir, ".conduit", "logs", "mcp.log")
+
+			// Check if log file exists
+			if _, err := os.Stat(logPath); os.IsNotExist(err) {
+				fmt.Println("MCP Log Status")
+				fmt.Println("════════════════════════════════════════════════════════")
+				fmt.Println()
+				fmt.Println("ℹ️  No MCP logs found.")
+				fmt.Println()
+				fmt.Println("The MCP KB server runs synchronously when invoked by AI clients.")
+				fmt.Println("Logs are written to stderr and captured by the AI client.")
+				fmt.Println()
+				fmt.Println("To debug MCP issues:")
+				fmt.Println("  1. Check your AI client's MCP server logs")
+				fmt.Println("  2. Run 'conduit mcp kb' manually and send JSON-RPC requests")
+				fmt.Println("  3. Use 'conduit mcp status' to verify capabilities")
+				return nil
+			}
+
+			// Read and display log file
+			file, err := os.Open(logPath)
+			if err != nil {
+				return fmt.Errorf("open log file: %w", err)
+			}
+			defer file.Close()
+
+			if follow {
+				// Follow mode - tail -f style
+				fmt.Printf("Following MCP logs (Ctrl+C to stop)...\n\n")
+
+				// Seek to end minus tail lines
+				scanner := bufio.NewScanner(file)
+				var lines []string
+				for scanner.Scan() {
+					lines = append(lines, scanner.Text())
+					if len(lines) > tail {
+						lines = lines[1:]
+					}
+				}
+
+				for _, line := range lines {
+					fmt.Println(line)
+				}
+
+				// Continue watching for new content
+				for {
+					select {
+					case <-cmd.Context().Done():
+						return nil
+					default:
+						line, err := bufio.NewReader(file).ReadString('\n')
+						if err != nil {
+							time.Sleep(100 * time.Millisecond)
+							continue
+						}
+						fmt.Print(line)
+					}
+				}
+			} else {
+				// Print last N lines
+				scanner := bufio.NewScanner(file)
+				var lines []string
+				for scanner.Scan() {
+					lines = append(lines, scanner.Text())
+					if tail > 0 && len(lines) > tail {
+						lines = lines[1:]
+					}
+				}
+
+				if len(lines) == 0 {
+					fmt.Println("No MCP log entries found.")
+				} else {
+					for _, line := range lines {
+						fmt.Println(line)
+					}
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&tail, "tail", 50, "Number of lines to show")
+	cmd.Flags().BoolVarP(&follow, "follow", "f", false, "Follow log output")
+
+	return cmd
 }
 
 // logsCmd shows instance logs

@@ -255,8 +255,10 @@ conduit doctor                # Run comprehensive diagnostics
 
 ### MCP Operations
 ```bash
-conduit mcp kb                # Run knowledge base MCP server
-conduit mcp stdio --instance <id>  # Run MCP server over stdio
+conduit mcp kb                # Run knowledge base MCP server (read-only)
+conduit mcp status            # Show MCP server capabilities and health
+conduit mcp logs              # View MCP-related logs
+conduit mcp stdio --instance <id>  # Run connector MCP server over stdio
 ```
 
 ## Architecture
@@ -293,6 +295,103 @@ Conduit exposes connectors and the knowledge base via MCP:
   }
 }
 ```
+
+## MCP Server for AI Clients
+
+Conduit provides a **read-only** MCP server that enables AI clients (Claude Code, Cursor, VS Code) to search and retrieve documents from your private knowledge base.
+
+### Design Principles
+
+- **AI Reads, Humans Write**: The MCP server provides read-only access. All administrative operations (add/remove/sync sources) are reserved for the CLI.
+- **Safety First**: No destructive operations are exposed via MCP to prevent accidental or adversarial knowledge base modifications.
+- **Graceful Degradation**: Works with FTS5 (keyword search) alone and enhances with semantic search when Qdrant + Ollama are available.
+
+### Available Tools
+
+| Tool | Description |
+|------|-------------|
+| `kb_search` | Search knowledge base with hybrid search (FTS5 + semantic) |
+| `kb_search_with_context` | Search with merged, prompt-ready results and citations |
+| `kb_list_sources` | List all indexed sources with statistics |
+| `kb_get_document` | Retrieve full document content by ID |
+| `kb_stats` | Get knowledge base statistics |
+
+### Configuration
+
+**Claude Code** (`~/.claude.json`):
+```json
+{
+  "mcpServers": {
+    "conduit-kb": {
+      "command": "conduit",
+      "args": ["mcp", "kb"]
+    }
+  }
+}
+```
+
+**Cursor** (`.cursor/settings/extensions.json`):
+```json
+{
+  "mcpServers": {
+    "conduit-kb": {
+      "command": "conduit",
+      "args": ["mcp", "kb"]
+    }
+  }
+}
+```
+
+**VS Code** (`.vscode/settings.json`):
+```json
+{
+  "mcp.servers": {
+    "conduit-kb": {
+      "command": "conduit",
+      "args": ["mcp", "kb"]
+    }
+  }
+}
+```
+
+### Checking MCP Status
+
+```bash
+# Show MCP server capabilities, health, and source statistics
+conduit mcp status
+
+# View MCP-related logs
+conduit mcp logs
+```
+
+### Source-Aware Search
+
+All search operations support filtering by source ID for multi-KB scenarios:
+
+```json
+{
+  "name": "kb_search",
+  "arguments": {
+    "query": "authentication",
+    "source_id": "my-project-docs",
+    "limit": 10
+  }
+}
+```
+
+Use `kb_list_sources` to see available source IDs.
+
+### Search Modes
+
+The MCP server supports three search modes via the `mode` parameter:
+
+| Mode | Description |
+|------|-------------|
+| `hybrid` | (Default) Combines keyword + semantic search with RRF fusion |
+| `semantic` | Vector similarity only (requires Qdrant + Ollama) |
+| `fts5` | Keyword matching only (always available) |
+
+For detailed MCP server documentation, see [docs/MCP_SERVER_DESIGN.md](docs/MCP_SERVER_DESIGN.md).
 
 ## Configuration
 

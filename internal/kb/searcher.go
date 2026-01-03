@@ -125,8 +125,9 @@ func (s *Searcher) prepareFTSQuery(query string) string {
 	if len(terms) == 1 {
 		// Single term - use prefix matching
 		term := terms[0]
-		// Skip prefix for very short terms or terms ending with special chars
-		if len(term) >= 2 && !strings.ContainsAny(term, ".-") {
+		// Skip prefix for very short terms or terms ending with periods
+		// (hyphens are now removed by sanitization)
+		if len(term) >= 2 && !strings.ContainsAny(term, ".") {
 			return fmt.Sprintf("%s*", term)
 		}
 		return term
@@ -135,7 +136,7 @@ func (s *Searcher) prepareFTSQuery(query string) string {
 	// Multiple terms - use AND logic with prefix on last term
 	var parts []string
 	for i, term := range terms {
-		if i == len(terms)-1 && len(term) >= 2 && !strings.ContainsAny(term, ".-") {
+		if i == len(terms)-1 && len(term) >= 2 && !strings.ContainsAny(term, ".") {
 			parts = append(parts, fmt.Sprintf("%s*", term))
 		} else {
 			parts = append(parts, term)
@@ -180,14 +181,16 @@ func sanitizeFTSQuery(query string) string {
 		query = strings.ReplaceAll(query, char, " ")
 	}
 
-	// Handle hyphens specially - keep them in hyphenated words but remove standalone
-	// "self-objectification" -> "self-objectification" (keep)
-	// "- something" -> "something" (remove leading hyphen)
+	// Handle hyphens: Replace all hyphens with spaces to avoid FTS5 NOT operator issues.
+	// In FTS5, "-" is the NOT operator, so "ASL-3" would be parsed as "ASL NOT 3"
+	// which causes "no such column: 3" errors. Instead, we split on hyphens.
+	// "ASL-3" -> "ASL 3"
+	// "self-objectification" -> "self objectification"
+	query = strings.ReplaceAll(query, "-", " ")
+
 	words := strings.Fields(query)
 	var cleanedWords []string
 	for _, word := range words {
-		// Remove leading/trailing hyphens
-		word = strings.Trim(word, "-")
 		if word != "" {
 			cleanedWords = append(cleanedWords, word)
 		}
