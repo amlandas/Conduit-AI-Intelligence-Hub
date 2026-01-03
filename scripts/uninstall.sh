@@ -263,75 +263,141 @@ remove_binaries() {
     done
 }
 
-# Remove Qdrant container
-remove_qdrant_container() {
+# Remove all Conduit data (consolidated Qdrant + SQLite + config)
+remove_all_data() {
     echo ""
-    echo "Step 3b: Remove Qdrant Container"
+    echo "Step 4: Remove Conduit Data"
     echo "──────────────────────────────────────────────────────────────"
 
-    # Detect container runtime
+    # Detect container runtime for Qdrant
     local CONTAINER_CMD=""
     if command_exists podman; then
         CONTAINER_CMD="podman"
     elif command_exists docker; then
         CONTAINER_CMD="docker"
+    fi
+
+    # Check what exists
+    local has_qdrant_container=false
+    local has_data_dir=false
+    local qdrant_vectors=0
+
+    if [[ -n "$CONTAINER_CMD" ]] && $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
+        has_qdrant_container=true
+        # Try to get vector count
+        qdrant_vectors=$(curl -s http://localhost:6333/collections/conduit_kb 2>/dev/null | grep -o '"points_count":[0-9]*' | cut -d: -f2 || echo "0")
+    fi
+
+    if [[ -d "$CONDUIT_HOME" ]]; then
+        has_data_dir=true
+    fi
+
+    # Nothing to remove
+    if [[ "$has_qdrant_container" == "false" ]] && [[ "$has_data_dir" == "false" ]]; then
+        info "No Conduit data found"
+        return 0
+    fi
+
+    # Calculate sizes
+    local data_size="0"
+    local qdrant_data_size="0"
+    local sqlite_size="0"
+    if [[ "$has_data_dir" == "true" ]]; then
+        data_size=$(du -sh "$CONDUIT_HOME" 2>/dev/null | cut -f1 || echo "unknown")
+        qdrant_data_size=$(du -sh "$CONDUIT_HOME/qdrant" 2>/dev/null | cut -f1 || echo "0")
+        sqlite_size=$(du -sh "$CONDUIT_HOME/conduit.db" 2>/dev/null | cut -f1 || echo "0")
+    fi
+
+    # Present the choice clearly
+    echo ""
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════${NC}"
+    echo -e "${YELLOW}                    DATA REMOVAL DECISION                        ${NC}"
+    echo -e "${YELLOW}════════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo "Conduit stores the following data:"
+    echo ""
+    if [[ "$has_data_dir" == "true" ]]; then
+        echo "  📁 Data Directory: $CONDUIT_HOME"
+        echo "     ├── SQLite Database:     $sqlite_size (documents, sources, config)"
+        echo "     ├── Qdrant Vector Data:  $qdrant_data_size ($qdrant_vectors vectors)"
+        echo "     ├── Daemon logs"
+        echo "     └── Configuration files"
+        echo "     Total size: $data_size"
+    fi
+    if [[ "$has_qdrant_container" == "true" ]]; then
+        echo ""
+        echo "  🐳 Qdrant Container: conduit-qdrant"
+        echo "     Running on ports 6333 (HTTP) and 6334 (gRPC)"
+    fi
+    echo ""
+    echo -e "${YELLOW}────────────────────────────────────────────────────────────────${NC}"
+    echo ""
+    echo "Choose an option:"
+    echo ""
+    echo "  [1] DELETE ALL DATA - Remove everything (recommended for clean uninstall)"
+    echo "      • Stops and removes Qdrant container"
+    echo "      • Deletes all vectors, documents, and configuration"
+    echo "      • Fresh start if you reinstall"
+    echo ""
+    echo "  [2] KEEP DATA - Preserve data for potential reinstall"
+    echo "      • Qdrant container and vectors preserved"
+    echo "      • SQLite database and config preserved"
+    echo "      • If reinstalling, run 'conduit qdrant purge' to clear stale vectors"
+    echo ""
+
+    local choice=""
+    if [[ "$FORCE" == "true" ]]; then
+        choice="1"
+        echo "  (--force flag set, selecting option 1)"
     else
-        info "No container runtime found, skipping Qdrant removal"
-        return 0
+        read -r -p "Enter choice [1/2]: " choice </dev/tty
     fi
 
-    # Check if Qdrant container exists
-    if ! $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
-        info "No Qdrant container found"
-        return 0
-    fi
+    case "$choice" in
+        1)
+            echo ""
+            warn "This will permanently delete all Conduit data!"
+            echo ""
+            if [[ "$FORCE" != "true" ]]; then
+                read -r -p "Type 'DELETE' to confirm: " confirm_delete </dev/tty
+                if [[ "$confirm_delete" != "DELETE" ]]; then
+                    warn "Deletion cancelled. Data preserved."
+                    return 0
+                fi
+            fi
 
-    if confirm "Remove Qdrant vector database container?"; then
-        info "Stopping and removing Qdrant container..."
-        $CONTAINER_CMD stop conduit-qdrant 2>/dev/null || true
-        $CONTAINER_CMD rm conduit-qdrant 2>/dev/null || true
-        success "Qdrant container removed"
-    else
-        warn "Qdrant container left in place"
-        echo "  Note: If you remove the data directory, the container will have orphaned storage."
-        echo "  To remove manually: $CONTAINER_CMD rm -f conduit-qdrant"
-    fi
-}
+            # Remove Qdrant container first
+            if [[ "$has_qdrant_container" == "true" ]] && [[ -n "$CONTAINER_CMD" ]]; then
+                info "Stopping and removing Qdrant container..."
+                $CONTAINER_CMD stop conduit-qdrant 2>/dev/null || true
+                $CONTAINER_CMD rm conduit-qdrant 2>/dev/null || true
+                success "Qdrant container removed"
+            fi
 
-# Remove data directory
-remove_data() {
-    echo ""
-    echo "Step 4: Remove Data Directory"
-    echo "──────────────────────────────────────────────────────────────"
+            # Remove data directory
+            if [[ "$has_data_dir" == "true" ]]; then
+                info "Removing data directory..."
+                rm -rf "$CONDUIT_HOME" || error "Failed to remove $CONDUIT_HOME"
+                success "Data directory removed"
+            fi
 
-    if [[ ! -d "$CONDUIT_HOME" ]]; then
-        info "Data directory $CONDUIT_HOME does not exist"
-        return 0
-    fi
-
-    # Show what will be removed
-    local size=$(du -sh "$CONDUIT_HOME" 2>/dev/null | cut -f1 || echo "unknown")
-    local qdrant_size=$(du -sh "$CONDUIT_HOME/qdrant" 2>/dev/null | cut -f1 || echo "none")
-    warn "This will remove:"
-    echo "  - Directory: $CONDUIT_HOME"
-    echo "  - Size: $size"
-    echo "  - All configuration, databases, and logs"
-    echo "  - Qdrant vector data: $qdrant_size"
-    echo ""
-    echo "  NOTE: If you keep this directory and reinstall Conduit,"
-    echo "        Qdrant vectors will persist but SQLite data won't."
-    echo "        This may cause orphaned vectors. After reinstall,"
-    echo "        run 'conduit qdrant purge' to clear stale vectors."
-    echo ""
-
-    if ! confirm "Remove data directory? (This cannot be undone)" "n"; then
-        warn "Data directory left in place"
-        echo "  If you reinstall Conduit, run 'conduit qdrant purge' to clean up."
-        return 0
-    fi
-
-    rm -rf "$CONDUIT_HOME" || error "Failed to remove $CONDUIT_HOME"
-    success "Data directory removed"
+            echo ""
+            success "All Conduit data has been removed"
+            ;;
+        2|*)
+            warn "Data preserved"
+            echo ""
+            echo "  Your data remains at: $CONDUIT_HOME"
+            if [[ "$has_qdrant_container" == "true" ]]; then
+                echo "  Qdrant container: conduit-qdrant (still running)"
+            fi
+            echo ""
+            echo "  If you reinstall Conduit later:"
+            echo "    • Your KB sources and documents will be restored"
+            echo "    • Run 'conduit qdrant purge' if vectors seem stale"
+            echo "    • Run 'conduit kb sync' to re-index documents"
+            ;;
+    esac
 }
 
 # Clean up shell configuration
@@ -728,7 +794,18 @@ print_summary() {
     echo "Summary of removals:"
     echo ""
     [[ ! -f "$INSTALL_DIR/conduit" ]] && echo -e "  ${GREEN}✓${NC} Binaries removed"
-    [[ ! -d "$CONDUIT_HOME" ]] && echo -e "  ${GREEN}✓${NC} Data directory removed"
+    if [[ ! -d "$CONDUIT_HOME" ]]; then
+        echo -e "  ${GREEN}✓${NC} Data directory removed (SQLite, config, vectors)"
+    else
+        echo -e "  ${YELLOW}○${NC} Data directory preserved at $CONDUIT_HOME"
+    fi
+    # Check if Qdrant container was removed
+    local CONTAINER_CMD=""
+    command_exists podman && CONTAINER_CMD="podman"
+    command_exists docker && CONTAINER_CMD="docker"
+    if [[ -n "$CONTAINER_CMD" ]] && $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
+        echo -e "  ${YELLOW}○${NC} Qdrant container preserved"
+    fi
     ! command_exists docker && echo -e "  ${GREEN}✓${NC} Docker removed"
     ! command_exists podman && echo -e "  ${GREEN}✓${NC} Podman removed"
     ! command_exists ollama && echo -e "  ${GREEN}✓${NC} Ollama removed"
@@ -766,8 +843,7 @@ main() {
     stop_daemon || true
     remove_service || true
     remove_binaries || true
-    remove_qdrant_container || true
-    remove_data || true
+    remove_all_data || true
     cleanup_shell_config || true
     remove_dependencies || true
 
