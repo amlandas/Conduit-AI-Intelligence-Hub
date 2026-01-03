@@ -15,6 +15,7 @@ The installer will:
 - Install any missing dependencies (Go, Git, Docker/Podman, Ollama)
 - Install document extraction tools (pdftotext, antiword, unrtf)
 - Build and install Conduit
+- Configure your shell PATH automatically (bash/zsh)
 - Set up the daemon as a background service
 - Pull the default AI model (qwen2.5-coder:7b)
 - Install Qdrant vector database (via Docker) for semantic search
@@ -42,7 +43,7 @@ curl -fsSL ... | bash -s -- --skip-model
 curl -fsSL ... | bash -s -- --no-kag
 ```
 
-After installation, add the install location to your PATH if prompted, then run:
+After installation, restart your terminal (or run `source ~/.zshrc` / `source ~/.bashrc`), then run:
 
 ```bash
 conduit status
