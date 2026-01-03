@@ -128,7 +128,7 @@ func DefaultConfig() *Config {
 
 		API: APIConfig{
 			ReadTimeout:  30 * time.Second,
-			WriteTimeout: 30 * time.Second,
+			WriteTimeout: 10 * time.Minute, // Long-running ops like kb sync need time
 			IdleTimeout:  120 * time.Second,
 		},
 

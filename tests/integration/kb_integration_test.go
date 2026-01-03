@@ -210,7 +210,7 @@ func TestKBSourceAndDocumentIntegration(t *testing.T) {
 	}
 
 	// Remove source
-	if err := source.Remove(ctx, src.SourceID); err != nil {
+	if _, err := source.Remove(ctx, src.SourceID); err != nil {
 		t.Fatalf("Remove source failed: %v", err)
 	}
 

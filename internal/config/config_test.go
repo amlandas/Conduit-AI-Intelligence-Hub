@@ -63,8 +63,8 @@ func TestDefaultConfig_APIDefaults(t *testing.T) {
 	if cfg.API.ReadTimeout != 30*time.Second {
 		t.Errorf("ReadTimeout should be 30s, got %v", cfg.API.ReadTimeout)
 	}
-	if cfg.API.WriteTimeout != 30*time.Second {
-		t.Errorf("WriteTimeout should be 30s, got %v", cfg.API.WriteTimeout)
+	if cfg.API.WriteTimeout != 10*time.Minute {
+		t.Errorf("WriteTimeout should be 10m, got %v", cfg.API.WriteTimeout)
 	}
 	if cfg.API.IdleTimeout != 120*time.Second {
 		t.Errorf("IdleTimeout should be 120s, got %v", cfg.API.IdleTimeout)
