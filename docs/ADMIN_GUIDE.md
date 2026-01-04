@@ -354,7 +354,7 @@ sudo systemctl start conduit@$USER
 
 ### Custom launchd Service (macOS)
 
-If you need custom service configuration, create `~/Library/LaunchAgents/com.simpleflo.conduit.plist`:
+If you need custom service configuration, create `~/Library/LaunchAgents/dev.simpleflo.conduit.plist`:
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -363,7 +363,7 @@ If you need custom service configuration, create `~/Library/LaunchAgents/com.sim
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.simpleflo.conduit</string>
+    <string>dev.simpleflo.conduit</string>
     <key>ProgramArguments</key>
     <array>
         <string>/usr/local/bin/conduit-daemon</string>
@@ -383,7 +383,7 @@ If you need custom service configuration, create `~/Library/LaunchAgents/com.sim
 
 Load and start:
 ```bash
-launchctl load ~/Library/LaunchAgents/com.simpleflo.conduit.plist
+launchctl load ~/Library/LaunchAgents/dev.simpleflo.conduit.plist
 ```
 
 **Note**: The `conduit service install` command creates this file automatically.
@@ -1275,8 +1275,8 @@ conduit service remove
 
 # Or if service commands aren't available:
 # macOS
-launchctl unload ~/Library/LaunchAgents/com.simpleflo.conduit.plist
-rm ~/Library/LaunchAgents/com.simpleflo.conduit.plist
+launchctl unload ~/Library/LaunchAgents/dev.simpleflo.conduit.plist
+rm ~/Library/LaunchAgents/dev.simpleflo.conduit.plist
 
 # Linux
 systemctl --user stop conduit

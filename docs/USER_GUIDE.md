@@ -256,7 +256,7 @@ conduit-daemon --foreground --log-level=debug
 
 | Platform | Service File |
 |----------|-------------|
-| macOS | `~/Library/LaunchAgents/com.simpleflo.conduit.plist` |
+| macOS | `~/Library/LaunchAgents/dev.simpleflo.conduit.plist` |
 | Linux | `~/.config/systemd/user/conduit.service` |
 
 ### Viewing Logs

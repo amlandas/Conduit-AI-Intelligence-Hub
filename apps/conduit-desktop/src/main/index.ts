@@ -44,7 +44,7 @@ function createWindow(): void {
 }
 
 app.whenReady().then(() => {
-  electronApp.setAppUserModelId('com.simpleflo.conduit')
+  electronApp.setAppUserModelId('dev.simpleflo.conduit')
 
   app.on('browser-window-created', (_, window) => {
     optimizer.watchWindowShortcuts(window)
