@@ -9,12 +9,55 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/rs/zerolog"
 	"github.com/simpleflo/conduit/internal/observability"
 )
+
+// normalizeEntityName normalizes an entity name for deduplication.
+// It lowercases, trims whitespace, normalizes unicode, and removes excess spaces.
+func normalizeEntityName(name string) string {
+	// Normalize unicode to NFC form
+	name = norm.NFC.String(name)
+
+	// Lowercase
+	name = strings.ToLower(name)
+
+	// Remove leading/trailing whitespace
+	name = strings.TrimSpace(name)
+
+	// Collapse multiple spaces to single space
+	var result strings.Builder
+	prevSpace := false
+	for _, r := range name {
+		if unicode.IsSpace(r) {
+			if !prevSpace {
+				result.WriteRune(' ')
+				prevSpace = true
+			}
+		} else {
+			result.WriteRune(r)
+			prevSpace = false
+		}
+	}
+
+	return result.String()
+}
+
+// GenerateCanonicalEntityID generates a consistent ID for an entity based on normalized name and type.
+// This ensures the same entity from different documents gets the same ID for deduplication.
+func GenerateCanonicalEntityID(name string, entityType EntityType) string {
+	normalized := normalizeEntityName(name)
+	h := sha256.New()
+	h.Write([]byte(normalized + "|" + string(entityType)))
+	return "ent_" + hex.EncodeToString(h.Sum(nil))[:16]
+}
 
 // EntityExtractor orchestrates entity and relation extraction from chunks.
 type EntityExtractor struct {
@@ -277,7 +320,9 @@ func (e *EntityExtractor) Close() error {
 	return e.provider.Close()
 }
 
-// storeEntities stores entities in SQLite.
+// storeEntities stores entities in SQLite with deduplication.
+// Entities with the same normalized name and type are merged, keeping the higher confidence
+// and combining source references.
 func (e *EntityExtractor) storeEntities(ctx context.Context, entities []Entity) error {
 	tx, err := e.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -285,39 +330,93 @@ func (e *EntityExtractor) storeEntities(ctx context.Context, entities []Entity) 
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT OR REPLACE INTO kb_entities
-		(entity_id, name, type, description, source_chunk_id, source_document_id, confidence, metadata, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
 	now := time.Now().Format(time.RFC3339)
-	for _, entity := range entities {
-		metadataJSON := "{}"
-		if entity.Metadata != nil {
-			// Serialize metadata to JSON
-			if data, err := serializeMetadata(entity.Metadata); err == nil {
-				metadataJSON = data
-			}
-		}
 
-		_, err := stmt.ExecContext(ctx,
-			entity.ID,
-			entity.Name,
-			string(entity.Type),
-			entity.Description,
-			entity.SourceChunkID,
-			entity.SourceDocumentID,
-			entity.Confidence,
-			metadataJSON,
-			now,
-			now,
-		)
-		if err != nil {
+	for _, entity := range entities {
+		// Generate canonical ID for deduplication
+		canonicalID := GenerateCanonicalEntityID(entity.Name, entity.Type)
+
+		// Check if entity already exists
+		var existingID, existingDesc, existingSourceDocs, existingMetadata string
+		var existingConfidence float64
+		err := tx.QueryRowContext(ctx, `
+			SELECT entity_id, description, confidence, source_document_id, metadata
+			FROM kb_entities
+			WHERE entity_id = ?
+		`, canonicalID).Scan(&existingID, &existingDesc, &existingConfidence, &existingSourceDocs, &existingMetadata)
+
+		if err == nil {
+			// Entity exists - merge
+			mergedDesc := existingDesc
+			if len(entity.Description) > len(existingDesc) {
+				// Keep longer description (likely more informative)
+				mergedDesc = entity.Description
+			}
+
+			mergedConfidence := existingConfidence
+			if entity.Confidence > existingConfidence {
+				mergedConfidence = entity.Confidence
+			}
+
+			// Combine source document IDs (store as comma-separated)
+			mergedSources := existingSourceDocs
+			if entity.SourceDocumentID != "" && !strings.Contains(existingSourceDocs, entity.SourceDocumentID) {
+				if mergedSources != "" {
+					mergedSources += "," + entity.SourceDocumentID
+				} else {
+					mergedSources = entity.SourceDocumentID
+				}
+			}
+
+			// Merge metadata
+			mergedMetadataJSON := existingMetadata
+			if entity.Metadata != nil {
+				if data, err := serializeMetadata(entity.Metadata); err == nil {
+					// For simplicity, just use the new metadata if it exists
+					// A more sophisticated approach would merge the JSON objects
+					if data != "{}" {
+						mergedMetadataJSON = data
+					}
+				}
+			}
+
+			// Update existing entity
+			_, err = tx.ExecContext(ctx, `
+				UPDATE kb_entities
+				SET description = ?, confidence = ?, source_document_id = ?,
+				    source_chunk_id = ?, metadata = ?, updated_at = ?
+				WHERE entity_id = ?
+			`, mergedDesc, mergedConfidence, mergedSources, entity.SourceChunkID,
+				mergedMetadataJSON, now, canonicalID)
+			if err != nil {
+				return err
+			}
+
+			e.logger.Debug().
+				Str("entity_id", canonicalID).
+				Str("name", entity.Name).
+				Msg("merged duplicate entity")
+
+		} else if err == sql.ErrNoRows {
+			// Entity doesn't exist - insert new
+			metadataJSON := "{}"
+			if entity.Metadata != nil {
+				if data, err := serializeMetadata(entity.Metadata); err == nil {
+					metadataJSON = data
+				}
+			}
+
+			_, err = tx.ExecContext(ctx, `
+				INSERT INTO kb_entities
+				(entity_id, name, type, description, source_chunk_id, source_document_id, confidence, metadata, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`, canonicalID, entity.Name, string(entity.Type), entity.Description,
+				entity.SourceChunkID, entity.SourceDocumentID, entity.Confidence,
+				metadataJSON, now, now)
+			if err != nil {
+				return err
+			}
+		} else {
 			return err
 		}
 	}

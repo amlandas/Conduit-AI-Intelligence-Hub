@@ -1510,6 +1510,7 @@ Examples:
 	cmd.AddCommand(kbKagSyncCmd())
 	cmd.AddCommand(kbKagStatusCmd())
 	cmd.AddCommand(kbKagRetryCmd())
+	cmd.AddCommand(kbKagDedupeCmd())
 	cmd.AddCommand(kbKagQueryCmd())
 
 	return cmd
@@ -5103,6 +5104,180 @@ func truncateString(s string, maxLen int) string {
 	return s[:maxLen-3] + "..."
 }
 
+func kbKagDedupeCmd() *cobra.Command {
+	var dryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "kag-dedupe",
+		Short: "Deduplicate entities in the knowledge graph",
+		Long: `Merge duplicate entities that have the same normalized name and type.
+
+This command identifies entities that are semantically the same (e.g., "Threat Model"
+and "threat model") and merges them, keeping the highest confidence and best description.
+
+Examples:
+  conduit kb kag-dedupe           # Deduplicate all entities
+  conduit kb kag-dedupe --dry-run # Preview without making changes`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Open database
+			homeDir, _ := os.UserHomeDir()
+			dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+			db, err := store.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			ctx := cmd.Context()
+
+			// Find duplicate entities (same normalized name + type but different IDs)
+			fmt.Println("Analyzing entities for duplicates...")
+
+			rows, err := db.DB().QueryContext(ctx, `
+				SELECT entity_id, name, type, description, confidence, source_document_id
+				FROM kb_entities
+				ORDER BY name COLLATE NOCASE, type, confidence DESC
+			`)
+			if err != nil {
+				return fmt.Errorf("query entities: %w", err)
+			}
+			defer rows.Close()
+
+			type entityInfo struct {
+				ID          string
+				Name        string
+				Type        string
+				Description string
+				Confidence  float64
+				SourceDocs  string
+			}
+
+			// Group entities by normalized name + type
+			groups := make(map[string][]entityInfo)
+			var totalEntities int
+
+			for rows.Next() {
+				var e entityInfo
+				if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.Description, &e.Confidence, &e.SourceDocs); err != nil {
+					continue
+				}
+				totalEntities++
+
+				// Create normalized key
+				key := strings.ToLower(strings.TrimSpace(e.Name)) + "|" + e.Type
+				groups[key] = append(groups[key], e)
+			}
+
+			// Find groups with duplicates
+			var duplicateGroups int
+			var totalDuplicates int
+			for _, entities := range groups {
+				if len(entities) > 1 {
+					duplicateGroups++
+					totalDuplicates += len(entities) - 1 // Count extras as duplicates
+				}
+			}
+
+			fmt.Printf("\nFound %d entities in %d groups\n", totalEntities, len(groups))
+			fmt.Printf("Duplicate groups: %d (containing %d extra entities)\n", duplicateGroups, totalDuplicates)
+
+			if duplicateGroups == 0 {
+				fmt.Println("\nNo duplicates found. Knowledge graph is clean.")
+				return nil
+			}
+
+			if dryRun {
+				fmt.Println("\n--dry-run: Showing what would be merged:")
+				shown := 0
+				for key, entities := range groups {
+					if len(entities) > 1 && shown < 10 {
+						parts := strings.SplitN(key, "|", 2)
+						fmt.Printf("  \"%s\" (%s): %d entities → 1\n", parts[0], parts[1], len(entities))
+						shown++
+					}
+				}
+				if duplicateGroups > 10 {
+					fmt.Printf("  ... and %d more groups\n", duplicateGroups-10)
+				}
+				fmt.Println("\nRun without --dry-run to merge duplicates.")
+				return nil
+			}
+
+			// Perform deduplication
+			fmt.Println("\nMerging duplicates...")
+
+			merged := 0
+			deleted := 0
+
+			for _, entities := range groups {
+				if len(entities) <= 1 {
+					continue
+				}
+
+				// First entity (highest confidence) becomes the canonical one
+				canonical := entities[0]
+				canonicalID := kb.GenerateCanonicalEntityID(canonical.Name, kb.EntityType(canonical.Type))
+
+				// Best description is the longest
+				bestDesc := canonical.Description
+				for _, e := range entities[1:] {
+					if len(e.Description) > len(bestDesc) {
+						bestDesc = e.Description
+					}
+				}
+
+				// Combine source documents
+				sourceDocs := canonical.SourceDocs
+				for _, e := range entities[1:] {
+					if e.SourceDocs != "" && !strings.Contains(sourceDocs, e.SourceDocs) {
+						if sourceDocs != "" {
+							sourceDocs += "," + e.SourceDocs
+						} else {
+							sourceDocs = e.SourceDocs
+						}
+					}
+				}
+
+				// Update/insert canonical entity
+				now := time.Now().Format(time.RFC3339)
+				_, err := db.DB().ExecContext(ctx, `
+					INSERT OR REPLACE INTO kb_entities
+					(entity_id, name, type, description, source_chunk_id, source_document_id,
+					 confidence, metadata, created_at, updated_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
+				`, canonicalID, canonical.Name, canonical.Type, bestDesc,
+					"", sourceDocs, canonical.Confidence, now, now)
+				if err != nil {
+					return fmt.Errorf("upsert canonical entity: %w", err)
+				}
+
+				// Delete old entities
+				for _, e := range entities {
+					if e.ID != canonicalID {
+						_, err := db.DB().ExecContext(ctx, `DELETE FROM kb_entities WHERE entity_id = ?`, e.ID)
+						if err == nil {
+							deleted++
+						}
+					}
+				}
+				merged++
+			}
+
+			fmt.Println("\nDeduplication Summary")
+			fmt.Println("───────────────────────────────────────")
+			fmt.Printf("Groups merged:    %d\n", merged)
+			fmt.Printf("Entities deleted: %d\n", deleted)
+			fmt.Printf("Entities after:   %d\n", totalEntities-deleted)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview without making changes")
+
+	return cmd
+}
+
 func kbKagQueryCmd() *cobra.Command {
 	var maxHops int
 	var format string
@@ -5131,38 +5306,25 @@ Examples:
 
 			ctx := cmd.Context()
 
-			// Search entities matching query
-			rows, err := db.DB().QueryContext(ctx, `
-				SELECT entity_id, name, type, description, confidence
-				FROM kb_entities
-				WHERE name LIKE ? OR description LIKE ?
-				ORDER BY confidence DESC
-				LIMIT 20
-			`, "%"+query+"%", "%"+query+"%")
+			// Use KAGSearcher for improved tokenized search
+			kagSearcher := kb.NewKAGSearcher(db.DB(), nil)
+			result, err := kagSearcher.Search(ctx, &kb.KAGSearchRequest{
+				Query:            query,
+				MaxHops:          maxHops,
+				Limit:            20,
+				IncludeRelations: maxHops > 0,
+			})
 			if err != nil {
 				return fmt.Errorf("search entities: %w", err)
-			}
-			defer rows.Close()
-
-			type entityResult struct {
-				ID          string  `json:"id"`
-				Name        string  `json:"name"`
-				Type        string  `json:"type"`
-				Description string  `json:"description"`
-				Confidence  float64 `json:"confidence"`
-			}
-
-			var entities []entityResult
-			for rows.Next() {
-				var e entityResult
-				rows.Scan(&e.ID, &e.Name, &e.Type, &e.Description, &e.Confidence)
-				entities = append(entities, e)
 			}
 
 			if format == "json" {
 				output := map[string]interface{}{
 					"query":    query,
-					"entities": entities,
+					"entities": result.Entities,
+				}
+				if len(result.Relations) > 0 {
+					output["relations"] = result.Relations
 				}
 				data, _ := json.MarshalIndent(output, "", "  ")
 				fmt.Println(string(data))
@@ -5171,18 +5333,26 @@ Examples:
 				fmt.Println("═══════════════════════════════════════")
 				fmt.Println()
 
-				if len(entities) == 0 {
+				if len(result.Entities) == 0 {
 					fmt.Println("No matching entities found.")
 					return nil
 				}
 
-				for _, e := range entities {
+				for _, e := range result.Entities {
 					fmt.Printf("• %s (%s)\n", e.Name, e.Type)
 					if e.Description != "" {
 						fmt.Printf("  %s\n", truncate(e.Description, 80))
 					}
 					fmt.Printf("  Confidence: %.0f%%\n", e.Confidence*100)
 					fmt.Println()
+				}
+
+				// Show relations if any
+				if len(result.Relations) > 0 {
+					fmt.Println("Relationships:")
+					for _, r := range result.Relations {
+						fmt.Printf("  %s → %s → %s\n", r.SubjectName, r.Predicate, r.ObjectName)
+					}
 				}
 			}
 
