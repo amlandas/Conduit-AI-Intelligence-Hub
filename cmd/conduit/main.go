@@ -148,6 +148,7 @@ VS Code, Gemini CLI, and more.`,
 	rootCmd.AddCommand(qdrantCmd())
 	rootCmd.AddCommand(falkordbCmd())
 	rootCmd.AddCommand(ollamaCmd())
+	rootCmd.AddCommand(eventsCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
@@ -5872,4 +5873,159 @@ Examples:
 	cmd.Flags().StringSliceVar(&models, "models", nil, "Specific models to warm up (default: all required)")
 
 	return cmd
+}
+
+// eventsCmd streams real-time events from the daemon via SSE
+func eventsCmd() *cobra.Command {
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "events",
+		Short: "Stream real-time events from the daemon",
+		Long: `Connect to the daemon's Server-Sent Events (SSE) endpoint
+and stream real-time events to the console.
+
+Events include:
+  - Instance status changes (created, started, stopped, deleted)
+  - KB sync progress and completion
+  - KAG extraction progress
+  - Binding changes
+  - Daemon heartbeat (every 30s)
+
+Press Ctrl+C to stop streaming.`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return streamEvents(socketPath, jsonOutput)
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output raw JSON events")
+
+	return cmd
+}
+
+// streamEvents connects to the SSE endpoint and streams events
+func streamEvents(socketPath string, jsonOutput bool) error {
+	// Create a custom HTTP client with Unix socket transport
+	transport := &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			return net.Dial("unix", socketPath)
+		},
+	}
+	client := &http.Client{
+		Transport: transport,
+		Timeout:   0, // No timeout for SSE streaming
+	}
+
+	// Make the SSE request
+	req, err := http.NewRequest("GET", "http://localhost/api/v1/events", nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+
+	// Handle Ctrl+C
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-sigCh
+		fmt.Println("\n\nDisconnecting from event stream...")
+		cancel()
+	}()
+
+	req = req.WithContext(ctx)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("connect to daemon: %w (is the daemon running?)", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("server returned %d: %s", resp.StatusCode, string(body))
+	}
+
+	if !jsonOutput {
+		fmt.Println("╔══════════════════════════════════════════════════════════════╗")
+		fmt.Println("║              Conduit Event Stream (SSE)                      ║")
+		fmt.Println("╚══════════════════════════════════════════════════════════════╝")
+		fmt.Println()
+		fmt.Println("Streaming events... (Press Ctrl+C to stop)")
+		fmt.Println()
+	}
+
+	// Parse SSE stream
+	scanner := bufio.NewScanner(resp.Body)
+	var eventType, eventData string
+
+	for scanner.Scan() {
+		line := scanner.Text()
+
+		if strings.HasPrefix(line, "event: ") {
+			eventType = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			eventData = strings.TrimPrefix(line, "data: ")
+		} else if line == "" && eventType != "" && eventData != "" {
+			// Empty line signals end of event
+			if jsonOutput {
+				// Output raw JSON
+				fmt.Printf("{\"event\":\"%s\",\"data\":%s}\n", eventType, eventData)
+			} else {
+				// Pretty print event
+				printEvent(eventType, eventData)
+			}
+			eventType = ""
+			eventData = ""
+		}
+	}
+
+	if err := scanner.Err(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("read stream: %w", err)
+	}
+
+	return nil
+}
+
+// printEvent pretty-prints an SSE event
+func printEvent(eventType, eventData string) {
+	timestamp := time.Now().Format("15:04:05")
+
+	// Parse data as JSON for pretty display
+	var data map[string]interface{}
+	json.Unmarshal([]byte(eventData), &data)
+
+	// Choose icon based on event type
+	var icon string
+	switch {
+	case strings.HasPrefix(eventType, "instance_"):
+		icon = "📦"
+	case strings.HasPrefix(eventType, "kb_"):
+		icon = "📚"
+	case strings.HasPrefix(eventType, "kag_"):
+		icon = "🔗"
+	case strings.HasPrefix(eventType, "binding_"):
+		icon = "🔌"
+	case eventType == "daemon_status":
+		icon = "💓"
+	case eventType == "connected":
+		icon = "✓"
+	case eventType == "shutdown":
+		icon = "⚠️"
+	default:
+		icon = "•"
+	}
+
+	fmt.Printf("[%s] %s %s\n", timestamp, icon, eventType)
+
+	// Print relevant data fields
+	for key, value := range data {
+		if key == "timestamp" {
+			continue // Skip timestamp, we show our own
+		}
+		fmt.Printf("         %s: %v\n", key, value)
+	}
+	fmt.Println()
 }

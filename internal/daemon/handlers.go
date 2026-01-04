@@ -225,6 +225,13 @@ func (d *Daemon) handleCreateInstance(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Emit instance created event
+	d.EmitEvent(EventInstanceCreated, InstanceStatusData{
+		InstanceID: instance.InstanceID,
+		Name:       instance.DisplayName,
+		Status:     string(instance.Status),
+	})
+
 	writeJSON(w, http.StatusCreated, instance)
 }
 
@@ -250,6 +257,9 @@ func (d *Daemon) handleGetInstance(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 	instanceID := chi.URLParam(r, "instanceID")
 
+	// Get instance info before deletion for the event
+	instance, _ := d.store.GetInstance(r.Context(), instanceID)
+
 	// TODO: Stop container if running, cleanup resources
 
 	if err := d.store.DeleteInstance(r.Context(), instanceID); err != nil {
@@ -261,6 +271,17 @@ func (d *Daemon) handleDeleteInstance(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "E_INTERNAL", "failed to delete instance")
 		return
 	}
+
+	// Emit instance deleted event
+	name := instanceID
+	if instance != nil {
+		name = instance.DisplayName
+	}
+	d.EmitEvent(EventInstanceDeleted, InstanceStatusData{
+		InstanceID: instanceID,
+		Name:       name,
+		Status:     "deleted",
+	})
 
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -288,11 +309,20 @@ func (d *Daemon) handleStartInstance(w http.ResponseWriter, r *http.Request) {
 
 	// TODO: Start container using RuntimeProvider
 	// For now, just update status
+	prevStatus := string(instance.Status)
 
 	if err := d.store.UpdateInstanceStatus(r.Context(), instanceID, models.StatusRunning, ""); err != nil {
 		writeError(w, http.StatusInternalServerError, "E_INTERNAL", "failed to update instance status")
 		return
 	}
+
+	// Emit status change event
+	d.EmitEvent(EventInstanceStatusChanged, InstanceStatusData{
+		InstanceID: instanceID,
+		Name:       instance.DisplayName,
+		Status:     string(models.StatusRunning),
+		PrevStatus: prevStatus,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"instance_id": instanceID,
@@ -323,11 +353,20 @@ func (d *Daemon) handleStopInstance(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// TODO: Stop container using RuntimeProvider
+	prevStatus := string(instance.Status)
 
 	if err := d.store.UpdateInstanceStopped(r.Context(), instanceID); err != nil {
 		writeError(w, http.StatusInternalServerError, "E_INTERNAL", "failed to update instance status")
 		return
 	}
+
+	// Emit status change event
+	d.EmitEvent(EventInstanceStatusChanged, InstanceStatusData{
+		InstanceID: instanceID,
+		Name:       instance.DisplayName,
+		Status:     string(models.StatusStopped),
+		PrevStatus: prevStatus,
+	})
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"instance_id": instanceID,
@@ -391,6 +430,14 @@ func (d *Daemon) handleCreateBinding(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Emit binding created event
+	d.EmitEvent(EventBindingCreated, BindingData{
+		BindingID:  binding.BindingID,
+		InstanceID: binding.InstanceID,
+		ClientID:   binding.ClientID,
+		Scope:      binding.Scope,
+	})
+
 	writeJSON(w, http.StatusCreated, binding)
 }
 
@@ -415,6 +462,9 @@ func (d *Daemon) handleGetBinding(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDeleteBinding(w http.ResponseWriter, r *http.Request) {
 	bindingID := chi.URLParam(r, "bindingID")
 
+	// Get binding info before deletion for the event
+	binding, _ := d.store.GetBinding(r.Context(), bindingID)
+
 	// TODO: Use adapter to rollback MCP configuration
 
 	if err := d.store.DeleteBinding(r.Context(), bindingID); err != nil {
@@ -424,6 +474,16 @@ func (d *Daemon) handleDeleteBinding(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "E_INTERNAL", "failed to delete binding")
 		return
+	}
+
+	// Emit binding deleted event
+	if binding != nil {
+		d.EmitEvent(EventBindingDeleted, BindingData{
+			BindingID:  bindingID,
+			InstanceID: binding.InstanceID,
+			ClientID:   binding.ClientID,
+			Scope:      binding.Scope,
+		})
 	}
 
 	w.WriteHeader(http.StatusNoContent)
@@ -515,6 +575,13 @@ func (d *Daemon) handleAddKBSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Emit source added event
+	d.EmitEvent(EventKBSourceAdded, KBSourceData{
+		SourceID: source.SourceID,
+		Name:     source.Name,
+		Path:     source.Path,
+	})
+
 	writeJSON(w, http.StatusCreated, source)
 }
 
@@ -535,6 +602,9 @@ func (d *Daemon) handleGetKBSource(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleDeleteKBSource(w http.ResponseWriter, r *http.Request) {
 	sourceID := chi.URLParam(r, "sourceID")
 
+	// Get source info before deletion for the event
+	source, _ := d.kbSource.Get(r.Context(), sourceID)
+
 	result, err := d.kbSource.Remove(r.Context(), sourceID)
 	if err != nil {
 		d.logger.Error().Err(err).Msg("failed to remove KB source")
@@ -548,6 +618,16 @@ func (d *Daemon) handleDeleteKBSource(w http.ResponseWriter, r *http.Request) {
 		Int("vectors", result.VectorsDeleted).
 		Msg("removed KB source")
 
+	// Emit source removed event
+	name := sourceID
+	if source != nil {
+		name = source.Name
+	}
+	d.EmitEvent(EventKBSourceRemoved, KBSourceData{
+		SourceID: sourceID,
+		Name:     name,
+	})
+
 	// Return the removal statistics for transparency
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"documents_deleted": result.DocumentsDeleted,
@@ -558,13 +638,35 @@ func (d *Daemon) handleDeleteKBSource(w http.ResponseWriter, r *http.Request) {
 // handleSyncKBSource triggers a sync for a KB source.
 func (d *Daemon) handleSyncKBSource(w http.ResponseWriter, r *http.Request) {
 	sourceID := chi.URLParam(r, "sourceID")
+	startTime := time.Now()
+
+	// Emit sync started event
+	d.EmitEvent(EventKBSyncStarted, KBSourceData{
+		SourceID: sourceID,
+	})
 
 	result, err := d.kbSource.Sync(r.Context(), sourceID)
 	if err != nil {
 		d.logger.Error().Err(err).Msg("failed to sync KB source")
+		// Emit sync failed event
+		d.EmitEvent(EventKBSyncFailed, KBSyncResultData{
+			SourceID:     sourceID,
+			ErrorMessage: err.Error(),
+			Duration:     time.Since(startTime).String(),
+		})
 		writeError(w, http.StatusInternalServerError, "E_INTERNAL", err.Error())
 		return
 	}
+
+	// Emit sync completed event
+	d.EmitEvent(EventKBSyncCompleted, KBSyncResultData{
+		SourceID: sourceID,
+		Added:    result.Added,
+		Updated:  result.Updated,
+		Deleted:  result.Deleted,
+		Errors:   len(result.Errors),
+		Duration: time.Since(startTime).String(),
+	})
 
 	writeJSON(w, http.StatusOK, result)
 }
