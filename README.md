@@ -2,9 +2,29 @@
 
 Conduit is a local-first, security-first AI intelligence hub that connects AI clients (CLI tools, IDEs, desktop apps) to external tools via MCP (Model Context Protocol) servers. It provides document-to-knowledge transformation, sandboxed connector execution, and unified configuration management.
 
-## Quick Installation (Recommended)
+## Desktop App Installation (macOS)
 
-Install Conduit with a single command:
+Download and install via the graphical interface:
+
+1. **Download** the latest DMG from [GitHub Releases](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest)
+   - Apple Silicon (M1/M2/M3): `Conduit-x.x.x-arm64.dmg`
+   - Intel Mac: `Conduit-x.x.x-x64.dmg`
+
+2. **Install** by opening the DMG and dragging Conduit to Applications
+
+3. **Launch** Conduit - the **First-Run Setup Wizard** will guide you through:
+   - CLI installation (bundled in the app, no Go required)
+   - Dependency installation (Docker/Podman, Ollama)
+   - Service startup (Qdrant, FalkorDB)
+   - AI model download (qwen2.5-coder, nomic-embed-text, mistral)
+
+4. **Done!** The Dashboard shows real-time status of all services.
+
+> **Note:** The Desktop app bundles CLI binaries, so you don't need Go or any build tools installed.
+
+## CLI Installation
+
+For terminal-based installation, run:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
