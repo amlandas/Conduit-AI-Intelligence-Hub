@@ -1,0 +1,136 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --sidebar-width: 220px;
+    --titlebar-height: 52px;
+    --statusbar-height: 32px;
+  }
+
+  /* Disable text selection in UI elements */
+  .no-select {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  /* Enable dragging for titlebar area */
+  .drag-region {
+    -webkit-app-region: drag;
+  }
+
+  .no-drag {
+    -webkit-app-region: no-drag;
+  }
+
+  /* Vibrancy-like backgrounds */
+  .vibrancy-sidebar {
+    background-color: rgba(246, 246, 246, 0.8);
+    backdrop-filter: blur(20px);
+  }
+
+  .dark .vibrancy-sidebar {
+    background-color: rgba(30, 30, 30, 0.8);
+  }
+
+  /* Focus ring styles for accessibility */
+  .focus-ring:focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 3px rgb(0, 122, 255, 0.5);
+  }
+
+  /* Scrollbar styling */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background-color: rgba(0, 0, 0, 0.2);
+    border-radius: 4px;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(0, 0, 0, 0.3);
+  }
+
+  .dark ::-webkit-scrollbar-thumb {
+    background-color: rgba(255, 255, 255, 0.2);
+  }
+
+  .dark ::-webkit-scrollbar-thumb:hover {
+    background-color: rgba(255, 255, 255, 0.3);
+  }
+}
+
+@layer components {
+  /* Status indicator dot */
+  .status-dot {
+    @apply w-2 h-2 rounded-full;
+  }
+
+  .status-dot-online {
+    @apply bg-macos-green;
+  }
+
+  .status-dot-offline {
+    @apply bg-macos-text-tertiary dark:bg-macos-text-dark-tertiary;
+  }
+
+  .status-dot-warning {
+    @apply bg-macos-orange;
+  }
+
+  .status-dot-error {
+    @apply bg-macos-red;
+  }
+
+  /* Card component */
+  .card {
+    @apply bg-white dark:bg-macos-bg-dark-secondary rounded-lg shadow-macos;
+  }
+
+  /* Button base */
+  .btn {
+    @apply inline-flex items-center justify-center px-3 py-1.5 rounded-md text-sm font-medium transition-colors focus-ring no-select;
+  }
+
+  .btn-primary {
+    @apply bg-macos-blue text-white hover:bg-opacity-90;
+  }
+
+  .btn-secondary {
+    @apply bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary hover:bg-macos-bg-tertiary;
+  }
+
+  /* Sidebar nav item */
+  .sidebar-item {
+    @apply flex items-center gap-2 px-2 py-1.5 rounded-md text-sm no-select cursor-pointer transition-colors;
+  }
+
+  .sidebar-item:hover {
+    @apply bg-macos-separator dark:bg-macos-separator-dark;
+  }
+
+  .sidebar-item.active {
+    @apply bg-macos-blue bg-opacity-15 text-macos-blue;
+  }
+}
+
+/* Reduced motion preferences */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

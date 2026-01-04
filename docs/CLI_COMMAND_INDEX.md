@@ -48,6 +48,7 @@ This document provides a complete reference of all CLI commands available in Con
 | **System** | `conduit config show` | Show configuration |
 | **System** | `conduit backup` | Backup data |
 | **System** | `conduit uninstall` | Uninstall Conduit |
+| **System** | `conduit events` | Stream real-time events (SSE) |
 
 ---
 
@@ -662,6 +663,52 @@ conduit uninstall [options]
 | `--force` | Skip all confirmations |
 | `--keep-data` | Keep data directory |
 | `--remove-deps` | Also remove dependencies |
+
+### `conduit events`
+
+Stream real-time events from the daemon via Server-Sent Events (SSE).
+
+```bash
+conduit events [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--json` | Output raw JSON events |
+
+**Event Types**:
+| Category | Event | Description |
+|----------|-------|-------------|
+| Instance | `instance_created` | New instance created |
+| Instance | `instance_deleted` | Instance removed |
+| Instance | `instance_status_changed` | Status transition (starting, running, stopped) |
+| KB | `kb_source_added` | New KB source added |
+| KB | `kb_source_removed` | KB source removed |
+| KB | `kb_sync_started` | Sync operation started |
+| KB | `kb_sync_progress` | Sync progress update |
+| KB | `kb_sync_completed` | Sync completed |
+| KB | `kb_sync_failed` | Sync failed |
+| Binding | `binding_created` | New client binding |
+| Binding | `binding_deleted` | Binding removed |
+| System | `daemon_status` | Heartbeat (every 30s) |
+
+**Examples**:
+```bash
+# Pretty-printed event stream
+conduit events
+
+# Raw JSON output (for piping to jq)
+conduit events --json
+
+# Example output:
+# [14:32:05] 📚 kb_sync_completed
+#          source_id: src_abc123
+#          added: 15
+#          updated: 3
+#          deleted: 0
+#          duration: 2.3s
+```
 
 ---
 

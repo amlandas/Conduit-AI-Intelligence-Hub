@@ -41,6 +41,9 @@ type Daemon struct {
 	kbHybrid     *kb.HybridSearcher   // Combines FTS5 and semantic search
 	kbQdrant     *kb.QdrantManager    // Manages Qdrant container lifecycle
 
+	// Event system for real-time updates (SSE)
+	eventBus *EventBus
+
 	// State
 	mu        sync.RWMutex
 	running   bool
@@ -160,6 +163,9 @@ func New(cfg *config.Config) (*Daemon, error) {
 		}()
 	}
 
+	// Initialize EventBus for real-time updates
+	eventBus := NewEventBus(100) // Buffer 100 events per subscriber
+
 	d := &Daemon{
 		cfg:        cfg,
 		store:      st,
@@ -171,6 +177,7 @@ func New(cfg *config.Config) (*Daemon, error) {
 		kbSemantic: kbSemantic,
 		kbHybrid:   kbHybrid,
 		kbQdrant:   kbQdrant,
+		eventBus:   eventBus,
 		shutdownCh: make(chan struct{}),
 	}
 
@@ -243,6 +250,10 @@ func (d *Daemon) setupRouter() {
 
 		// Status endpoint
 		r.Get("/status", d.handleStatus)
+
+		// SSE event streaming endpoint
+		r.Get("/events", d.handleSSEEvents)
+		r.Get("/events/stats", d.handleSSEStats)
 	})
 
 	d.router = r
@@ -373,6 +384,11 @@ func (d *Daemon) Stop(ctx context.Context) error {
 		d.logger.Warn().Msg("shutdown timeout, some goroutines may still be running")
 	}
 
+	// Close event bus
+	if d.eventBus != nil {
+		d.eventBus.Close()
+	}
+
 	// Close store
 	if d.store != nil {
 		d.store.Close()
@@ -428,6 +444,16 @@ func (d *Daemon) Store() *store.Store {
 // Config returns the daemon's configuration.
 func (d *Daemon) Config() *config.Config {
 	return d.cfg
+}
+
+// EmitEvent publishes an event to all SSE subscribers.
+// This is a convenience wrapper around the EventBus.
+func (d *Daemon) EmitEvent(eventType EventType, data interface{}) {
+	if d.eventBus != nil {
+		if err := d.eventBus.Publish(eventType, data); err != nil {
+			d.logger.Warn().Err(err).Str("event", string(eventType)).Msg("failed to emit event")
+		}
+	}
 }
 
 // healthCheckLoop periodically checks the health of running instances.

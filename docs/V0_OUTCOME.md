@@ -515,15 +515,39 @@ During user testing, several critical bugs were identified and resolved:
 
 ---
 
-## Next Steps (V1 Roadmap)
+## V1 Roadmap
 
-1. **Audit Subsystem**: Static analysis of connector packages
-2. **Package Registry**: Curated connector marketplace
-3. **Secret Management**: Integration with system keychains
-4. **Remote API**: Optional HTTPS endpoint
-5. **Web Dashboard**: Real-time monitoring UI
-6. **Multi-User**: Workspace isolation
-7. **Metrics Export**: Prometheus/OpenTelemetry integration
+### V1.0 Focus: macOS Desktop Application
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **Desktop App** | 🔵 Designed | Native macOS app with Electron + React + shadcn/ui |
+| **SSE Events** | 📋 Planned | Real-time daemon-UI sync via Server-Sent Events |
+| **Mode System** | 📋 Planned | Default/Advanced/Developer tier modes |
+| **Dependency Dashboard** | 📋 Planned | Status of Ollama, Qdrant, FalkorDB, container runtime |
+
+**Design Document**: See `~/.claude/plans/zippy-riding-lemur.md` for full V1 UI design.
+
+### Recently Completed (Post-V0)
+
+| Feature | Status | Description |
+|---------|--------|-------------|
+| **KAG Entity Search** | ✅ Complete | Semantic entity search with RRF fusion |
+| **Entity Vectorization** | ✅ Complete | Entities stored in Qdrant `conduit_entities` collection |
+| **Entity Deduplication** | ✅ Complete | Normalized name + type deduplication |
+| **Hybrid Search for KB** | ✅ Complete | RRF fusion enabled in MCP server |
+
+### Future (V1.1+)
+
+| Feature | Priority | Description |
+|---------|----------|-------------|
+| Audit Subsystem | Medium | Static analysis of connector packages |
+| Package Registry | Medium | Curated connector marketplace |
+| Secret Management | Medium | Integration with system keychains |
+| Remote API | Low | Optional HTTPS endpoint (Developer mode) |
+| Multi-User | Low | Workspace isolation |
+| Windows/Linux Desktop | Low | Cross-platform desktop support |
+| Metrics Export | Low | Prometheus/OpenTelemetry integration |
 
 ---
 
