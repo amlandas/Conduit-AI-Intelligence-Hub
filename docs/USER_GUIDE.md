@@ -690,11 +690,14 @@ Commands:
 
 ### Querying the Knowledge Graph
 
-Use the `kag-query` command to search entities and relationships:
+Use the `kag-query` command to search entities and relationships. Queries are **tokenized** for better matching - each word is searched separately, and common words like "summary", "information", "the" are filtered out.
 
 ```bash
 # Basic query
 conduit kb kag-query "Kubernetes"
+
+# Natural language queries work well (tokenized matching)
+conduit kb kag-query "threat model summary in ASL-3 deployment"
 
 # Query with entity hints
 conduit kb kag-query "container orchestration" --entities Docker,Kubernetes
@@ -705,6 +708,12 @@ conduit kb kag-query "authentication" --relations
 # Limit results
 conduit kb kag-query "machine learning" --limit 20
 ```
+
+**Query Matching Features:**
+- **Tokenized search**: Queries are split into words, matching ANY word
+- **Stopword removal**: Common words filtered for better precision
+- **Case-insensitive**: "Kubernetes" matches "kubernetes"
+- **Match scoring**: Exact matches ranked higher than partial matches
 
 **Example Output**:
 ```
@@ -722,6 +731,30 @@ Knowledge Graph Results for: Kubernetes
 
 Found 3 entities, 3 relationships
 ```
+
+### Entity Deduplication
+
+During extraction, entities with similar names may be created from different document chunks. Use `kag-dedupe` to merge duplicates:
+
+```bash
+# Preview duplicates without making changes
+conduit kb kag-dedupe --dry-run
+
+# Example output:
+# Found 2313 entities in 1949 groups
+# Duplicate groups: 327 (containing 364 extra entities)
+# --dry-run: Showing what would be merged:
+#   "threat models" (concept): 2 entities → 1
+#   "Kubernetes" (technology): 3 entities → 1
+
+# Merge all duplicates
+conduit kb kag-dedupe
+```
+
+**Merge Strategy:**
+- **Highest confidence**: Keeps the version with highest extraction confidence
+- **Best description**: Uses the longest (most informative) description
+- **Combined sources**: Preserves references to all source documents
 
 ### KAG vs RAG: When to Use Each
 

@@ -239,7 +239,9 @@ conduit kb kag-status             # Show detailed dashboard with progress bar
 conduit kb kag-retry              # Retry failed extractions
 conduit kb kag-retry --dry-run    # Preview what would be retried
 conduit kb kag-retry --max-retries 3  # Retry with custom attempts (max: 5)
-conduit kb kag-query <query>      # Query the knowledge graph
+conduit kb kag-dedupe             # Merge duplicate entities
+conduit kb kag-dedupe --dry-run   # Preview duplicates without merging
+conduit kb kag-query <query>      # Query the knowledge graph (tokenized matching)
 conduit kb kag-query <query> --entities Docker,Kubernetes  # With entity hints
 conduit kb kag-query <query> --max-hops 3  # Multi-hop traversal (max: 3)
 ```
