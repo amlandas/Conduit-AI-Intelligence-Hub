@@ -1509,6 +1509,7 @@ Examples:
 	cmd.AddCommand(kbMigrateCmd())
 	cmd.AddCommand(kbKagSyncCmd())
 	cmd.AddCommand(kbKagStatusCmd())
+	cmd.AddCommand(kbKagRetryCmd())
 	cmd.AddCommand(kbKagQueryCmd())
 
 	return cmd
@@ -4609,9 +4610,33 @@ Examples:
 			// Show completion summary
 			totalTime := time.Since(syncStartTime)
 			fmt.Println()
-			fmt.Printf("Processed: %d chunks in %s\n", processed, formatDuration(totalTime))
+			fmt.Println("Extraction Summary")
+			fmt.Println("───────────────────────────────────────")
+			fmt.Printf("Processed:   %d chunks in %s\n", processed, formatDuration(totalTime))
 			if errors > 0 {
-				fmt.Printf("Errors:    %d\n", errors)
+				fmt.Printf("Errors:      %d chunks failed\n", errors)
+
+				// Show error breakdown
+				errorRows, err := db.DB().QueryContext(ctx, `
+					SELECT error_message FROM kb_extraction_status WHERE status = 'error'
+				`)
+				if err == nil {
+					defer errorRows.Close()
+					errorTypes := make(map[string]int)
+					for errorRows.Next() {
+						var errMsg string
+						errorRows.Scan(&errMsg)
+						errType := categorizeError(errMsg)
+						errorTypes[errType]++
+					}
+					for errType, count := range errorTypes {
+						fmt.Printf("  - %-18s %d\n", errType+":", count)
+					}
+				}
+
+				fmt.Println()
+				fmt.Println("Note: Failed chunks are still searchable via FTS5")
+				fmt.Println("Use 'conduit kb kag-retry' to retry failed extractions")
 			}
 
 			// Show stats
@@ -4637,7 +4662,13 @@ Examples:
 func kbKagStatusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "kag-status",
-		Short: "Show KAG extraction status",
+		Short: "Show detailed KAG extraction status dashboard",
+		Long: `Display a comprehensive dashboard of KAG extraction status including:
+- Progress bar with completion percentage
+- Entity and relation extraction statistics
+- Error breakdown by type
+- System resource usage (CPU, RAM, storage)
+- Ollama model status`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Open database
 			homeDir, _ := os.UserHomeDir()
@@ -4650,10 +4681,13 @@ func kbKagStatusCmd() *cobra.Command {
 
 			ctx := cmd.Context()
 
+			fmt.Println()
 			fmt.Println("KAG Extraction Status")
-			fmt.Println("═══════════════════════════════════════")
+			fmt.Println("═══════════════════════════════════════════════════════════")
+			fmt.Println()
 
-			// Count by status
+			// Get status counts
+			statusCounts := make(map[string]int)
 			rows, err := db.DB().QueryContext(ctx, `
 				SELECT status, COUNT(*) as count
 				FROM kb_extraction_status
@@ -4665,7 +4699,7 @@ func kbKagStatusCmd() *cobra.Command {
 					var status string
 					var count int
 					rows.Scan(&status, &count)
-					fmt.Printf("%-12s %d chunks\n", status+":", count)
+					statusCounts[status] = count
 				}
 			}
 
@@ -4677,9 +4711,34 @@ func kbKagStatusCmd() *cobra.Command {
 				WHERE s.status IS NULL
 			`).Scan(&pendingCount)
 			if pendingCount > 0 {
-				fmt.Printf("%-12s %d chunks\n", "pending:", pendingCount)
+				statusCounts["pending"] = pendingCount
 			}
 
+			// Calculate totals
+			var totalChunks int
+			db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_chunks").Scan(&totalChunks)
+
+			completedCount := statusCounts["completed"]
+			errorCount := statusCounts["error"]
+			pendingTotal := pendingCount
+
+			// Progress bar
+			fmt.Println("Progress:")
+			progressPercent := 0.0
+			if totalChunks > 0 {
+				progressPercent = float64(completedCount+errorCount) / float64(totalChunks) * 100
+			}
+
+			barWidth := 40
+			filledWidth := int(float64(barWidth) * progressPercent / 100)
+			bar := strings.Repeat("█", filledWidth) + strings.Repeat("░", barWidth-filledWidth)
+			fmt.Printf("  %s %d/%d chunks (%.1f%%)\n", bar, completedCount+errorCount, totalChunks, progressPercent)
+			fmt.Println()
+
+			// Status breakdown
+			fmt.Printf("  Completed:  %d (%.1f%%)\n", completedCount, float64(completedCount)/float64(totalChunks)*100)
+			fmt.Printf("  Errors:     %d (%.1f%%)\n", errorCount, float64(errorCount)/float64(totalChunks)*100)
+			fmt.Printf("  Pending:    %d (%.1f%%)\n", pendingTotal, float64(pendingTotal)/float64(totalChunks)*100)
 			fmt.Println()
 
 			// Entity and relation counts
@@ -4687,35 +4746,361 @@ func kbKagStatusCmd() *cobra.Command {
 			db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_entities").Scan(&entityCount)
 			db.DB().QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_relations").Scan(&relationCount)
 
-			fmt.Println("Knowledge Graph")
-			fmt.Println("───────────────────────────────────────")
-			fmt.Printf("Entities:    %d\n", entityCount)
-			fmt.Printf("Relations:   %d\n", relationCount)
+			fmt.Println("Entities & Relations:")
+			fmt.Println("───────────────────────────────────────────────────────────")
+			fmt.Printf("  Entities:   %d extracted\n", entityCount)
+			fmt.Printf("  Relations:  %d extracted\n", relationCount)
+			if completedCount > 0 {
+				fmt.Printf("  Avg/chunk:  %.1f entities, %.1f relations\n",
+					float64(entityCount)/float64(completedCount),
+					float64(relationCount)/float64(completedCount))
+			}
+			fmt.Println()
 
-			// Entity type breakdown
-			if entityCount > 0 {
-				fmt.Println()
-				fmt.Println("Entity Types:")
-				typeRows, err := db.DB().QueryContext(ctx, `
-					SELECT type, COUNT(*) as count
-					FROM kb_entities
-					GROUP BY type
-					ORDER BY count DESC
+			// Error breakdown (if errors exist)
+			if errorCount > 0 {
+				fmt.Println("Error Breakdown:")
+				fmt.Println("───────────────────────────────────────────────────────────")
+
+				errorRows, err := db.DB().QueryContext(ctx, `
+					SELECT error_message FROM kb_extraction_status WHERE status = 'error'
 				`)
 				if err == nil {
-					defer typeRows.Close()
-					for typeRows.Next() {
-						var entityType string
-						var count int
-						typeRows.Scan(&entityType, &count)
-						fmt.Printf("  %-15s %d\n", entityType, count)
+					defer errorRows.Close()
+					errorTypes := make(map[string]int)
+					for errorRows.Next() {
+						var errMsg string
+						errorRows.Scan(&errMsg)
+						errType := categorizeError(errMsg)
+						errorTypes[errType]++
+					}
+					for errType, count := range errorTypes {
+						fmt.Printf("  %-20s %d chunks\n", errType+":", count)
 					}
 				}
+				fmt.Println()
+			}
+
+			// System Resources
+			fmt.Println("System Resources:")
+			fmt.Println("───────────────────────────────────────────────────────────")
+
+			// RAM usage (Go runtime)
+			var memStats runtime.MemStats
+			runtime.ReadMemStats(&memStats)
+			ramMB := float64(memStats.Alloc) / 1024 / 1024
+			fmt.Printf("  RAM:        %.1f MB (Go process)\n", ramMB)
+
+			// Storage usage (.conduit directory)
+			conduitDir := filepath.Join(homeDir, ".conduit")
+			var totalSize int64
+			filepath.Walk(conduitDir, func(path string, info os.FileInfo, err error) error {
+				if err == nil && !info.IsDir() {
+					totalSize += info.Size()
+				}
+				return nil
+			})
+			storageMB := float64(totalSize) / 1024 / 1024
+			fmt.Printf("  Storage:    %.1f MB (~/.conduit/)\n", storageMB)
+
+			// CPU cores
+			fmt.Printf("  CPU Cores:  %d available\n", runtime.NumCPU())
+			fmt.Println()
+
+			// Ollama Status
+			fmt.Println("Ollama Status:")
+			fmt.Println("───────────────────────────────────────────────────────────")
+
+			ollamaBin := findOllamaBinary()
+			ollamaOut, err := exec.Command(ollamaBin, "ps").Output()
+			if err != nil {
+				fmt.Println("  Status:     not running or not accessible")
+			} else {
+				lines := strings.Split(strings.TrimSpace(string(ollamaOut)), "\n")
+				if len(lines) <= 1 {
+					fmt.Println("  Status:     running (no models loaded)")
+				} else {
+					// Parse loaded models
+					for i, line := range lines {
+						if i == 0 {
+							continue // Skip header
+						}
+						fields := strings.Fields(line)
+						if len(fields) >= 4 {
+							modelName := fields[0]
+							size := fields[2]
+							until := strings.Join(fields[4:], " ")
+							fmt.Printf("  Model:      %s\n", modelName)
+							fmt.Printf("  Size:       %s\n", size)
+							fmt.Printf("  Until:      %s\n", until)
+						}
+					}
+				}
+			}
+			fmt.Println()
+
+			// Suggested commands
+			fmt.Println("Commands:")
+			fmt.Println("───────────────────────────────────────────────────────────")
+			if errorCount > 0 {
+				fmt.Println("  conduit kb kag-retry        # Retry failed chunks")
+			}
+			if pendingTotal > 0 {
+				fmt.Println("  conduit kb kag-sync         # Continue extraction")
+			}
+			fmt.Println("  conduit kb kag-sync --force # Re-extract all chunks")
+			fmt.Println()
+
+			return nil
+		},
+	}
+}
+
+func kbKagRetryCmd() *cobra.Command {
+	var chunkIDs []string
+	var maxRetries int
+	var dryRun bool
+
+	cmd := &cobra.Command{
+		Use:   "kag-retry",
+		Short: "Retry failed KAG extractions",
+		Long: `Retry entity extraction for failed chunks.
+
+Without flags, retries all failed chunks. Use --chunk-id to retry specific chunks.
+
+Examples:
+  conduit kb kag-retry                    # Retry all failed chunks
+  conduit kb kag-retry --chunk-id abc123  # Retry specific chunk
+  conduit kb kag-retry --dry-run          # Preview what would be retried
+  conduit kb kag-retry --max-retries 3    # Retry with 3 attempts`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Open database
+			homeDir, _ := os.UserHomeDir()
+			dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+			db, err := store.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			ctx := cmd.Context()
+
+			// Build query for failed chunks
+			var failedChunks []struct {
+				ChunkID    string
+				DocumentID string
+				Content    string
+				Title      string
+				Error      string
+			}
+
+			if len(chunkIDs) > 0 {
+				// Specific chunks
+				for _, cid := range chunkIDs {
+					var chunk struct {
+						ChunkID    string
+						DocumentID string
+						Content    string
+						Title      string
+						Error      string
+					}
+					err := db.DB().QueryRowContext(ctx, `
+						SELECT c.chunk_id, c.document_id, c.content, COALESCE(d.title, ''), COALESCE(s.error_message, '')
+						FROM kb_chunks c
+						LEFT JOIN kb_documents d ON c.document_id = d.document_id
+						LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+						WHERE c.chunk_id = ? AND s.status = 'error'
+					`, cid).Scan(&chunk.ChunkID, &chunk.DocumentID, &chunk.Content, &chunk.Title, &chunk.Error)
+					if err == nil {
+						failedChunks = append(failedChunks, chunk)
+					}
+				}
+			} else {
+				// All failed chunks
+				rows, err := db.DB().QueryContext(ctx, `
+					SELECT c.chunk_id, c.document_id, c.content, COALESCE(d.title, ''), COALESCE(s.error_message, '')
+					FROM kb_chunks c
+					JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+					LEFT JOIN kb_documents d ON c.document_id = d.document_id
+					WHERE s.status = 'error'
+				`)
+				if err != nil {
+					return fmt.Errorf("query failed chunks: %w", err)
+				}
+				defer rows.Close()
+
+				for rows.Next() {
+					var chunk struct {
+						ChunkID    string
+						DocumentID string
+						Content    string
+						Title      string
+						Error      string
+					}
+					if err := rows.Scan(&chunk.ChunkID, &chunk.DocumentID, &chunk.Content, &chunk.Title, &chunk.Error); err != nil {
+						continue
+					}
+					failedChunks = append(failedChunks, chunk)
+				}
+			}
+
+			if len(failedChunks) == 0 {
+				fmt.Println("No failed chunks to retry")
+				return nil
+			}
+
+			fmt.Printf("Found %d failed chunks\n", len(failedChunks))
+
+			// Show error breakdown
+			errorCounts := make(map[string]int)
+			for _, chunk := range failedChunks {
+				errType := categorizeError(chunk.Error)
+				errorCounts[errType]++
+			}
+			fmt.Println("\nError breakdown:")
+			for errType, count := range errorCounts {
+				fmt.Printf("  %-20s %d chunks\n", errType+":", count)
+			}
+			fmt.Println()
+
+			if dryRun {
+				fmt.Println("Dry run mode - no changes made")
+				fmt.Println("\nChunks that would be retried:")
+				for i, chunk := range failedChunks {
+					if i >= 10 {
+						fmt.Printf("  ... and %d more\n", len(failedChunks)-10)
+						break
+					}
+					fmt.Printf("  %s: %s\n", chunk.ChunkID[:12], truncateString(chunk.Error, 50))
+				}
+				return nil
+			}
+
+			// Create Ollama provider
+			ollamaHost := "http://localhost:11434"
+			ollamaModel := "mistral:7b-instruct-q4_K_M"
+
+			provider, err := kb.NewOllamaProvider(kb.OllamaProviderConfig{
+				Host:  ollamaHost,
+				Model: ollamaModel,
+			})
+			if err != nil {
+				return fmt.Errorf("create provider: %w", err)
+			}
+			defer provider.Close()
+
+			// Check if provider is available
+			if !provider.IsAvailable(ctx) {
+				return fmt.Errorf("Ollama is not available at %s", ollamaHost)
+			}
+
+			// Warm up model
+			fmt.Printf("Warming up %s model...", ollamaModel)
+			if err := provider.WarmUp(ctx); err != nil {
+				fmt.Println(" failed")
+				return fmt.Errorf("warmup failed: %w", err)
+			}
+			fmt.Println(" ready")
+
+			// Create extractor config
+			kagCfg := kb.DefaultKAGConfig()
+			if maxRetries > 0 {
+				kagCfg.Extraction.RetryAttempts = maxRetries
+			}
+
+			extractor, err := kb.NewEntityExtractor(kb.EntityExtractorConfig{
+				Provider: provider,
+				DB:       db.DB(),
+				Config:   kagCfg,
+			})
+			if err != nil {
+				return fmt.Errorf("create extractor: %w", err)
+			}
+			defer extractor.Close()
+
+			// Process failed chunks
+			fmt.Printf("\nRetrying %d chunks (max %d attempts each):\n", len(failedChunks), kagCfg.Extraction.RetryAttempts)
+
+			successCount := 0
+			failCount := 0
+			startTime := time.Now()
+
+			for i, chunk := range failedChunks {
+				fmt.Printf("[%d/%d] %s...", i+1, len(failedChunks), chunk.ChunkID[:12])
+
+				result, err := extractor.ExtractFromChunkWithRetry(
+					ctx,
+					chunk.ChunkID,
+					chunk.DocumentID,
+					chunk.Title,
+					chunk.Content,
+					maxRetries,
+				)
+
+				if err != nil {
+					fmt.Printf(" failed: %s\n", truncateString(err.Error(), 40))
+					failCount++
+				} else {
+					fmt.Printf(" ✓ %d entities, %d relations\n", len(result.Entities), len(result.Relations))
+					successCount++
+				}
+			}
+
+			elapsed := time.Since(startTime)
+			fmt.Println()
+			fmt.Println("Retry Summary")
+			fmt.Println("───────────────────────────────────────")
+			fmt.Printf("Successful:  %d chunks\n", successCount)
+			fmt.Printf("Failed:      %d chunks\n", failCount)
+			fmt.Printf("Duration:    %s\n", elapsed.Round(time.Second))
+
+			if failCount > 0 {
+				fmt.Println("\nSome chunks still failed. Check 'conduit kb kag-status' for details.")
 			}
 
 			return nil
 		},
 	}
+
+	cmd.Flags().StringSliceVar(&chunkIDs, "chunk-id", nil, "Specific chunk IDs to retry (can repeat)")
+	cmd.Flags().IntVar(&maxRetries, "max-retries", 0, "Maximum retry attempts (default: 2, max: 5)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Preview without executing")
+
+	return cmd
+}
+
+// categorizeError classifies extraction errors into categories
+func categorizeError(errMsg string) string {
+	errLower := strings.ToLower(errMsg)
+
+	if strings.Contains(errLower, "incomplete json") || strings.Contains(errLower, "incomplete") {
+		return "Incomplete JSON"
+	}
+	if strings.Contains(errLower, "invalid escape") || strings.Contains(errLower, "\\_") {
+		return "Invalid escape"
+	}
+	if strings.Contains(errLower, "array") || strings.Contains(errLower, "schema") || strings.Contains(errLower, "type mismatch") {
+		return "Schema mismatch"
+	}
+	if strings.Contains(errLower, "timeout") {
+		return "Timeout"
+	}
+	if strings.Contains(errLower, "connection") || strings.Contains(errLower, "unavailable") {
+		return "Connection"
+	}
+	if strings.Contains(errLower, "parse json") || strings.Contains(errLower, "no json found") {
+		return "Parse error"
+	}
+
+	return "Other"
+}
+
+// truncateString truncates a string to the specified length
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
 }
 
 func kbKagQueryCmd() *cobra.Command {
