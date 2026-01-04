@@ -23,6 +23,12 @@ export interface ConduitAPI {
   removeKBSource: (id: string) => Promise<unknown>
   syncKBSource: (id: string) => Promise<unknown>
   searchKB: (query: string, options?: object) => Promise<unknown>
+  searchKAG: (query: string, options?: object) => Promise<unknown>
+
+  // Permissions (Advanced Mode)
+  getInstancePermissions: (id: string) => Promise<unknown>
+  setInstancePermission: (id: string, permId: string, granted: boolean) => Promise<unknown>
+  auditInstance: (id: string) => Promise<unknown>
 
   // Bindings
   listBindings: () => Promise<unknown>
@@ -65,6 +71,13 @@ const conduitAPI: ConduitAPI = {
   removeKBSource: (id) => ipcRenderer.invoke('kb:remove-source', id),
   syncKBSource: (id) => ipcRenderer.invoke('kb:sync', id),
   searchKB: (query, options) => ipcRenderer.invoke('kb:search', query, options),
+  searchKAG: (query, options) => ipcRenderer.invoke('kb:kag-search', query, options),
+
+  // Permissions (Advanced Mode)
+  getInstancePermissions: (id) => ipcRenderer.invoke('instances:permissions', id),
+  setInstancePermission: (id, permId, granted) =>
+    ipcRenderer.invoke('instances:set-permission', id, permId, granted),
+  auditInstance: (id) => ipcRenderer.invoke('instances:audit', id),
 
   // Bindings
   listBindings: () => ipcRenderer.invoke('bindings:list'),

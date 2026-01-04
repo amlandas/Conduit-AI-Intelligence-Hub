@@ -1,10 +1,22 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, lazy, Suspense, useMemo, useCallback } from 'react'
 import { NavigationShell } from './components/layout/NavigationShell'
-import { DashboardView } from './components/dashboard/DashboardView'
-import { KBView } from './components/kb/KBView'
-import { ConnectorsView } from './components/connectors/ConnectorsView'
-import { SettingsView } from './components/settings/SettingsView'
 import { useDaemonStore, useInstancesStore, useKBStore, useSettingsStore } from './stores'
+import { Loader2 } from 'lucide-react'
+
+// Lazy load views for better initial load performance
+const DashboardView = lazy(() => import('./components/dashboard/DashboardView').then(m => ({ default: m.DashboardView })))
+const KBView = lazy(() => import('./components/kb/KBView').then(m => ({ default: m.KBView })))
+const ConnectorsView = lazy(() => import('./components/connectors/ConnectorsView').then(m => ({ default: m.ConnectorsView })))
+const SettingsView = lazy(() => import('./components/settings/SettingsView').then(m => ({ default: m.SettingsView })))
+
+// Loading fallback component
+function ViewLoader(): JSX.Element {
+  return (
+    <div className="h-full flex items-center justify-center">
+      <Loader2 className="w-8 h-8 animate-spin text-macos-blue" />
+    </div>
+  )
+}
 
 type Route = '/' | '/kb' | '/connectors' | '/settings'
 
@@ -115,7 +127,8 @@ export default function App(): JSX.Element {
     }
   }, [])
 
-  const renderView = (): JSX.Element => {
+  // Memoize view rendering to prevent unnecessary re-renders
+  const currentView = useMemo(() => {
     switch (route) {
       case '/kb':
         return <KBView />
@@ -126,16 +139,28 @@ export default function App(): JSX.Element {
       default:
         return <DashboardView />
     }
-  }
+  }, [route])
+
+  // Memoize navigation handler for NavigationShell
+  const handleNavigate = useCallback((newRoute: Route) => {
+    setRoute(newRoute)
+  }, [])
+
+  // Memoize search open change handler
+  const handleSearchOpenChange = useCallback((open: boolean) => {
+    setSearchOpen(open)
+  }, [])
 
   return (
     <NavigationShell
       currentRoute={route}
-      onNavigate={setRoute}
+      onNavigate={handleNavigate}
       searchOpen={searchOpen}
-      onSearchOpenChange={setSearchOpen}
+      onSearchOpenChange={handleSearchOpenChange}
     >
-      {renderView()}
+      <Suspense fallback={<ViewLoader />}>
+        {currentView}
+      </Suspense>
     </NavigationShell>
   )
 }
