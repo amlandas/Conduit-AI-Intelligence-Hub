@@ -41,6 +41,54 @@ export interface ServiceStatus {
   error?: string
 }
 
+export interface UninstallInfo {
+  hasDaemonService: boolean
+  daemonRunning: boolean
+  servicePath: string | null
+
+  hasBinaries: boolean
+  conduitPath: string | null
+  daemonPath: string | null
+  conduitVersion: string | null
+
+  hasDataDir: boolean
+  dataDirPath: string | null
+  dataDirSize: string | null
+  dataDirSizeRaw: number
+
+  containerRuntime: string | null
+  hasQdrantContainer: boolean
+  qdrantContainerRunning: boolean
+  qdrantVectorCount: number
+  hasFalkorDBContainer: boolean
+  falkordbContainerRunning: boolean
+
+  hasOllama: boolean
+  ollamaRunning: boolean
+  ollamaModels: string[]
+  ollamaSize: string | null
+  ollamaSizeRaw: number
+
+  hasShellConfig: boolean
+  shellConfigFiles: string[]
+
+  hasSymlinks: boolean
+  symlinks: string[]
+}
+
+export interface UninstallOptions {
+  tier: 'keep-data' | 'all' | 'full'
+  removeOllama: boolean
+  force: boolean
+}
+
+export interface UninstallResult {
+  success: boolean
+  itemsRemoved: string[]
+  itemsFailed: string[]
+  errors: string[]
+}
+
 export interface ConduitAPI {
   // App info
   getVersion: () => Promise<string>
@@ -103,6 +151,12 @@ export interface ConduitAPI {
   // Shell operations
   openExternal: (url: string) => Promise<void>
   openTerminal: () => Promise<void>
+
+  // Uninstall
+  getUninstallInfo: () => Promise<UninstallInfo>
+  uninstallDryRun: (options: UninstallOptions) => Promise<string[]>
+  executeUninstall: (options: UninstallOptions) => Promise<UninstallResult>
+  openDataDir: () => Promise<void>
 
   // Event listeners
   onEvent: (callback: (event: unknown) => void) => () => void
@@ -184,6 +238,12 @@ const conduitAPI: ConduitAPI = {
   // Shell operations
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
   openTerminal: () => ipcRenderer.invoke('shell:open-terminal'),
+
+  // Uninstall
+  getUninstallInfo: () => ipcRenderer.invoke('uninstall:get-info'),
+  uninstallDryRun: (options) => ipcRenderer.invoke('uninstall:dry-run', options),
+  executeUninstall: (options) => ipcRenderer.invoke('uninstall:execute', options),
+  openDataDir: () => ipcRenderer.invoke('uninstall:open-data-dir'),
 
   // Event listeners with cleanup
   onEvent: (callback) => {

@@ -3,6 +3,7 @@ import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupIpcHandlers } from './ipc'
 import { setupSetupIpcHandlers } from './setup-ipc'
+import { setupUninstallIpcHandlers } from './uninstall-ipc'
 import { createApplicationMenu } from './menu'
 import { initAutoUpdater } from './updater'
 
@@ -54,6 +55,7 @@ app.whenReady().then(() => {
   createApplicationMenu()
   setupIpcHandlers()
   setupSetupIpcHandlers()
+  setupUninstallIpcHandlers()
   createWindow()
 
   // Initialize auto-updater after window is created

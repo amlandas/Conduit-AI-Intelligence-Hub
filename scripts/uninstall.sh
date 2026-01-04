@@ -852,6 +852,48 @@ print_summary() {
     echo ""
 }
 
+# Delegate to CLI if available (ensures consistent behavior)
+delegate_to_cli() {
+    local cli_path=""
+
+    # Find conduit CLI
+    if command_exists conduit; then
+        cli_path=$(command -v conduit)
+    elif [[ -f "$INSTALL_DIR/conduit" ]]; then
+        cli_path="$INSTALL_DIR/conduit"
+    fi
+
+    if [[ -z "$cli_path" ]]; then
+        return 1  # CLI not found, use fallback
+    fi
+
+    info "Using Conduit CLI for uninstallation..."
+    echo ""
+
+    # Build CLI flags
+    local cli_flags=""
+    if [[ "$FORCE" == "true" ]]; then
+        cli_flags="--force"
+    fi
+
+    # Determine tier based on whether we're removing data
+    if [[ "$REMOVE_ALL" == "true" ]]; then
+        cli_flags="$cli_flags --all"
+    else
+        # Interactive mode - let CLI handle it
+        cli_flags=""
+    fi
+
+    # Execute CLI uninstall for core components
+    if [[ -n "$cli_flags" ]]; then
+        "$cli_path" uninstall $cli_flags || true
+    else
+        "$cli_path" uninstall || true
+    fi
+
+    return 0
+}
+
 # Main uninstallation flow
 main() {
     parse_args "$@"
@@ -871,13 +913,27 @@ main() {
         exit 0
     fi
 
-    # Execute uninstallation steps (continue on error)
-    stop_daemon || true
-    remove_service || true
-    remove_binaries || true
-    remove_all_data || true
-    cleanup_shell_config || true
-    remove_dependencies || true
+    # Try to delegate to CLI for core uninstall (consistent behavior)
+    # If CLI exists, it handles: daemon, service, binaries, data, shell config
+    if delegate_to_cli; then
+        info "Core uninstall completed via CLI"
+    else
+        # Fallback: CLI not available, use bash implementation
+        warn "Conduit CLI not found, using fallback uninstallation..."
+        echo ""
+
+        # Execute uninstallation steps (continue on error)
+        stop_daemon || true
+        remove_service || true
+        remove_binaries || true
+        remove_all_data || true
+        cleanup_shell_config || true
+    fi
+
+    # Script always handles dependency removal (CLI doesn't remove Docker/Podman/Go)
+    if [[ "$REMOVE_ALL" == "true" ]] || confirm "Remove Conduit dependencies (Ollama, container runtime)?"; then
+        remove_dependencies || true
+    fi
 
     print_summary
 }
