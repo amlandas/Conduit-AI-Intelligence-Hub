@@ -521,12 +521,20 @@ During user testing, several critical bugs were identified and resolved:
 
 | Feature | Status | Description |
 |---------|--------|-------------|
-| **Desktop App** | 🔵 Designed | Native macOS app with Electron + React + shadcn/ui |
-| **SSE Events** | 📋 Planned | Real-time daemon-UI sync via Server-Sent Events |
-| **Mode System** | 📋 Planned | Default/Advanced/Developer tier modes |
-| **Dependency Dashboard** | 📋 Planned | Status of Ollama, Qdrant, FalkorDB, container runtime |
+| **Desktop App** | ✅ Complete | Native macOS app with Electron + React + shadcn/ui |
+| **SSE Events** | ✅ Complete | Real-time daemon-UI sync via Server-Sent Events |
+| **Mode System** | ✅ Complete | Default/Advanced/Developer tier modes |
+| **Dependency Dashboard** | ✅ Complete | Status of Ollama, Qdrant, FalkorDB, container runtime |
+| **Auto-Updates** | ✅ Complete | electron-updater with GitHub Releases integration |
+| **DMG Packaging** | ✅ Complete | Signed DMG builds for distribution |
 
-**Design Document**: See `~/.claude/plans/zippy-riding-lemur.md` for full V1 UI design.
+**Implementation PRs**:
+- PR #11: Phase 1 & 2 - Electron foundation + Core views with SSE sync
+- PR #12: Phase 4 & 5 - Advanced/Developer modes + Performance optimization
+- PR #13: Phase 6 - Distribution with auto-updates
+- PR #14: Branding consistency (app ID: `dev.simpleflo.conduit`)
+
+**Desktop App Location**: `apps/conduit-desktop/`
 
 ### Recently Completed (Post-V0)
 
