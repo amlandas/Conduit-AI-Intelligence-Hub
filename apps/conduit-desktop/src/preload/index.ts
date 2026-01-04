@@ -1,6 +1,17 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 
+export interface UpdateStatus {
+  checking: boolean
+  available: boolean
+  downloading: boolean
+  downloaded: boolean
+  progress: number
+  error: string | null
+  version: string | null
+  releaseNotes: string | null
+}
+
 export interface ConduitAPI {
   // App info
   getVersion: () => Promise<string>
@@ -39,6 +50,13 @@ export interface ConduitAPI {
   connectEvents: () => Promise<unknown>
   disconnectEvents: () => Promise<unknown>
   getEventsStatus: () => Promise<unknown>
+
+  // Auto-updates
+  checkForUpdates: () => Promise<UpdateStatus>
+  downloadUpdate: () => Promise<void>
+  installUpdate: () => void
+  getUpdateStatus: () => Promise<UpdateStatus>
+  onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void
 
   // Event listeners
   onEvent: (callback: (event: unknown) => void) => () => void
@@ -88,6 +106,17 @@ const conduitAPI: ConduitAPI = {
   connectEvents: () => ipcRenderer.invoke('events:connect'),
   disconnectEvents: () => ipcRenderer.invoke('events:disconnect'),
   getEventsStatus: () => ipcRenderer.invoke('events:status'),
+
+  // Auto-updates
+  checkForUpdates: () => ipcRenderer.invoke('update:check'),
+  downloadUpdate: () => ipcRenderer.invoke('update:download'),
+  installUpdate: () => ipcRenderer.invoke('update:install'),
+  getUpdateStatus: () => ipcRenderer.invoke('update:get-status'),
+  onUpdateStatus: (callback) => {
+    const handler = (_: unknown, status: UpdateStatus): void => callback(status)
+    ipcRenderer.on('update:status', handler)
+    return () => ipcRenderer.removeListener('update:status', handler)
+  },
 
   // Event listeners with cleanup
   onEvent: (callback) => {

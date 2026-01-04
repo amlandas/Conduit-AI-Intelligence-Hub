@@ -1,6 +1,7 @@
 import { useEffect, useState, lazy, Suspense, useMemo, useCallback } from 'react'
 import { NavigationShell } from './components/layout/NavigationShell'
 import { useDaemonStore, useInstancesStore, useKBStore, useSettingsStore } from './stores'
+import { UpdateBanner } from './components/ui/UpdateBanner'
 import { Loader2 } from 'lucide-react'
 
 // Lazy load views for better initial load performance
@@ -152,15 +153,22 @@ export default function App(): JSX.Element {
   }, [])
 
   return (
-    <NavigationShell
-      currentRoute={route}
-      onNavigate={handleNavigate}
-      searchOpen={searchOpen}
-      onSearchOpenChange={handleSearchOpenChange}
-    >
-      <Suspense fallback={<ViewLoader />}>
-        {currentView}
-      </Suspense>
-    </NavigationShell>
+    <div className="h-screen flex flex-col">
+      {/* Global update banner */}
+      <UpdateBanner />
+
+      {/* Main app */}
+      <NavigationShell
+        currentRoute={route}
+        onNavigate={handleNavigate}
+        searchOpen={searchOpen}
+        onSearchOpenChange={handleSearchOpenChange}
+        className="flex-1 min-h-0"
+      >
+        <Suspense fallback={<ViewLoader />}>
+          {currentView}
+        </Suspense>
+      </NavigationShell>
+    </div>
   )
 }
