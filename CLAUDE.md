@@ -59,7 +59,7 @@ After making code changes:
 - CGO enabled (required for SQLite FTS5)
 - Build with: `make build` or `go build -tags "fts5"`
 
-### Testing
+### Basic Testing
 
 - Run tests before committing: `make test`
 - Ensure all tests pass
@@ -73,6 +73,12 @@ After making code changes:
 - Only proceed with a fix when you have **high confidence** in the root cause analysis
 - **Maintain transparency** with the user about findings and reasoning
 
+**Ivestigation workflow**
+1. Investigate and identify root cause with high confidence
+2. Implement the fix
+
+### END-TO-END TESTING (MANDATORY)
+
 **End-to-End User Experience Testing:**
 - **Always perform full-loop UX testing on this local machine** for any new features or bug fixes to validate they work
 - **Always perform full-loop UX testing on the remote machine** (`amlandas@192.168.1.60`) to validate features/fixes work on other machines
@@ -80,11 +86,11 @@ After making code changes:
 - Document test results before marking work as complete
 
 **Testing Workflow:**
-1. Investigate and identify root cause with high confidence
-2. Implement the fix
-3. Test on local machine (full user workflow)
-4. Test on remote machine (full user workflow)
-5. Only then commit and push changes
+1. Test on local machine (full user workflow)
+2. Test on remote machine (full user workflow)
+3. Only then commit and push changes
+
+### POST END-TO-END TESTING TASKS (REQUIRED)
 
 **Post-Fix Completion:**
 - **Always merge changes with main** in GitHub by opening, updating, and closing PRs or bug reports
