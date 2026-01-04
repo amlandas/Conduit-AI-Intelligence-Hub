@@ -225,7 +225,8 @@ conduit setup                 # Interactive setup wizard
 conduit install-deps          # Install runtime dependencies
 conduit install --document-tools  # Install document extraction tools
 conduit doctor                # Run diagnostics
-conduit uninstall             # Uninstall Conduit
+conduit uninstall --info      # Show what's installed
+conduit uninstall --all       # Uninstall Conduit (see Uninstalling section)
 ```
 
 ### Service Management
@@ -539,54 +540,88 @@ policy:
 
 ## Uninstalling
 
-### Complete Removal (Recommended)
+Conduit provides three ways to uninstall, all with consistent behavior:
 
-Remove Conduit and optionally its dependencies with one command:
+### Method 1: CLI Command (Recommended)
+
+```bash
+# Show what's installed
+conduit uninstall --info
+
+# Preview what would be removed (dry run)
+conduit uninstall --dry-run --all
+
+# Execute uninstall
+conduit uninstall --all
+```
+
+### Method 2: Uninstall Script
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
 ```
 
-The uninstall script will:
-- Stop and remove the daemon service
-- Remove Qdrant vector database container
-- Remove FalkorDB graph database container
-- Remove binaries from your PATH
-- Optionally remove data directory
-- Clean up shell configuration
-- Optionally remove dependencies (Docker/Podman, Ollama, Go)
+### Method 3: Desktop App
 
-**Options:**
+Open **Settings → Uninstall** in the Conduit Desktop app for a graphical uninstall wizard.
+
+### Uninstall Tiers
+
+| Tier | Command | What's Removed |
+|------|---------|----------------|
+| **Keep Data** | `conduit uninstall --keep-data` | Daemon service, binaries, shell config (preserves `~/.conduit/`) |
+| **All** | `conduit uninstall --all` | Everything above + data directory + containers (Qdrant, FalkorDB) |
+| **Full** | `conduit uninstall --full` | Everything above + optional Ollama removal |
+
+**Note:** Docker and Podman are **never** removed (they are system tools).
+
+### CLI Options
+
+```bash
+# Tier selection
+conduit uninstall --keep-data       # Tier 1: Keep data for reinstall
+conduit uninstall --all             # Tier 2: Remove data and containers
+conduit uninstall --full            # Tier 3: Full cleanup
+
+# Control flags
+conduit uninstall --force           # Skip confirmations
+conduit uninstall --dry-run         # Preview without removing
+conduit uninstall --json            # JSON output for scripting
+conduit uninstall --info            # Show installation status
+
+# Selective removal
+conduit uninstall --remove-ollama   # Include Ollama in removal
+conduit uninstall --remove-qdrant   # Remove only Qdrant container
+conduit uninstall --remove-falkordb # Remove only FalkorDB container
+```
+
+### What Gets Removed
+
+**Tier 1 (Keep Data):**
+- Daemon service (launchd/systemd)
+- CLI binaries (`~/.local/bin/conduit`, `conduit-daemon`)
+- Shell PATH configuration
+- Symlinks
+
+**Tier 2 (All) adds:**
+- Data directory (`~/.conduit/`)
+- Qdrant container and volumes
+- FalkorDB container and volumes
+
+**Tier 3 (Full) adds:**
+- Ollama binary and models (`~/.ollama/`) - optional, requires `--remove-ollama`
+
+### Script Options
+
 ```bash
 # Force mode (skip confirmations)
 curl -fsSL ... | bash -s -- --force
 
-# Remove everything including dependencies
+# Remove everything including Ollama
 curl -fsSL ... | bash -s -- --remove-all
 
 # Custom paths
 curl -fsSL ... | bash -s -- --install-dir ~/.local/bin --conduit-home ~/.conduit
-```
-
-The script gracefully handles errors and continues with remaining components.
-
-### Manual Uninstallation
-
-If you prefer manual removal:
-
-```bash
-# 1. Stop and remove service
-conduit service stop
-conduit service remove
-
-# 2. Remove binaries
-rm -f ~/.local/bin/conduit ~/.local/bin/conduit-daemon
-
-# 3. Remove data
-rm -rf ~/.conduit
-
-# 4. Clean shell config (remove PATH exports)
-# Edit ~/.zshrc or ~/.bashrc and remove Conduit PATH line
 ```
 
 ## Troubleshooting
