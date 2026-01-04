@@ -10,6 +10,35 @@ export interface UpdateStatus {
   error: string | null
   version: string | null
   releaseNotes: string | null
+  // CLI version compatibility info
+  cliUpdateRequired: boolean
+  bundledCLIVersion: string | null
+  installedCLIVersion: string | null
+}
+
+export interface CLIStatus {
+  installed: boolean
+  version: string | null
+  path: string | null
+  bundledVersion: string | null
+  needsUpdate: boolean
+}
+
+export interface DependencyStatus {
+  name: string
+  installed: boolean
+  version?: string
+  required: boolean
+  installUrl?: string
+  brewFormula?: string
+}
+
+export interface ServiceStatus {
+  name: string
+  running: boolean
+  port?: number
+  container?: string
+  error?: string
 }
 
 export interface ConduitAPI {
@@ -56,7 +85,24 @@ export interface ConduitAPI {
   downloadUpdate: () => Promise<void>
   installUpdate: () => void
   getUpdateStatus: () => Promise<UpdateStatus>
+  installCLIUpdate: () => Promise<{ success: boolean; error?: string }>
   onUpdateStatus: (callback: (status: UpdateStatus) => void) => () => void
+
+  // Setup wizard
+  checkCLI: () => Promise<CLIStatus>
+  installCLI: (options?: { installPath?: string }) => Promise<{ success: boolean; version?: string; path?: string; error?: string }>
+  checkDependencies: () => Promise<DependencyStatus[]>
+  installDependency: (options: { name: string; brewFormula: string }) => Promise<{ success: boolean; error?: string }>
+  checkServices: () => Promise<ServiceStatus[]>
+  startService: (options: { name: string }) => Promise<{ success: boolean; error?: string }>
+  startAllServices: () => Promise<{ success: boolean; error?: string }>
+  checkModels: () => Promise<string[]>
+  pullModel: (options: { model: string }) => Promise<{ success: boolean; error?: string }>
+  onOllamaPullProgress: (callback: (data: { model: string; progress: number }) => void) => () => void
+
+  // Shell operations
+  openExternal: (url: string) => Promise<void>
+  openTerminal: () => Promise<void>
 
   // Event listeners
   onEvent: (callback: (event: unknown) => void) => () => void
@@ -112,11 +158,32 @@ const conduitAPI: ConduitAPI = {
   downloadUpdate: () => ipcRenderer.invoke('update:download'),
   installUpdate: () => ipcRenderer.invoke('update:install'),
   getUpdateStatus: () => ipcRenderer.invoke('update:get-status'),
+  installCLIUpdate: () => ipcRenderer.invoke('update:install-cli'),
   onUpdateStatus: (callback) => {
     const handler = (_: unknown, status: UpdateStatus): void => callback(status)
     ipcRenderer.on('update:status', handler)
     return () => ipcRenderer.removeListener('update:status', handler)
   },
+
+  // Setup wizard
+  checkCLI: () => ipcRenderer.invoke('setup:check-cli'),
+  installCLI: (options) => ipcRenderer.invoke('setup:install-cli', options),
+  checkDependencies: () => ipcRenderer.invoke('setup:check-dependencies'),
+  installDependency: (options) => ipcRenderer.invoke('setup:install-dependency', options),
+  checkServices: () => ipcRenderer.invoke('setup:check-services'),
+  startService: (options) => ipcRenderer.invoke('setup:start-service', options),
+  startAllServices: () => ipcRenderer.invoke('setup:start-all-services'),
+  checkModels: () => ipcRenderer.invoke('setup:check-models'),
+  pullModel: (options) => ipcRenderer.invoke('setup:pull-model', options),
+  onOllamaPullProgress: (callback) => {
+    const handler = (_: unknown, data: { model: string; progress: number }): void => callback(data)
+    ipcRenderer.on('ollama:pull-progress', handler)
+    return () => ipcRenderer.removeListener('ollama:pull-progress', handler)
+  },
+
+  // Shell operations
+  openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
+  openTerminal: () => ipcRenderer.invoke('shell:open-terminal'),
 
   // Event listeners with cleanup
   onEvent: (callback) => {
