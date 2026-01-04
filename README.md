@@ -65,6 +65,7 @@ conduit status
     - Multi-hop reasoning ("How is X related to Y across documents?")
     - Aggregation queries ("List all threat models in the KB")
     - Entity disambiguation via graph traversal
+    - **Hybrid entity search**: Combines lexical + semantic search with RRF fusion
 - **AI Integration**: Local AI with Ollama for intelligent code analysis
 - **CLI**: Complete command set for all operations
 
@@ -241,7 +242,9 @@ conduit kb kag-retry --dry-run    # Preview what would be retried
 conduit kb kag-retry --max-retries 3  # Retry with custom attempts (max: 5)
 conduit kb kag-dedupe             # Merge duplicate entities
 conduit kb kag-dedupe --dry-run   # Preview duplicates without merging
+conduit kb kag-vectorize          # Generate embeddings for semantic entity search
 conduit kb kag-query <query>      # Query the knowledge graph (tokenized matching)
+conduit kb kag-query <query> --hybrid  # Hybrid search (lexical + semantic via RRF)
 conduit kb kag-query <query> --entities Docker,Kubernetes  # With entity hints
 conduit kb kag-query <query> --max-hops 3  # Multi-hop traversal (max: 3)
 ```
