@@ -45,6 +45,9 @@ const (
 	// DefaultCollectionName is the default collection name for KB vectors.
 	DefaultCollectionName = "conduit_kb"
 
+	// EntityCollectionName is the collection name for KAG entity vectors.
+	EntityCollectionName = "conduit_entities"
+
 	// DefaultUpsertBatchSize is the default batch size for upserting points.
 	DefaultUpsertBatchSize = 100
 )
@@ -91,6 +94,28 @@ type VectorSearchResult struct {
 	Title      string            // Document title
 	Content    string            // Chunk content
 	Metadata   map[string]string // Additional metadata
+}
+
+// EntityVectorPoint represents a KAG entity point to store in the vector database.
+type EntityVectorPoint struct {
+	ID          string    // Unique entity identifier (canonical entity_id)
+	Vector      []float32 // Embedding vector
+	Name        string    // Entity name
+	Type        string    // Entity type (concept, person, organization, etc.)
+	Description string    // Entity description
+	SourceIDs   string    // Comma-separated source document IDs
+	Confidence  float64   // Entity confidence score
+}
+
+// EntitySearchResult represents a semantic search result for entities.
+type EntitySearchResult struct {
+	ID          string  // Entity ID
+	Score       float32 // Similarity score (0-1, higher is better)
+	Name        string  // Entity name
+	Type        string  // Entity type
+	Description string  // Entity description
+	SourceIDs   string  // Source document IDs
+	Confidence  float64 // Entity confidence
 }
 
 // NewVectorStore creates a new vector store.
@@ -537,4 +562,259 @@ func (vs *VectorStore) HealthCheck(ctx context.Context) error {
 // Close closes the vector store connection.
 func (vs *VectorStore) Close() error {
 	return vs.client.Close()
+}
+
+// entityIDToUUID converts an entity ID string to a deterministic UUID v5.
+// This allows us to use string entity IDs internally while Qdrant requires UUIDs.
+func entityIDToUUID(entityID string) string {
+	// Use a different namespace UUID for entity IDs (to avoid collisions with chunks)
+	namespace := uuid.MustParse("a9f3c2b1-8d4e-47f6-9a1b-5c2d3e4f5a6b")
+	hash := sha256.Sum256([]byte(entityID))
+	return uuid.NewSHA1(namespace, hash[:]).String()
+}
+
+// EnsureEntityCollection ensures the entity collection exists, creating it if necessary.
+func (vs *VectorStore) EnsureEntityCollection(ctx context.Context) error {
+	vs.mu.Lock()
+	defer vs.mu.Unlock()
+
+	// Check if collection exists
+	collections, err := vs.client.ListCollections(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to list collections: %w", err)
+	}
+
+	collectionExists := false
+	for _, col := range collections {
+		if col == EntityCollectionName {
+			collectionExists = true
+			break
+		}
+	}
+
+	if collectionExists {
+		vs.logger.Debug().Str("collection", EntityCollectionName).Msg("entity collection exists")
+		return nil
+	}
+
+	// Create collection
+	vs.logger.Info().
+		Str("collection", EntityCollectionName).
+		Uint64("dimension", vs.dimension).
+		Msg("creating entity collection")
+
+	err = vs.client.CreateCollection(ctx, &qdrant.CreateCollection{
+		CollectionName: EntityCollectionName,
+		VectorsConfig: qdrant.NewVectorsConfig(&qdrant.VectorParams{
+			Size:     vs.dimension,
+			Distance: qdrant.Distance_Cosine,
+		}),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create entity collection: %w", err)
+	}
+
+	// Create payload indexes for efficient filtering
+	indexes := []string{"entity_type", "source_ids"}
+	for _, field := range indexes {
+		_, err = vs.client.CreateFieldIndex(ctx, &qdrant.CreateFieldIndexCollection{
+			CollectionName: EntityCollectionName,
+			FieldName:      field,
+			FieldType:      qdrant.FieldType_FieldTypeKeyword.Enum(),
+		})
+		if err != nil {
+			vs.logger.Warn().Err(err).Str("field", field).Msg("failed to create field index on entity collection")
+		}
+	}
+
+	vs.logger.Info().Str("collection", EntityCollectionName).Msg("entity collection created")
+	return nil
+}
+
+// UpsertEntityBatch inserts or updates multiple entity points.
+func (vs *VectorStore) UpsertEntityBatch(ctx context.Context, points []EntityVectorPoint) error {
+	if len(points) == 0 {
+		return nil
+	}
+
+	// Ensure entity collection exists
+	if err := vs.EnsureEntityCollection(ctx); err != nil {
+		return err
+	}
+
+	start := time.Now()
+
+	// Convert to Qdrant points
+	qdrantPoints := make([]*qdrant.PointStruct, len(points))
+	for i, p := range points {
+		// Sanitize all string fields to ensure valid UTF-8
+		payload := map[string]any{
+			"entity_id":   sanitizeUTF8(p.ID),
+			"name":        sanitizeUTF8(p.Name),
+			"entity_type": sanitizeUTF8(p.Type),
+			"description": sanitizeUTF8(p.Description),
+			"source_ids":  sanitizeUTF8(p.SourceIDs),
+			"confidence":  p.Confidence,
+		}
+
+		// Convert entity ID to UUID for Qdrant
+		pointUUID := entityIDToUUID(p.ID)
+
+		qdrantPoints[i] = &qdrant.PointStruct{
+			Id:      qdrant.NewID(pointUUID),
+			Vectors: qdrant.NewVectors(p.Vector...),
+			Payload: qdrant.NewValueMap(payload),
+		}
+	}
+
+	// Upsert in batches
+	for i := 0; i < len(qdrantPoints); i += vs.batchSize {
+		end := i + vs.batchSize
+		if end > len(qdrantPoints) {
+			end = len(qdrantPoints)
+		}
+		batch := qdrantPoints[i:end]
+
+		_, err := vs.client.Upsert(ctx, &qdrant.UpsertPoints{
+			CollectionName: EntityCollectionName,
+			Points:         batch,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to upsert entity batch %d-%d: %w", i, end, err)
+		}
+	}
+
+	vs.logger.Debug().
+		Int("count", len(points)).
+		Dur("duration", time.Since(start)).
+		Msg("upserted entity points")
+
+	return nil
+}
+
+// SearchEntities performs a semantic similarity search on entities.
+func (vs *VectorStore) SearchEntities(ctx context.Context, queryVector []float32, opts VectorEntitySearchOptions) ([]EntitySearchResult, error) {
+	if err := vs.EnsureEntityCollection(ctx); err != nil {
+		return nil, err
+	}
+
+	if opts.Limit <= 0 {
+		opts.Limit = 20
+	}
+
+	start := time.Now()
+
+	// Build filter if specified
+	var filter *qdrant.Filter
+	if opts.EntityType != "" {
+		filter = &qdrant.Filter{
+			Must: []*qdrant.Condition{
+				qdrant.NewMatch("entity_type", opts.EntityType),
+			},
+		}
+	}
+
+	// Execute search
+	searchResult, err := vs.client.Query(ctx, &qdrant.QueryPoints{
+		CollectionName: EntityCollectionName,
+		Query:          qdrant.NewQuery(queryVector...),
+		Limit:          qdrant.PtrOf(uint64(opts.Limit)),
+		Offset:         qdrant.PtrOf(uint64(opts.Offset)),
+		Filter:         filter,
+		WithPayload:    qdrant.NewWithPayload(true),
+		ScoreThreshold: qdrant.PtrOf(float32(opts.MinScore)),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("entity search failed: %w", err)
+	}
+
+	// Convert results
+	results := make([]EntitySearchResult, len(searchResult))
+	for i, point := range searchResult {
+		result := EntitySearchResult{
+			ID:    point.Id.GetUuid(),
+			Score: point.Score,
+		}
+
+		// Extract payload fields
+		if payload := point.Payload; payload != nil {
+			if v, ok := payload["entity_id"]; ok {
+				result.ID = v.GetStringValue()
+			}
+			if v, ok := payload["name"]; ok {
+				result.Name = v.GetStringValue()
+			}
+			if v, ok := payload["entity_type"]; ok {
+				result.Type = v.GetStringValue()
+			}
+			if v, ok := payload["description"]; ok {
+				result.Description = v.GetStringValue()
+			}
+			if v, ok := payload["source_ids"]; ok {
+				result.SourceIDs = v.GetStringValue()
+			}
+			if v, ok := payload["confidence"]; ok {
+				result.Confidence = v.GetDoubleValue()
+			}
+		}
+
+		results[i] = result
+	}
+
+	vs.logger.Debug().
+		Int("results", len(results)).
+		Dur("duration", time.Since(start)).
+		Msg("entity search completed")
+
+	return results, nil
+}
+
+// VectorEntitySearchOptions configures entity vector search behavior.
+type VectorEntitySearchOptions struct {
+	Limit      int     // Max results (default 20)
+	Offset     int     // Pagination offset
+	EntityType string  // Filter by entity type
+	MinScore   float64 // Minimum similarity score threshold (0-1)
+}
+
+// GetEntityStats returns entity vector store statistics.
+func (vs *VectorStore) GetEntityStats(ctx context.Context) (*VectorStoreStats, error) {
+	info, err := vs.client.GetCollectionInfo(ctx, EntityCollectionName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get entity collection info: %w", err)
+	}
+
+	stats := &VectorStoreStats{
+		CollectionName: EntityCollectionName,
+		Status:         info.Status.String(),
+		SegmentCount:   int(info.SegmentsCount),
+	}
+
+	// Safely dereference pointer fields
+	if info.PointsCount != nil {
+		stats.VectorCount = int(*info.PointsCount)
+	}
+
+	return stats, nil
+}
+
+// DeleteEntityByID removes an entity point by ID.
+func (vs *VectorStore) DeleteEntityByID(ctx context.Context, entityID string) error {
+	pointUUID := entityIDToUUID(entityID)
+	_, err := vs.client.Delete(ctx, &qdrant.DeletePoints{
+		CollectionName: EntityCollectionName,
+		Points: &qdrant.PointsSelector{
+			PointsSelectorOneOf: &qdrant.PointsSelector_Points{
+				Points: &qdrant.PointsIdsList{
+					Ids: []*qdrant.PointId{qdrant.NewID(pointUUID)},
+				},
+			},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete entity point: %w", err)
+	}
+
+	vs.logger.Debug().Str("entity_id", entityID).Msg("deleted entity point")
+	return nil
 }

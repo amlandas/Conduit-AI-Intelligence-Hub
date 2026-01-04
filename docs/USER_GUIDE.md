@@ -756,6 +756,69 @@ conduit kb kag-dedupe
 - **Best description**: Uses the longest (most informative) description
 - **Combined sources**: Preserves references to all source documents
 
+### Entity Vectorization for Semantic Search
+
+For improved query recall, you can generate vector embeddings for entities. This enables semantic search that finds entities by meaning, not just exact text matches.
+
+**Prerequisites:**
+- Ollama running with `nomic-embed-text` model
+- Qdrant running (for vector storage)
+
+```bash
+# Vectorize all entities (generates embeddings and stores in Qdrant)
+conduit kb kag-vectorize
+
+# With custom batch size
+conduit kb kag-vectorize --batch-size 50
+
+# Connect to remote services
+conduit kb kag-vectorize --ollama-host http://192.168.1.60:11434 --qdrant-host 192.168.1.60
+
+# Example output:
+# Connecting to Ollama...
+# Connecting to Qdrant...
+# Loading entities from database...
+# Found 1949 entities to vectorize
+#   Vectorized 1949/1949 entities
+#
+# Vectorization Summary
+# ───────────────────────────────────────
+# Total entities:   1949
+# Vectorized:       1949
+#
+# Entity Collection: conduit_entities
+#   Vectors: 1949
+#   Status:  Green
+```
+
+### Hybrid Entity Search
+
+Once entities are vectorized, you can use **hybrid search** which combines lexical (token-based) and semantic (vector-based) search using RRF (Reciprocal Rank Fusion):
+
+```bash
+# Enable hybrid search with --hybrid flag
+conduit kb kag-query "threat model summary" --hybrid
+
+# Queries that previously returned 0 results now find related entities
+conduit kb kag-query "AI safety deployment safeguards" --hybrid
+
+# Connect to remote services
+conduit kb kag-query "CBRN risks" --hybrid \
+  --ollama-host http://192.168.1.60:11434 \
+  --qdrant-host 192.168.1.60
+```
+
+**How Hybrid Search Works:**
+1. **Lexical Search**: Tokenizes query, matches words in entity names/descriptions
+2. **Semantic Search**: Embeds query, finds similar entity vectors in Qdrant
+3. **RRF Fusion**: Combines both result sets using rank-based scoring
+4. **Agreement Boost**: Entities found by both methods get a 20% score boost
+
+**Benefits:**
+- **Better recall**: Finds entities even when exact words don't match
+- **Synonym matching**: "AI" finds "Artificial Intelligence" entities
+- **Graceful fallback**: Uses lexical-only if Qdrant/Ollama unavailable
+
 ### KAG vs RAG: When to Use Each
 
 | Query Type | Use This | Example |

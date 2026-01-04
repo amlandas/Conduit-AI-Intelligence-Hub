@@ -1511,6 +1511,7 @@ Examples:
 	cmd.AddCommand(kbKagStatusCmd())
 	cmd.AddCommand(kbKagRetryCmd())
 	cmd.AddCommand(kbKagDedupeCmd())
+	cmd.AddCommand(kbKagVectorizeCmd())
 	cmd.AddCommand(kbKagQueryCmd())
 
 	return cmd
@@ -5278,19 +5279,209 @@ Examples:
 	return cmd
 }
 
+func kbKagVectorizeCmd() *cobra.Command {
+	var batchSize int
+	var ollamaHost string
+	var qdrantHost string
+	var qdrantPort int
+
+	cmd := &cobra.Command{
+		Use:   "kag-vectorize",
+		Short: "Generate vector embeddings for KAG entities",
+		Long: `Generate and store vector embeddings for all entities in the knowledge graph.
+
+This enables semantic search over entities using vector similarity.
+Embeddings are stored in a Qdrant collection (conduit_entities) separate from chunk vectors.
+
+Requirements:
+  - Ollama running with nomic-embed-text model
+  - Qdrant running on the specified host/port
+
+Examples:
+  conduit kb kag-vectorize
+  conduit kb kag-vectorize --batch-size 50
+  conduit kb kag-vectorize --ollama-host http://192.168.1.60:11434`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// Open database
+			homeDir, _ := os.UserHomeDir()
+			dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+			db, err := store.New(dbPath)
+			if err != nil {
+				return fmt.Errorf("open database: %w", err)
+			}
+			defer db.Close()
+
+			ctx := cmd.Context()
+
+			// Create embedding service
+			fmt.Println("Connecting to Ollama...")
+			embeddingSvc, err := kb.NewEmbeddingService(kb.EmbeddingConfig{
+				OllamaHost: ollamaHost,
+				BatchSize:  batchSize,
+			})
+			if err != nil {
+				return fmt.Errorf("create embedding service: %w", err)
+			}
+
+			// Ensure embedding model is available
+			if err := embeddingSvc.EnsureModel(ctx); err != nil {
+				return fmt.Errorf("ensure embedding model: %w", err)
+			}
+
+			// Create vector store
+			fmt.Println("Connecting to Qdrant...")
+			vectorStore, err := kb.NewVectorStore(kb.VectorStoreConfig{
+				Host: qdrantHost,
+				Port: qdrantPort,
+			})
+			if err != nil {
+				return fmt.Errorf("create vector store: %w", err)
+			}
+			defer vectorStore.Close()
+
+			// Ensure entity collection exists
+			if err := vectorStore.EnsureEntityCollection(ctx); err != nil {
+				return fmt.Errorf("ensure entity collection: %w", err)
+			}
+
+			// Query all entities from database
+			fmt.Println("Loading entities from database...")
+			rows, err := db.DB().QueryContext(ctx, `
+				SELECT entity_id, name, type, description, confidence, source_document_id
+				FROM kb_entities
+				ORDER BY name
+			`)
+			if err != nil {
+				return fmt.Errorf("query entities: %w", err)
+			}
+			defer rows.Close()
+
+			type entityInfo struct {
+				ID          string
+				Name        string
+				Type        string
+				Description string
+				Confidence  float64
+				SourceDocs  string
+			}
+
+			var entities []entityInfo
+			for rows.Next() {
+				var e entityInfo
+				if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.Description, &e.Confidence, &e.SourceDocs); err != nil {
+					continue
+				}
+				entities = append(entities, e)
+			}
+
+			if len(entities) == 0 {
+				fmt.Println("No entities found to vectorize.")
+				return nil
+			}
+
+			fmt.Printf("Found %d entities to vectorize\n", len(entities))
+
+			// Process in batches
+			var vectorized, failed int
+			for i := 0; i < len(entities); i += batchSize {
+				end := i + batchSize
+				if end > len(entities) {
+					end = len(entities)
+				}
+				batch := entities[i:end]
+
+				// Generate embeddings for this batch
+				texts := make([]string, len(batch))
+				for j, e := range batch {
+					// Combine name and description for richer embeddings
+					texts[j] = e.Name
+					if e.Description != "" {
+						texts[j] += ": " + e.Description
+					}
+				}
+
+				embeddings, err := embeddingSvc.EmbedBatch(ctx, texts)
+				if err != nil {
+					fmt.Printf("  Batch %d-%d: embedding failed: %v\n", i+1, end, err)
+					failed += len(batch)
+					continue
+				}
+
+				// Convert to entity vector points
+				points := make([]kb.EntityVectorPoint, len(batch))
+				for j, e := range batch {
+					points[j] = kb.EntityVectorPoint{
+						ID:          e.ID,
+						Vector:      embeddings[j],
+						Name:        e.Name,
+						Type:        e.Type,
+						Description: e.Description,
+						SourceIDs:   e.SourceDocs,
+						Confidence:  e.Confidence,
+					}
+				}
+
+				// Upsert to Qdrant
+				if err := vectorStore.UpsertEntityBatch(ctx, points); err != nil {
+					fmt.Printf("  Batch %d-%d: upsert failed: %v\n", i+1, end, err)
+					failed += len(batch)
+					continue
+				}
+
+				vectorized += len(batch)
+				fmt.Printf("  Vectorized %d/%d entities\r", vectorized, len(entities))
+			}
+
+			fmt.Println() // New line after progress
+			fmt.Println("\nVectorization Summary")
+			fmt.Println("───────────────────────────────────────")
+			fmt.Printf("Total entities:   %d\n", len(entities))
+			fmt.Printf("Vectorized:       %d\n", vectorized)
+			if failed > 0 {
+				fmt.Printf("Failed:           %d\n", failed)
+			}
+
+			// Show collection stats
+			stats, err := vectorStore.GetEntityStats(ctx)
+			if err == nil {
+				fmt.Printf("\nEntity Collection: %s\n", stats.CollectionName)
+				fmt.Printf("  Vectors: %d\n", stats.VectorCount)
+				fmt.Printf("  Status:  %s\n", stats.Status)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&batchSize, "batch-size", 20, "Number of entities to process at a time")
+	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "http://localhost:11434", "Ollama API endpoint")
+	cmd.Flags().StringVar(&qdrantHost, "qdrant-host", "localhost", "Qdrant gRPC host")
+	cmd.Flags().IntVar(&qdrantPort, "qdrant-port", 6334, "Qdrant gRPC port")
+
+	return cmd
+}
+
 func kbKagQueryCmd() *cobra.Command {
 	var maxHops int
 	var format string
+	var hybrid bool
+	var ollamaHost string
+	var qdrantHost string
+	var qdrantPort int
 
 	cmd := &cobra.Command{
 		Use:   "kag-query <query>",
 		Short: "Query the knowledge graph",
 		Long: `Query the knowledge graph for entities and relationships.
 
+The --hybrid flag enables hybrid search (lexical + semantic) for improved recall.
+Requires Ollama (nomic-embed-text) and Qdrant running, with entities vectorized via kag-vectorize.
+
 Examples:
   conduit kb kag-query "threat models"
   conduit kb kag-query "authentication" --max-hops 3
-  conduit kb kag-query "API security" --format json`,
+  conduit kb kag-query "API security" --format json
+  conduit kb kag-query "threat model summary" --hybrid  # Uses semantic search`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
@@ -5306,8 +5497,38 @@ Examples:
 
 			ctx := cmd.Context()
 
+			// Create KAGSearcher configuration
+			kagCfg := kb.KAGSearcherConfig{
+				DB:         db.DB(),
+				GraphStore: nil,
+			}
+
+			// Set up hybrid search if requested
+			if hybrid {
+				// Create embedding service
+				embeddingSvc, err := kb.NewEmbeddingService(kb.EmbeddingConfig{
+					OllamaHost: ollamaHost,
+				})
+				if err != nil {
+					fmt.Printf("Warning: Could not connect to Ollama, falling back to lexical search: %v\n", err)
+				} else {
+					// Create vector store
+					vectorStore, err := kb.NewVectorStore(kb.VectorStoreConfig{
+						Host: qdrantHost,
+						Port: qdrantPort,
+					})
+					if err != nil {
+						fmt.Printf("Warning: Could not connect to Qdrant, falling back to lexical search: %v\n", err)
+					} else {
+						kagCfg.VectorStore = vectorStore
+						kagCfg.EmbeddingService = embeddingSvc
+						defer vectorStore.Close()
+					}
+				}
+			}
+
 			// Use KAGSearcher for improved tokenized search
-			kagSearcher := kb.NewKAGSearcher(db.DB(), nil)
+			kagSearcher := kb.NewKAGSearcherWithConfig(kagCfg)
 			result, err := kagSearcher.Search(ctx, &kb.KAGSearchRequest{
 				Query:            query,
 				MaxHops:          maxHops,
@@ -5362,6 +5583,10 @@ Examples:
 
 	cmd.Flags().IntVar(&maxHops, "max-hops", 2, "Maximum relationship hops to traverse")
 	cmd.Flags().StringVar(&format, "format", "text", "Output format: text or json")
+	cmd.Flags().BoolVar(&hybrid, "hybrid", false, "Enable hybrid search (lexical + semantic)")
+	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "http://localhost:11434", "Ollama API endpoint")
+	cmd.Flags().StringVar(&qdrantHost, "qdrant-host", "localhost", "Qdrant gRPC host")
+	cmd.Flags().IntVar(&qdrantPort, "qdrant-port", 6334, "Qdrant gRPC port")
 
 	return cmd
 }

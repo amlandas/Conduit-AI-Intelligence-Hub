@@ -124,9 +124,19 @@ func calculateMatchScore(entity EntityResult, tokens []string) float64 {
 
 // KAGSearcher provides graph-based search over the knowledge graph.
 type KAGSearcher struct {
-	db         *sql.DB
-	graphStore *FalkorDBStore
-	logger     zerolog.Logger
+	db               *sql.DB
+	graphStore       *FalkorDBStore
+	vectorStore      *VectorStore
+	embeddingService *EmbeddingService
+	logger           zerolog.Logger
+}
+
+// KAGSearcherConfig configures the KAG searcher.
+type KAGSearcherConfig struct {
+	DB               *sql.DB
+	GraphStore       *FalkorDBStore
+	VectorStore      *VectorStore      // Optional: enables semantic entity search
+	EmbeddingService *EmbeddingService // Optional: enables semantic entity search
 }
 
 // NewKAGSearcher creates a new KAG searcher.
@@ -136,6 +146,22 @@ func NewKAGSearcher(db *sql.DB, graphStore *FalkorDBStore) *KAGSearcher {
 		graphStore: graphStore,
 		logger:     observability.Logger("kb.kag_search"),
 	}
+}
+
+// NewKAGSearcherWithConfig creates a KAG searcher with full configuration.
+func NewKAGSearcherWithConfig(cfg KAGSearcherConfig) *KAGSearcher {
+	return &KAGSearcher{
+		db:               cfg.DB,
+		graphStore:       cfg.GraphStore,
+		vectorStore:      cfg.VectorStore,
+		embeddingService: cfg.EmbeddingService,
+		logger:           observability.Logger("kb.kag_search"),
+	}
+}
+
+// HasSemanticSearch returns true if semantic entity search is available.
+func (s *KAGSearcher) HasSemanticSearch() bool {
+	return s.vectorStore != nil && s.embeddingService != nil
 }
 
 // KAGSearchRequest represents a KAG search request.
@@ -239,8 +265,34 @@ func (s *KAGSearcher) Search(ctx context.Context, req *KAGSearchRequest) (*KAGSe
 	}, nil
 }
 
-// searchEntities searches for entities matching the query using tokenized matching.
+// searchEntities searches for entities matching the query.
+// Uses hybrid search (lexical + semantic) when available, otherwise falls back to lexical only.
 func (s *KAGSearcher) searchEntities(ctx context.Context, req *KAGSearchRequest) ([]EntityResult, error) {
+	// Use hybrid search if semantic search is available
+	if s.HasSemanticSearch() {
+		return s.searchEntitiesHybrid(ctx, req)
+	}
+
+	// Fall back to lexical-only search
+	candidateLimit := req.Limit * 3
+	if candidateLimit < 50 {
+		candidateLimit = 50
+	}
+
+	results, err := s.searchEntitiesLexical(ctx, req, candidateLimit)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(results) > req.Limit {
+		return results[:req.Limit], nil
+	}
+	return results, nil
+}
+
+// searchEntitiesOriginal is the original implementation preserved for reference.
+// It performs tokenized lexical search with scoring.
+func (s *KAGSearcher) searchEntitiesOriginal(ctx context.Context, req *KAGSearchRequest) ([]EntityResult, error) {
 	// Tokenize the query for better matching
 	tokens := tokenizeQuery(req.Query)
 
@@ -556,5 +608,304 @@ func (s *KAGSearcher) GetStats(ctx context.Context) (map[string]interface{}, err
 		stats["graph_db_connected"] = false
 	}
 
+	// Semantic search availability
+	stats["semantic_search_available"] = s.HasSemanticSearch()
+
 	return stats, nil
+}
+
+// ============================================================================
+// Semantic and Hybrid Entity Search
+// ============================================================================
+
+// searchEntitiesSemantic performs semantic (vector) search for entities.
+// Returns entities sorted by semantic similarity to the query.
+func (s *KAGSearcher) searchEntitiesSemantic(ctx context.Context, query string, limit int) ([]EntityResult, error) {
+	if !s.HasSemanticSearch() {
+		return nil, fmt.Errorf("semantic search not available: vectorStore or embeddingService not configured")
+	}
+
+	// Generate query embedding
+	queryVector, err := s.embeddingService.Embed(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("generate query embedding: %w", err)
+	}
+
+	// Search entity vectors
+	vectorResults, err := s.vectorStore.SearchEntities(ctx, queryVector, VectorEntitySearchOptions{
+		Limit:    limit,
+		MinScore: 0.0, // Return all results for RRF fusion
+	})
+	if err != nil {
+		return nil, fmt.Errorf("vector search: %w", err)
+	}
+
+	// Convert to EntityResult
+	results := make([]EntityResult, len(vectorResults))
+	for i, vr := range vectorResults {
+		results[i] = EntityResult{
+			ID:               vr.ID,
+			Name:             vr.Name,
+			Type:             vr.Type,
+			Description:      vr.Description,
+			Confidence:       vr.Confidence,
+			SourceDocumentID: vr.SourceIDs, // May be comma-separated
+		}
+	}
+
+	return results, nil
+}
+
+// entityRRFScore represents an entity with its RRF fusion score.
+type entityRRFScore struct {
+	entity       EntityResult
+	rrfScore     float64
+	lexicalRank  int  // 0 if not found lexically
+	semanticRank int  // 0 if not found semantically
+	foundByBoth  bool // True if found by both strategies
+}
+
+// RRF constant k (higher k = more emphasis on lower ranks)
+const entityRRFConstant = 60
+
+// searchEntitiesHybrid performs hybrid search combining lexical and semantic results.
+// Uses Reciprocal Rank Fusion (RRF) to merge and rank results from both strategies.
+func (s *KAGSearcher) searchEntitiesHybrid(ctx context.Context, req *KAGSearchRequest) ([]EntityResult, error) {
+	// Determine if we can use semantic search
+	useSemanticSearch := s.HasSemanticSearch()
+
+	// Fetch more candidates for better fusion
+	candidateLimit := req.Limit * 3
+	if candidateLimit < 50 {
+		candidateLimit = 50
+	}
+
+	// Get lexical results (always available)
+	lexicalResults, err := s.searchEntitiesLexical(ctx, req, candidateLimit)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("lexical entity search failed")
+		lexicalResults = nil
+	}
+
+	// Get semantic results (if available)
+	var semanticResults []EntityResult
+	if useSemanticSearch {
+		semanticResults, err = s.searchEntitiesSemantic(ctx, req.Query, candidateLimit)
+		if err != nil {
+			s.logger.Warn().Err(err).Msg("semantic entity search failed, falling back to lexical only")
+			semanticResults = nil
+		}
+	}
+
+	// If only lexical results, return them directly (with token-based scoring applied)
+	if len(semanticResults) == 0 {
+		if len(lexicalResults) > req.Limit {
+			return lexicalResults[:req.Limit], nil
+		}
+		return lexicalResults, nil
+	}
+
+	// If only semantic results, return them directly
+	if len(lexicalResults) == 0 {
+		if len(semanticResults) > req.Limit {
+			return semanticResults[:req.Limit], nil
+		}
+		return semanticResults, nil
+	}
+
+	// Apply RRF fusion
+	fused := s.fuseEntityResults(lexicalResults, semanticResults)
+
+	// Apply limit
+	if len(fused) > req.Limit {
+		fused = fused[:req.Limit]
+	}
+
+	return fused, nil
+}
+
+// fuseEntityResults applies RRF fusion to combine lexical and semantic entity results.
+func (s *KAGSearcher) fuseEntityResults(lexicalResults, semanticResults []EntityResult) []EntityResult {
+	// Build rank maps (1-indexed)
+	lexicalRanks := make(map[string]int)
+	for i, e := range lexicalResults {
+		lexicalRanks[e.ID] = i + 1
+	}
+
+	semanticRanks := make(map[string]int)
+	for i, e := range semanticResults {
+		semanticRanks[e.ID] = i + 1
+	}
+
+	// Collect all unique entities
+	allEntities := make(map[string]EntityResult)
+	for _, e := range lexicalResults {
+		allEntities[e.ID] = e
+	}
+	for _, e := range semanticResults {
+		if _, exists := allEntities[e.ID]; !exists {
+			allEntities[e.ID] = e
+		}
+	}
+
+	// Calculate RRF scores
+	scored := make([]entityRRFScore, 0, len(allEntities))
+
+	// Weights: equal for both strategies
+	lexicalWeight := 0.5
+	semanticWeight := 0.5
+
+	for entityID, entity := range allEntities {
+		var rrfScore float64
+		var lexRank, semRank int
+
+		// Lexical contribution
+		if rank, ok := lexicalRanks[entityID]; ok {
+			rrfScore += lexicalWeight * (1.0 / float64(entityRRFConstant+rank))
+			lexRank = rank
+		}
+
+		// Semantic contribution
+		if rank, ok := semanticRanks[entityID]; ok {
+			rrfScore += semanticWeight * (1.0 / float64(entityRRFConstant+rank))
+			semRank = rank
+		}
+
+		foundByBoth := lexRank > 0 && semRank > 0
+
+		// Agreement boost: 20% bonus for entities found by both strategies
+		if foundByBoth {
+			rrfScore *= 1.2
+		}
+
+		scored = append(scored, entityRRFScore{
+			entity:       entity,
+			rrfScore:     rrfScore,
+			lexicalRank:  lexRank,
+			semanticRank: semRank,
+			foundByBoth:  foundByBoth,
+		})
+	}
+
+	// Sort by RRF score descending
+	sort.Slice(scored, func(i, j int) bool {
+		return scored[i].rrfScore > scored[j].rrfScore
+	})
+
+	// Convert back to EntityResult slice
+	results := make([]EntityResult, len(scored))
+	for i, s := range scored {
+		results[i] = s.entity
+	}
+
+	return results
+}
+
+// searchEntitiesLexical performs lexical (token-based) search for entities.
+// This is the current searchEntities() implementation extracted for use in hybrid search.
+func (s *KAGSearcher) searchEntitiesLexical(ctx context.Context, req *KAGSearchRequest, candidateLimit int) ([]EntityResult, error) {
+	// Tokenize the query for better matching
+	tokens := tokenizeQuery(req.Query)
+
+	// Build query based on hints or tokenized free text
+	var query string
+	var args []interface{}
+
+	if len(req.EntityHints) > 0 {
+		// Search by specific entity names (existing behavior)
+		placeholders := make([]string, len(req.EntityHints))
+		for i, hint := range req.EntityHints {
+			placeholders[i] = "LOWER(e.name) LIKE LOWER(?)"
+			args = append(args, "%"+hint+"%")
+		}
+		query = fmt.Sprintf(`
+			SELECT e.entity_id, e.name, e.type, e.description, e.confidence,
+			       e.source_document_id, COALESCE(d.title, '') as doc_title
+			FROM kb_entities e
+			LEFT JOIN kb_documents d ON e.source_document_id = d.document_id
+			WHERE (%s)
+		`, strings.Join(placeholders, " OR "))
+	} else if len(tokens) > 0 {
+		// Tokenized free text search - match ANY token in name or description
+		conditions := make([]string, 0, len(tokens)*2)
+		for _, token := range tokens {
+			// Match in name (case-insensitive)
+			conditions = append(conditions, "LOWER(e.name) LIKE LOWER(?)")
+			args = append(args, "%"+token+"%")
+			// Match in description (case-insensitive)
+			conditions = append(conditions, "LOWER(e.description) LIKE LOWER(?)")
+			args = append(args, "%"+token+"%")
+		}
+		query = fmt.Sprintf(`
+			SELECT e.entity_id, e.name, e.type, e.description, e.confidence,
+			       e.source_document_id, COALESCE(d.title, '') as doc_title
+			FROM kb_entities e
+			LEFT JOIN kb_documents d ON e.source_document_id = d.document_id
+			WHERE (%s)
+		`, strings.Join(conditions, " OR "))
+	} else {
+		// Fallback: use original query if no tokens extracted
+		query = `
+			SELECT e.entity_id, e.name, e.type, e.description, e.confidence,
+			       e.source_document_id, COALESCE(d.title, '') as doc_title
+			FROM kb_entities e
+			LEFT JOIN kb_documents d ON e.source_document_id = d.document_id
+			WHERE LOWER(e.name) LIKE LOWER(?) OR LOWER(e.description) LIKE LOWER(?)
+		`
+		args = append(args, "%"+req.Query+"%", "%"+req.Query+"%")
+	}
+
+	// Add source filter if specified
+	if req.SourceFilter != "" {
+		query += " AND d.source_id = ?"
+		args = append(args, req.SourceFilter)
+	}
+
+	query += " ORDER BY e.confidence DESC LIMIT ?"
+	args = append(args, candidateLimit)
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var candidates []EntityResult
+	for rows.Next() {
+		var e EntityResult
+		if err := rows.Scan(&e.ID, &e.Name, &e.Type, &e.Description,
+			&e.Confidence, &e.SourceDocumentID, &e.SourceDocTitle); err != nil {
+			continue
+		}
+		candidates = append(candidates, e)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// If we have tokens, score and re-rank results
+	if len(tokens) > 0 && len(candidates) > 0 {
+		scored := make([]entityMatchScore, len(candidates))
+		for i, entity := range candidates {
+			scored[i] = entityMatchScore{
+				entity: entity,
+				score:  calculateMatchScore(entity, tokens),
+			}
+		}
+
+		// Sort by score descending
+		sort.Slice(scored, func(i, j int) bool {
+			return scored[i].score > scored[j].score
+		})
+
+		// Convert back to results
+		results := make([]EntityResult, len(scored))
+		for i := range scored {
+			results[i] = scored[i].entity
+		}
+		return results, nil
+	}
+
+	return candidates, nil
 }
