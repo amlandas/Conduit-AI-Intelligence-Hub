@@ -527,14 +527,26 @@ During user testing, several critical bugs were identified and resolved:
 | **Dependency Dashboard** | ✅ Complete | Status of Ollama, Qdrant, FalkorDB, container runtime |
 | **Auto-Updates** | ✅ Complete | electron-updater with GitHub Releases integration |
 | **DMG Packaging** | ✅ Complete | Signed DMG builds for distribution |
+| **First-Run Setup Wizard** | ✅ Complete | 6-step wizard for CLI installation, dependencies, services, and models |
+| **Bundled CLI** | ✅ Complete | Go binaries (conduit, conduit-daemon) bundled in DMG |
+| **Version Compatibility** | ✅ Complete | Desktop declares minCLIVersion, auto-updates CLI when needed |
 
 **Implementation PRs**:
 - PR #11: Phase 1 & 2 - Electron foundation + Core views with SSE sync
 - PR #12: Phase 4 & 5 - Advanced/Developer modes + Performance optimization
 - PR #13: Phase 6 - Distribution with auto-updates
 - PR #14: Branding consistency (app ID: `dev.simpleflo.conduit`)
+- PR #15: First-Run Setup Wizard with bundled CLI binaries
 
 **Desktop App Location**: `apps/conduit-desktop/`
+
+**Setup Wizard Steps**:
+1. Welcome - Introduction and feature overview
+2. CLI Install - Installs bundled binaries to `~/.local/bin`
+3. Dependencies - Detects/installs Ollama, Docker/Podman via Homebrew
+4. Services - Starts daemon, Qdrant, FalkorDB containers
+5. Models - Pulls Ollama models (nomic-embed-text, qwen2.5-coder, mistral)
+6. Complete - Summary and quick start tips
 
 ### Recently Completed (Post-V0)
 

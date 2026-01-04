@@ -1193,4 +1193,167 @@ apps/conduit-desktop/
 
 ---
 
+### Phase 17: First-Run Setup Wizard & Bundled CLI
+**Date**: January 2026
+
+#### Context
+After implementing the Desktop app (Phase 16), users still needed to install the CLI separately using the shell script. This created a fragmented installation experience: DMG for Desktop, shell script for CLI.
+
+The goal was to provide a unified installation where the DMG includes everything:
+1. Desktop application
+2. CLI binaries (conduit, conduit-daemon)
+3. First-run wizard to guide setup
+
+#### Solution: Bundled Binaries + Setup Wizard
+
+**Bundled CLI Architecture**:
+```
+Conduit.app/
+└── Contents/
+    └── Resources/
+        └── bin/
+            ├── conduit         # Go binary
+            ├── conduit-daemon  # Go binary
+            └── manifest.json   # Version info
+```
+
+**Build Pipeline**:
+```
+npm run package:mac
+    └── bundle:cli (pre-build)
+        ├── go build ./cmd/conduit → resources/bin/conduit
+        └── go build ./cmd/conduit-daemon → resources/bin/conduit-daemon
+```
+
+**Version Compatibility**:
+```json
+// package.json
+{
+  "conduit": {
+    "minCLIVersion": "0.1.0",
+    "bundledCLIVersion": "0.1.0",
+    "compatibilityNotes": "Initial release"
+  }
+}
+```
+
+#### Setup Wizard Implementation
+
+**6-Step Process**:
+| Step | Purpose | IPC Handlers |
+|------|---------|--------------|
+| Welcome | Introduction & feature overview | - |
+| CLI Install | Copy binaries to ~/.local/bin | `setup:check-cli`, `setup:install-cli` |
+| Dependencies | Detect Ollama, Docker/Podman | `setup:check-dependencies`, `setup:install-dependency` |
+| Services | Start daemon, Qdrant, FalkorDB | `setup:check-services`, `setup:start-service` |
+| Models | Pull Ollama models with progress | `setup:check-models`, `setup:pull-model` |
+| Complete | Summary & quick start tips | - |
+
+**State Persistence** (Zustand with localStorage):
+```typescript
+persist(
+  (set) => ({ /* state */ }),
+  {
+    name: 'conduit-setup',
+    partialize: (state) => ({
+      setupCompleted: state.setupCompleted,
+      cliVersion: state.cliVersion,
+      // Only persist completion state, not transient data
+    }),
+  }
+)
+```
+
+#### Key Implementation Details
+
+**1. Secure CLI Installation**
+```javascript
+// bundle-cli.js uses execFileSync, not execSync (command injection safe)
+execFileSync('go', [
+  'build',
+  '-tags', 'fts5',
+  '-ldflags', `-s -w -X main.version=${version}`,
+  '-o', path.join(RESOURCES_DIR, 'conduit'),
+  './cmd/conduit'
+], { cwd: ROOT_DIR, env: buildEnv });
+```
+
+**2. Container Runtime Detection**
+```go
+// Try podman first, fall back to docker
+func execContainerCommand(args []string) (string, error) {
+    if out, err := execFileAsync("podman", args); err == nil {
+        return out, nil
+    }
+    return execFileAsync("docker", args)
+}
+```
+
+**3. Progress Streaming for Model Downloads**
+```typescript
+// Main process: Stream Ollama output to renderer
+child.stderr.on('data', (data) => {
+  const match = data.toString().match(/(\d+)%/)
+  if (match) {
+    window.webContents.send('ollama:pull-progress', {
+      model: modelName,
+      progress: parseInt(match[1])
+    })
+  }
+})
+```
+
+#### Files Created/Modified
+
+| File | Purpose |
+|------|---------|
+| `scripts/bundle-cli.js` | Compiles Go binaries, creates manifest |
+| `src/main/setup-ipc.ts` | All setup IPC handlers |
+| `src/renderer/stores/setup.ts` | Setup wizard state |
+| `src/renderer/components/setup/SetupWizard.tsx` | Main wizard shell |
+| `src/renderer/components/setup/steps/*.tsx` | 6 step components |
+| `src/main/updater.ts` | Enhanced with CLI version compatibility |
+| `electron-builder.yml` | extraResources for bin/ |
+| `package.json` | conduit metadata, build scripts |
+
+#### Version Compatibility Strategy
+
+**Separate Versioning**:
+- Desktop: `desktop-v0.1.x` tags
+- CLI: `cli-v0.1.x` tags
+- Desktop declares `minCLIVersion` requirement
+
+**Update Flow**:
+```
+Desktop Update Downloaded
+    ├── Check bundled CLI version vs installed
+    ├── If minCLIVersion > installed:
+    │   └── Auto-update CLI from bundle
+    └── If optional update available:
+        └── Prompt user to update CLI
+```
+
+#### Outcome
+
+- ✅ Single DMG installs everything (Desktop + CLI + Daemon)
+- ✅ 6-step setup wizard guides first-run experience
+- ✅ Automatic dependency detection with install assistance
+- ✅ Model download progress with real-time updates
+- ✅ Version compatibility system for coordinated updates
+- ✅ Graceful degradation when dependencies unavailable
+
+#### Lessons Learned
+
+> **1. execFileSync > execSync**: Always use array arguments to avoid command injection vulnerabilities. The security hook caught this during development.
+
+> **2. Separate install path**: Using `~/.local/bin` is cleaner than `/usr/local/bin` for user-level installs and avoids sudo requirements.
+
+> **3. Persist only completion state**: Don't persist transient state like "current operation" or "error message" - only the essential completion flags.
+
+> **4. Container runtime abstraction**: Supporting both Docker and Podman with automatic fallback provides flexibility without user confusion.
+
+> **5. Streaming progress is essential**: Large model downloads (4+ GB) need real-time progress feedback. Polling stdout/stderr for percentage works well.
+
+---
+
 *Last Updated: January 2026*

@@ -4,7 +4,13 @@
   "description": "Conduit Desktop - AI Intelligence Hub for macOS",
   "author": "Simpleflo",
   "license": "MIT",
+  "homepage": "https://conduit.simpleflo.dev",
   "main": "dist/main/index.js",
+  "conduit": {
+    "minCLIVersion": "0.1.0",
+    "bundledCLIVersion": "0.1.0",
+    "compatibilityNotes": "Initial release - requires CLI 0.1.0 or later"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -12,12 +18,16 @@
     "start": "electron .",
     "lint": "eslint src --ext .ts,.tsx",
     "typecheck": "tsc --noEmit",
+    "bundle:cli": "node scripts/bundle-cli.js",
+    "prebuild:full": "npm run bundle:cli",
+    "build:full": "npm run prebuild:full && electron-vite build",
     "package": "npm run build && electron-builder",
-    "package:mac": "npm run build && electron-builder --mac",
-    "package:mac:dmg": "npm run build && electron-builder --mac dmg",
-    "package:mac:zip": "npm run build && electron-builder --mac zip",
-    "package:mac:universal": "npm run build && electron-builder --mac --universal",
-    "release": "npm run build && electron-builder --mac --publish always"
+    "package:mac": "npm run build:full && electron-builder --mac",
+    "package:mac:dmg": "npm run build:full && electron-builder --mac dmg",
+    "package:mac:zip": "npm run build:full && electron-builder --mac zip",
+    "package:mac:universal": "npm run build:full && electron-builder --mac --universal",
+    "release": "npm run build:full && electron-builder --mac --publish always",
+    "release:cli": "npm run bundle:cli && echo 'CLI binaries ready for release'"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

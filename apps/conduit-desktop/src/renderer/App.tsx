@@ -1,7 +1,8 @@
 import { useEffect, useState, lazy, Suspense, useMemo, useCallback } from 'react'
 import { NavigationShell } from './components/layout/NavigationShell'
-import { useDaemonStore, useInstancesStore, useKBStore, useSettingsStore } from './stores'
+import { useDaemonStore, useInstancesStore, useKBStore, useSettingsStore, useSetupStore } from './stores'
 import { UpdateBanner } from './components/ui/UpdateBanner'
+import { SetupWizard } from './components/setup/SetupWizard'
 import { Loader2 } from 'lucide-react'
 
 // Lazy load views for better initial load performance
@@ -25,6 +26,7 @@ export default function App(): JSX.Element {
   const [route, setRoute] = useState<Route>('/')
   const [searchOpen, setSearchOpen] = useState(false)
   const { theme } = useSettingsStore()
+  const { setupCompleted } = useSetupStore()
   const { setSSEConnected, setStatus, refresh: refreshDaemon } = useDaemonStore()
   const { updateInstance, addInstance, removeInstance, refresh: refreshInstances } = useInstancesStore()
   const { addSource, removeSource, updateSource, setSyncing, refresh: refreshKB } = useKBStore()
@@ -151,6 +153,11 @@ export default function App(): JSX.Element {
   const handleSearchOpenChange = useCallback((open: boolean) => {
     setSearchOpen(open)
   }, [])
+
+  // Show setup wizard if setup is not completed
+  if (!setupCompleted) {
+    return <SetupWizard />
+  }
 
   return (
     <div className="h-screen flex flex-col">

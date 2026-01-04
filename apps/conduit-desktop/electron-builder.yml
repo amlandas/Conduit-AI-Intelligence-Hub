@@ -16,11 +16,18 @@ files:
   - "!node_modules/**/*"
 
 # Extra resources (copied to app resources folder)
+# Includes bundled CLI binaries for first-run installation
 extraResources:
   - from: resources/
     to: resources/
     filter:
       - "**/*"
+  - from: resources/bin/
+    to: bin/
+    filter:
+      - conduit
+      - conduit-daemon
+      - manifest.json
 
 # macOS Configuration
 mac:

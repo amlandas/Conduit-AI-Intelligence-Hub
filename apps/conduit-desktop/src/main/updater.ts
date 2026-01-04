@@ -2,12 +2,16 @@
  * Auto-update module for Conduit Desktop
  *
  * Uses electron-updater to check for and install updates from GitHub Releases.
+ * Includes version compatibility logic for bundled CLI binaries.
  * In development mode, updates are disabled.
  */
 
 import { autoUpdater, UpdateInfo } from 'electron-updater'
-import { BrowserWindow, ipcMain } from 'electron'
+import { BrowserWindow, ipcMain, app } from 'electron'
 import { is } from '@electron-toolkit/utils'
+import * as path from 'path'
+import * as fs from 'fs'
+import * as os from 'os'
 
 // Configure logging
 autoUpdater.logger = console
@@ -25,6 +29,77 @@ export interface UpdateStatus {
   error: string | null
   version: string | null
   releaseNotes: string | null
+  // CLI version compatibility info
+  cliUpdateRequired: boolean
+  bundledCLIVersion: string | null
+  installedCLIVersion: string | null
+}
+
+// Get package.json metadata
+function getPackageMetadata(): { minCLIVersion: string; bundledCLIVersion: string } | null {
+  try {
+    const pkgPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'app.asar', 'package.json')
+      : path.join(__dirname, '../../package.json')
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'))
+    return pkg.conduit || null
+  } catch {
+    return null
+  }
+}
+
+// Get currently installed CLI version
+async function getInstalledCLIVersion(): Promise<string | null> {
+  try {
+    const { execFile } = await import('child_process')
+    const { promisify } = await import('util')
+    const execFileAsync = promisify(execFile)
+    const { stdout } = await execFileAsync('conduit', ['version'])
+    return stdout.trim().replace(/^v/, '')
+  } catch {
+    return null
+  }
+}
+
+// Compare semver versions (returns 1 if a > b, -1 if a < b, 0 if equal)
+function compareVersions(a: string, b: string): number {
+  const partsA = a.split('.').map(Number)
+  const partsB = b.split('.').map(Number)
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const partA = partsA[i] || 0
+    const partB = partsB[i] || 0
+    if (partA > partB) return 1
+    if (partA < partB) return -1
+  }
+  return 0
+}
+
+// Install CLI binaries from app bundle to ~/.local/bin
+async function installCLIFromBundle(): Promise<boolean> {
+  try {
+    const bundledPath = app.isPackaged
+      ? path.join(process.resourcesPath, 'bin')
+      : path.join(__dirname, '../../resources/bin')
+    const installPath = path.join(os.homedir(), '.local', 'bin')
+
+    // Ensure install directory exists
+    await fs.promises.mkdir(installPath, { recursive: true })
+
+    // Copy binaries
+    const binaries = ['conduit', 'conduit-daemon']
+    for (const binary of binaries) {
+      const src = path.join(bundledPath, binary)
+      const dest = path.join(installPath, binary)
+      await fs.promises.copyFile(src, dest)
+      await fs.promises.chmod(dest, 0o755)
+    }
+
+    console.log('CLI binaries installed successfully to', installPath)
+    return true
+  } catch (err) {
+    console.error('Failed to install CLI binaries:', err)
+    return false
+  }
 }
 
 let updateStatus: UpdateStatus = {
@@ -35,7 +110,10 @@ let updateStatus: UpdateStatus = {
   progress: 0,
   error: null,
   version: null,
-  releaseNotes: null
+  releaseNotes: null,
+  cliUpdateRequired: false,
+  bundledCLIVersion: null,
+  installedCLIVersion: null
 }
 
 let mainWindow: BrowserWindow | null = null
@@ -55,7 +133,27 @@ function resetStatus(): void {
     progress: 0,
     error: null,
     version: null,
-    releaseNotes: null
+    releaseNotes: null,
+    cliUpdateRequired: false,
+    bundledCLIVersion: null,
+    installedCLIVersion: null
+  }
+}
+
+// Check if CLI update is needed based on installed vs bundled versions
+async function checkCLIUpdateNeeded(): Promise<void> {
+  const metadata = getPackageMetadata()
+  const installedVersion = await getInstalledCLIVersion()
+
+  updateStatus.bundledCLIVersion = metadata?.bundledCLIVersion || null
+  updateStatus.installedCLIVersion = installedVersion
+
+  if (metadata?.minCLIVersion && installedVersion) {
+    // CLI update required if installed version is below minimum
+    updateStatus.cliUpdateRequired = compareVersions(metadata.minCLIVersion, installedVersion) > 0
+  } else if (!installedVersion && metadata?.bundledCLIVersion) {
+    // CLI not installed but we have bundled version
+    updateStatus.cliUpdateRequired = true
   }
 }
 
@@ -114,11 +212,15 @@ export function initAutoUpdater(window: BrowserWindow): void {
     sendStatusToRenderer()
   })
 
-  autoUpdater.on('update-downloaded', (info: UpdateInfo) => {
+  autoUpdater.on('update-downloaded', async (info: UpdateInfo) => {
     console.log('Update downloaded:', info.version)
     updateStatus.downloading = false
     updateStatus.downloaded = true
     updateStatus.version = info.version
+
+    // Check if CLI update is needed after Desktop update
+    await checkCLIUpdateNeeded()
+
     sendStatusToRenderer()
   })
 
@@ -150,6 +252,22 @@ export function initAutoUpdater(window: BrowserWindow): void {
 
   ipcMain.handle('update:get-status', (): UpdateStatus => {
     return updateStatus
+  })
+
+  // Update CLI from bundled binaries (called after Desktop update if needed)
+  ipcMain.handle('update:install-cli', async (): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const success = await installCLIFromBundle()
+      if (success) {
+        // Refresh CLI version info
+        await checkCLIUpdateNeeded()
+        sendStatusToRenderer()
+        return { success: true }
+      }
+      return { success: false, error: 'Failed to install CLI binaries' }
+    } catch (err) {
+      return { success: false, error: (err as Error).message }
+    }
   })
 
   // Check for updates on startup (after a short delay)

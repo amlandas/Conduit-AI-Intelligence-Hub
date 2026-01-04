@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell, ipcMain } from 'electron'
 import { join } from 'path'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupIpcHandlers } from './ipc'
+import { setupSetupIpcHandlers } from './setup-ipc'
 import { createApplicationMenu } from './menu'
 import { initAutoUpdater } from './updater'
 
@@ -52,6 +53,7 @@ app.whenReady().then(() => {
 
   createApplicationMenu()
   setupIpcHandlers()
+  setupSetupIpcHandlers()
   createWindow()
 
   // Initialize auto-updater after window is created
