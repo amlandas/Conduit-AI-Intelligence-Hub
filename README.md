@@ -234,7 +234,11 @@ conduit kb search <query> --mmr-lambda 0.9      # More relevance, less diversity
 
 # KAG (Knowledge Graph) operations
 conduit kb kag-sync               # Extract entities from indexed documents
-conduit kb kag-status             # Show extraction progress and entity counts
+conduit kb kag-sync --force       # Re-extract all chunks
+conduit kb kag-status             # Show detailed dashboard with progress bar
+conduit kb kag-retry              # Retry failed extractions
+conduit kb kag-retry --dry-run    # Preview what would be retried
+conduit kb kag-retry --max-retries 3  # Retry with custom attempts (max: 5)
 conduit kb kag-query <query>      # Query the knowledge graph
 conduit kb kag-query <query> --entities Docker,Kubernetes  # With entity hints
 conduit kb kag-query <query> --max-hops 3  # Multi-hop traversal (max: 3)
@@ -590,10 +594,16 @@ conduit falkordb status
 # Check if extraction model is available
 ollama list | grep mistral
 
-# Check extraction status
+# Check extraction status (shows progress, errors, system resources)
 conduit kb kag-status
 
-# Force re-extraction
+# Retry failed extractions (with automatic retry logic)
+conduit kb kag-retry
+
+# Preview what would be retried
+conduit kb kag-retry --dry-run
+
+# Force re-extraction of all chunks
 conduit kb kag-sync --force
 ```
 

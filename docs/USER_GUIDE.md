@@ -637,27 +637,55 @@ After indexing documents, extract entities and relationships:
 # Sync entities from all indexed documents
 conduit kb kag-sync
 
-# Sync a specific source only
-conduit kb kag-sync --source <source-id>
+# Force re-extraction of all chunks
+conduit kb kag-sync --force
 
-# Check extraction status
+# Check extraction status dashboard
 conduit kb kag-status
+
+# Retry failed extractions
+conduit kb kag-retry
+
+# Preview failed chunks before retrying
+conduit kb kag-retry --dry-run
+
+# Retry with custom max attempts (default: 2, max: 5)
+conduit kb kag-retry --max-retries 3
 ```
 
-**Example Output**:
+**Example Dashboard Output** (`conduit kb kag-status`):
 ```
 KAG Extraction Status
-─────────────────────
-Total Chunks:     1,247
-Extracted:        1,200
-Pending:          47
-Failed:           0
+═══════════════════════════════════════════════════════════
 
-Entities:         3,456
-Relations:        1,234
+Progress:
+  ████████████████████████████████████████ 1039/1039 chunks (100.0%)
 
-Background Workers: 2 active
-Queue Size:        47 pending
+  Completed:  1039 (100.0%)
+  Errors:     0 (0.0%)
+  Pending:    0 (0.0%)
+
+Entities & Relations:
+───────────────────────────────────────────────────────────
+  Entities:   2313 extracted
+  Relations:  602 extracted
+  Avg/chunk:  2.2 entities, 0.6 relations
+
+System Resources:
+───────────────────────────────────────────────────────────
+  RAM:        0.9 MB (Go process)
+  Storage:    334.3 MB (~/.conduit/)
+  CPU Cores:  12 available
+
+Ollama Status:
+───────────────────────────────────────────────────────────
+  Model:      mistral:7b-instruct-q4_K_M
+  Status:     loaded (GPU 100%)
+
+Commands:
+───────────────────────────────────────────────────────────
+  conduit kb kag-retry        # Retry failed chunks
+  conduit kb kag-sync --force # Re-extract all chunks
 ```
 
 ### Querying the Knowledge Graph
