@@ -4,7 +4,9 @@ import { resolve } from 'path'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
+    // Exclude electron-updater from externalization so it gets bundled
+    // This is required because electron-builder excludes node_modules
+    plugins: [externalizeDepsPlugin({ exclude: ['electron-updater'] })],
     build: {
       outDir: 'dist/main',
       rollupOptions: {
