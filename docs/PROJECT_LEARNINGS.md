@@ -1095,4 +1095,102 @@ if existing != nil {
 
 ---
 
+### Phase 16: macOS Desktop Application (Conduit Desktop)
+**Date**: January 2026
+
+#### Context
+Following the completion of the CLI and KAG improvements (Phases 14-15), the next milestone was building a native macOS desktop application to provide a graphical interface for users who prefer not to use the command line.
+
+#### Implementation Overview
+
+The desktop app was built in 6 phases over a single development session:
+
+| Phase | Focus | PR |
+|-------|-------|-----|
+| Phase 1 | Electron foundation, IPC bridge, main/renderer setup | PR #11 |
+| Phase 2 | Core views (Dashboard, KB, Connectors, Settings) + SSE sync | PR #11 |
+| Phase 3 | Daemon SSE integration (already existed from CLI) | - |
+| Phase 4 | Advanced Mode (RAG tuning, KAG panel, permissions) | PR #12 |
+| Phase 5 | Developer Mode (config editor, log viewer, daemon controls) | PR #12 |
+| Phase 6 | Distribution (auto-updates, DMG packaging, notarization) | PR #13 |
+
+#### Technology Stack
+
+- **Framework**: Electron with electron-vite
+- **UI Library**: React + shadcn/ui + Tailwind CSS
+- **State Management**: Zustand
+- **Real-time Sync**: SSE over Unix socket via IPC bridge
+- **Auto-updates**: electron-updater with GitHub Releases
+
+#### Key Architecture Decisions
+
+**1. Three-Tier Mode System**
+```typescript
+type Mode = 'default' | 'advanced' | 'developer'
+
+// Default: Full visibility, simple controls
+// Advanced: RAG/KAG tuning sliders, container controls
+// Developer: Config editor, logs, API endpoint toggle
+```
+
+**2. Real-time Daemon Sync**
+```
+Main Process ──────────────────────────> Renderer
+    │                                        │
+    │  SSE over Unix socket                  │
+    │  (/api/v1/events)                      │
+    │                                        │
+    └─> IPC channel ──> Zustand stores ──────┘
+```
+
+**3. Lazy Loading for Performance**
+```typescript
+const DashboardView = lazy(() => import('./DashboardView'))
+const KBView = lazy(() => import('./KBView'))
+// Reduces initial bundle, improves startup time
+```
+
+#### Files Structure
+
+```
+apps/conduit-desktop/
+├── src/
+│   ├── main/           # Electron main process
+│   │   ├── index.ts    # BrowserWindow, IPC setup
+│   │   ├── menu.ts     # macOS application menu
+│   │   ├── ipc.ts      # Unix socket client bridge
+│   │   └── updater.ts  # Auto-update module
+│   ├── preload/        # Context bridge
+│   │   └── index.ts    # Exposes conduit API to renderer
+│   └── renderer/       # React application
+│       ├── App.tsx
+│       ├── components/ # UI components by domain
+│       └── stores/     # Zustand stores
+├── electron-builder.yml
+└── package.json
+```
+
+#### Lessons Learned
+
+> **1. Mode system philosophy**: Default mode shows all information but hides tuning parameters. Users see everything, they just don't get overwhelmed with sliders until they want them.
+
+> **2. electron-vite is excellent**: Much better DX than raw Electron + Vite configuration. Hot reload, proper build splits, TypeScript out of the box.
+
+> **3. shadcn/ui works great in Electron**: Copy/paste component model means we own the code. Easy to customize for macOS HIG feel.
+
+> **4. Auto-updates need proper signing**: electron-updater requires code signing for production. Plan for Apple Developer enrollment early.
+
+> **5. Branding matters from day one**: Used `com.simpleflo.conduit` initially but domain is `simpleflo.dev`. Fixed to `dev.simpleflo.conduit` in PR #14.
+
+#### Outcome
+
+- ✅ Native macOS desktop app with vibrancy, traffic lights, SF Pro typography
+- ✅ Real-time sync with daemon via SSE
+- ✅ Three-tier mode system (Default/Advanced/Developer)
+- ✅ Auto-update infrastructure ready for distribution
+- ✅ DMG builds working (85.8 MB for arm64)
+- ✅ All views implemented: Dashboard, KB, Connectors, Settings
+
+---
+
 *Last Updated: January 2026*

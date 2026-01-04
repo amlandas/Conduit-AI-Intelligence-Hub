@@ -152,6 +152,45 @@ conduit setup
 conduit service status
 ```
 
+## Desktop App (macOS)
+
+Conduit includes a native macOS desktop application for users who prefer a graphical interface.
+
+### Running the Desktop App
+
+```bash
+# From the repository root
+cd apps/conduit-desktop
+
+# Install dependencies
+npm install
+
+# Run in development mode
+npm run dev
+
+# Build for production
+npm run build
+
+# Package as DMG
+npm run package:mac:dmg
+```
+
+### Desktop App Features
+
+- **Dashboard**: Real-time status of daemon, Ollama, Qdrant, FalkorDB, and container runtime
+- **Knowledge Base**: Search, manage sources, view sync progress
+- **Connectors**: Start/stop instances, manage bindings
+- **Settings**: Theme, mode selection (Default/Advanced/Developer)
+- **Auto-Updates**: Automatic update checks from GitHub Releases
+
+### Mode System
+
+| Mode | Features |
+|------|----------|
+| **Default** | Full visibility, simple controls |
+| **Advanced** | RAG/KAG tuning sliders, container controls, permissions |
+| **Developer** | Config editor, log viewer, daemon controls, API toggle |
+
 ## Project Structure
 
 ```
