@@ -3419,23 +3419,221 @@ Examples:
 
 // uninstallCmd removes Conduit
 func uninstallCmd() *cobra.Command {
-	return &cobra.Command{
+	var (
+		keepData      bool
+		all           bool
+		full          bool
+		force         bool
+		dryRun        bool
+		jsonOutput    bool
+		removeOllama  bool
+		removeQdrant  bool
+		removeFalkorDB bool
+		showInfo      bool
+	)
+
+	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Uninstall Conduit",
-		Long: `Remove Conduit daemon service and configuration.
+		Long: `Remove Conduit daemon service, binaries, and optionally data/dependencies.
 
-This command will:
-1. Stop the Conduit daemon
-2. Remove the daemon service
-3. Optionally remove configuration and data
+UNINSTALL TIERS:
+  --keep-data    Tier 1: Remove binaries and service, keep data for reinstall
+  --all          Tier 2: Remove everything including data and containers
+  --full         Tier 3: Full cleanup including Ollama (with --remove-ollama)
 
-Note: This does NOT remove the Conduit binaries or dependencies
-(Docker, Podman, Ollama).`,
+SELECTIVE REMOVAL:
+  --remove-qdrant      Remove Qdrant container
+  --remove-falkordb    Remove FalkorDB container
+  --remove-ollama      Remove Ollama and all models
+
+SAFETY FLAGS:
+  --force        Skip all confirmations
+  --dry-run      Show what would be removed without removing
+  --json         Output results as JSON
+
+NOTE: Docker/Podman are NEVER removed as they are system tools.
+
+Examples:
+  conduit uninstall                    # Interactive mode
+  conduit uninstall --keep-data        # Keep data for reinstall
+  conduit uninstall --all --force      # Remove data without prompts
+  conduit uninstall --dry-run          # Preview what would be removed
+  conduit uninstall --info             # Show what's installed`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			inst := installer.New(false)
-			return inst.Uninstall(cmd.Context())
+			ctx := cmd.Context()
+
+			// Show info mode
+			if showInfo {
+				info, err := inst.GetUninstallInfo(ctx)
+				if err != nil {
+					return fmt.Errorf("failed to get uninstall info: %w", err)
+				}
+				if jsonOutput {
+					enc := json.NewEncoder(os.Stdout)
+					enc.SetIndent("", "  ")
+					return enc.Encode(info)
+				}
+				inst.PrintUninstallInfo(info)
+				return nil
+			}
+
+			// Build options based on flags
+			var opts installer.UninstallOptions
+
+			switch {
+			case full:
+				opts = installer.NewUninstallOptionsFull()
+				opts.RemoveOllama = removeOllama // Still require explicit flag for Ollama
+			case all:
+				opts = installer.NewUninstallOptionsAll()
+			case keepData:
+				opts = installer.NewUninstallOptionsKeepData()
+			default:
+				// Interactive mode - show current state and ask
+				info, err := inst.GetUninstallInfo(ctx)
+				if err != nil {
+					return fmt.Errorf("failed to get uninstall info: %w", err)
+				}
+				inst.PrintUninstallInfo(info)
+
+				// If nothing to remove, exit
+				if !info.HasDaemonService && !info.HasBinaries && !info.HasDataDir {
+					fmt.Println("Nothing to uninstall.")
+					return nil
+				}
+
+				// Interactive prompts
+				fmt.Println("Choose uninstall option:")
+				fmt.Println()
+				fmt.Println("  [1] Keep Data - Remove service/binaries, keep data for reinstall")
+				fmt.Println("  [2] Remove All - Remove service/binaries/data/containers")
+				fmt.Println("  [3] Full Cleanup - Remove everything including Ollama")
+				fmt.Println("  [q] Cancel")
+				fmt.Println()
+
+				reader := bufio.NewReader(os.Stdin)
+				fmt.Print("Enter choice [1/2/3/q]: ")
+				choice, _ := reader.ReadString('\n')
+				choice = strings.TrimSpace(choice)
+
+				switch choice {
+				case "1":
+					opts = installer.NewUninstallOptionsKeepData()
+				case "2":
+					opts = installer.NewUninstallOptionsAll()
+				case "3":
+					opts = installer.NewUninstallOptionsFull()
+					fmt.Print("Remove Ollama and all models? [y/N]: ")
+					ollamaChoice, _ := reader.ReadString('\n')
+					opts.RemoveOllama = strings.ToLower(strings.TrimSpace(ollamaChoice)) == "y"
+				default:
+					fmt.Println("Uninstallation cancelled.")
+					return nil
+				}
+			}
+
+			// Apply selective flags (override tier settings)
+			if removeQdrant {
+				opts.RemoveQdrantContainer = true
+			}
+			if removeFalkorDB {
+				opts.RemoveFalkorDBContainer = true
+			}
+			if removeOllama {
+				opts.RemoveOllama = true
+			}
+
+			opts.Force = force
+			opts.DryRun = dryRun
+			opts.JSON = jsonOutput
+
+			// Confirmation for data removal (unless --force or --dry-run)
+			if !force && !dryRun && opts.RemoveDataDir {
+				fmt.Println()
+				fmt.Println("⚠  WARNING: This will permanently delete all Conduit data!")
+				fmt.Println()
+				reader := bufio.NewReader(os.Stdin)
+				fmt.Print("Type 'UNINSTALL' to confirm: ")
+				confirm, _ := reader.ReadString('\n')
+				if strings.TrimSpace(confirm) != "UNINSTALL" {
+					fmt.Println("Uninstallation cancelled.")
+					return nil
+				}
+			}
+
+			// Execute uninstall
+			result, err := inst.UninstallWithOptions(ctx, opts)
+			if err != nil {
+				return fmt.Errorf("uninstall failed: %w", err)
+			}
+
+			// Output results
+			if jsonOutput {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(result)
+			}
+
+			// Print results
+			fmt.Println()
+			if dryRun {
+				fmt.Println("═══════════════════════════════════════════════════════════════")
+				fmt.Println("                     DRY RUN - No changes made                  ")
+				fmt.Println("═══════════════════════════════════════════════════════════════")
+			} else {
+				fmt.Println("═══════════════════════════════════════════════════════════════")
+				fmt.Println("                     Uninstallation Complete                    ")
+				fmt.Println("═══════════════════════════════════════════════════════════════")
+			}
+			fmt.Println()
+
+			if len(result.ItemsRemoved) > 0 {
+				for _, item := range result.ItemsRemoved {
+					fmt.Printf("  ✓ %s\n", item)
+				}
+			}
+
+			if len(result.ItemsFailed) > 0 {
+				fmt.Println()
+				fmt.Println("Failed to remove:")
+				for _, item := range result.ItemsFailed {
+					fmt.Printf("  ✗ %s\n", item)
+				}
+			}
+
+			if len(result.Errors) > 0 {
+				fmt.Println()
+				fmt.Println("Errors:")
+				for _, err := range result.Errors {
+					fmt.Printf("  • %s\n", err)
+				}
+			}
+
+			fmt.Println()
+
+			return nil
 		},
 	}
+
+	// Tier flags
+	cmd.Flags().BoolVar(&keepData, "keep-data", false, "Tier 1: Remove binaries/service, keep data")
+	cmd.Flags().BoolVar(&all, "all", false, "Tier 2: Remove everything including data and containers")
+	cmd.Flags().BoolVar(&full, "full", false, "Tier 3: Full cleanup (use with --remove-ollama for Ollama)")
+
+	// Selective flags
+	cmd.Flags().BoolVar(&removeQdrant, "remove-qdrant", false, "Remove Qdrant container")
+	cmd.Flags().BoolVar(&removeFalkorDB, "remove-falkordb", false, "Remove FalkorDB container")
+	cmd.Flags().BoolVar(&removeOllama, "remove-ollama", false, "Remove Ollama and all models")
+
+	// Safety flags
+	cmd.Flags().BoolVar(&force, "force", false, "Skip all confirmations")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be removed without removing")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output results as JSON")
+	cmd.Flags().BoolVar(&showInfo, "info", false, "Show installation status without uninstalling")
+
+	return cmd
 }
 
 // serviceCmd manages the daemon service

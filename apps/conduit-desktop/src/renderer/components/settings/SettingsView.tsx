@@ -4,6 +4,7 @@ import { useSettingsStore, AppMode } from '@/stores'
 import { RAGTuningPanel, RAGSettings } from '../kb/RAGTuningPanel'
 import { DaemonControls } from './DaemonControls'
 import { LogViewer } from './LogViewer'
+import { UninstallPanel } from './UninstallPanel'
 import {
   Monitor,
   Moon,
@@ -21,7 +22,8 @@ import {
   FileCode,
   Server,
   ScrollText,
-  Loader2
+  Loader2,
+  Trash2
 } from 'lucide-react'
 
 // Lazy load Monaco editor for better initial load performance
@@ -425,6 +427,15 @@ export function SettingsView(): JSX.Element {
           <LogViewer />
         </section>
       )}
+
+      {/* Uninstall */}
+      <section>
+        <h2 className="text-lg font-medium mb-4 flex items-center gap-2">
+          <Trash2 className="w-5 h-5 text-macos-red" />
+          Uninstall
+        </h2>
+        <UninstallPanel />
+      </section>
 
       {/* About */}
       <section>
