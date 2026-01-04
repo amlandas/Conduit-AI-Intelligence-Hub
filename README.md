@@ -22,6 +22,19 @@ Download and install via the graphical interface:
 
 > **Note:** The Desktop app bundles CLI binaries, so you don't need Go or any build tools installed.
 
+### macOS Security Note
+
+When first opening Conduit on macOS, you may see **"Conduit.app is damaged and can't be opened"**. This happens because the app is not yet notarized with Apple.
+
+**To fix this, run in Terminal:**
+```bash
+xattr -cr /Applications/Conduit.app
+```
+
+Then open Conduit normally. This only needs to be done once after installation.
+
+> **Alternative:** Right-click Conduit.app in Applications → Select "Open" → Click "Open" in the dialog.
+
 ## CLI Installation
 
 For terminal-based installation, run:
