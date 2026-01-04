@@ -77,6 +77,48 @@ export function setupIpcHandlers(): void {
     return daemonClient.get(`/kb/search?${params.toString()}`)
   })
 
+  ipcMain.handle('kb:kag-search', async (_, query: string, options?: object) => {
+    const params = new URLSearchParams({ q: query })
+    if (options) {
+      Object.entries(options).forEach(([key, value]) => {
+        if (value !== undefined) {
+          params.set(key, String(value))
+        }
+      })
+    }
+    try {
+      return await daemonClient.get(`/kb/kag/search?${params.toString()}`)
+    } catch (err) {
+      return { error: (err as Error).message, entities: [], relations: [] }
+    }
+  })
+
+  // Instance permissions (Advanced Mode)
+  ipcMain.handle('instances:permissions', async (_, id: string) => {
+    try {
+      return await daemonClient.get(`/instances/${id}/permissions`)
+    } catch (err) {
+      // Return mock data when API not available
+      return { error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('instances:set-permission', async (_, id: string, permId: string, granted: boolean) => {
+    try {
+      return await daemonClient.post(`/instances/${id}/permissions`, { permission: permId, granted })
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
+  ipcMain.handle('instances:audit', async (_, id: string) => {
+    try {
+      return await daemonClient.post(`/instances/${id}/audit`)
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
   // Client bindings
   ipcMain.handle('bindings:list', async () => {
     try {

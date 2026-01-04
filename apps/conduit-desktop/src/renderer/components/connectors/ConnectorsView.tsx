@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
-import { useInstancesStore } from '@/stores'
+import { useInstancesStore, useSettingsStore } from '@/stores'
 import { AddConnectorModal } from './AddConnectorModal'
+import { ConnectorPermissions } from './ConnectorPermissions'
 import {
   Cable,
   Play,
@@ -9,12 +10,27 @@ import {
   Trash2,
   RefreshCw,
   Plus,
-  Loader2
+  Loader2,
+  Shield
 } from 'lucide-react'
 
 export function ConnectorsView(): JSX.Element {
   const { instances, loading, refresh, addInstance } = useInstancesStore()
+  const { isFeatureVisible } = useSettingsStore()
   const [addModalOpen, setAddModalOpen] = useState(false)
+  const [expandedInstances, setExpandedInstances] = useState<Set<string>>(new Set())
+
+  const toggleExpanded = (id: string): void => {
+    setExpandedInstances((prev) => {
+      const newSet = new Set(prev)
+      if (newSet.has(id)) {
+        newSet.delete(id)
+      } else {
+        newSet.add(id)
+      }
+      return newSet
+    })
+  }
 
   const handleStart = async (id: string): Promise<void> => {
     try {
@@ -101,72 +117,105 @@ export function ConnectorsView(): JSX.Element {
         </div>
       ) : (
         <div className="space-y-3">
-          {instances.map((instance) => (
-            <div key={instance.id} className="card p-4">
-              <div className="flex items-center gap-4">
-                <div className="p-2.5 rounded-lg bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary">
-                  <Cable className="w-6 h-6 text-macos-blue" />
-                </div>
+          {instances.map((instance) => {
+            const isExpanded = expandedInstances.has(instance.id)
 
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <h3 className="font-medium">{instance.name}</h3>
-                    <span
-                      className={cn(
-                        'status-dot',
-                        getStatusColor(instance.status),
-                        isTransitioning(instance.status) && 'animate-pulse'
+            return (
+              <div key={instance.id} className="card overflow-hidden">
+                <div className="p-4">
+                  <div className="flex items-center gap-4">
+                    <div className="p-2.5 rounded-lg bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary">
+                      <Cable className="w-6 h-6 text-macos-blue" />
+                    </div>
+
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <h3 className="font-medium">{instance.name}</h3>
+                        <span
+                          className={cn(
+                            'status-dot',
+                            getStatusColor(instance.status),
+                            isTransitioning(instance.status) && 'animate-pulse'
+                          )}
+                        />
+                        <span className="text-xs text-macos-text-secondary dark:text-macos-text-dark-secondary uppercase">
+                          {instance.status}
+                        </span>
+                      </div>
+                      <p className="text-sm text-macos-text-secondary dark:text-macos-text-dark-secondary">
+                        {instance.connector}
+                      </p>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {/* Permissions Button - Advanced Mode */}
+                      {isFeatureVisible('showContainerControls') && (
+                        <button
+                          onClick={() => toggleExpanded(instance.id)}
+                          className={cn(
+                            'p-2 rounded transition-colors',
+                            isExpanded
+                              ? 'bg-macos-green/10 text-macos-green'
+                              : 'hover:bg-macos-bg-secondary dark:hover:bg-macos-bg-dark-tertiary text-macos-text-secondary'
+                          )}
+                          title="Permissions"
+                        >
+                          <Shield className="w-4 h-4" />
+                        </button>
                       )}
-                    />
-                    <span className="text-xs text-macos-text-secondary dark:text-macos-text-dark-secondary uppercase">
-                      {instance.status}
-                    </span>
+
+                      {instance.status === 'RUNNING' ? (
+                        <button
+                          onClick={() => handleStop(instance.id)}
+                          className="btn btn-secondary"
+                          disabled={isTransitioning(instance.status)}
+                        >
+                          {isTransitioning(instance.status) ? (
+                            <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                          ) : (
+                            <Square className="w-4 h-4 mr-1.5" />
+                          )}
+                          Stop
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => handleStart(instance.id)}
+                          className="btn btn-primary"
+                          disabled={isTransitioning(instance.status)}
+                        >
+                          {instance.status === 'STARTING' ? (
+                            <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
+                          ) : (
+                            <Play className="w-4 h-4 mr-1.5" />
+                          )}
+                          Start
+                        </button>
+                      )}
+                      <button
+                        onClick={() => handleDelete(instance.id)}
+                        className="p-2 rounded hover:bg-macos-red/10 text-macos-red"
+                        disabled={instance.status === 'RUNNING'}
+                        title={instance.status === 'RUNNING' ? 'Stop connector first' : 'Delete'}
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
                   </div>
-                  <p className="text-sm text-macos-text-secondary dark:text-macos-text-dark-secondary">
-                    {instance.connector}
-                  </p>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  {instance.status === 'RUNNING' ? (
-                    <button
-                      onClick={() => handleStop(instance.id)}
-                      className="btn btn-secondary"
-                      disabled={isTransitioning(instance.status)}
-                    >
-                      {isTransitioning(instance.status) ? (
-                        <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-                      ) : (
-                        <Square className="w-4 h-4 mr-1.5" />
-                      )}
-                      Stop
-                    </button>
-                  ) : (
-                    <button
-                      onClick={() => handleStart(instance.id)}
-                      className="btn btn-primary"
-                      disabled={isTransitioning(instance.status)}
-                    >
-                      {instance.status === 'STARTING' ? (
-                        <Loader2 className="w-4 h-4 mr-1.5 animate-spin" />
-                      ) : (
-                        <Play className="w-4 h-4 mr-1.5" />
-                      )}
-                      Start
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleDelete(instance.id)}
-                    className="p-2 rounded hover:bg-macos-red/10 text-macos-red"
-                    disabled={instance.status === 'RUNNING'}
-                    title={instance.status === 'RUNNING' ? 'Stop connector first' : 'Delete'}
-                  >
-                    <Trash2 className="w-4 h-4" />
-                  </button>
-                </div>
+                {/* Expandable Permissions Panel */}
+                {isExpanded && isFeatureVisible('showContainerControls') && (
+                  <div className="border-t border-macos-separator dark:border-macos-separator-dark">
+                    <ConnectorPermissions
+                      instanceId={instance.id}
+                      instanceName={instance.name}
+                      className="border-0 rounded-none shadow-none"
+                    />
+                  </div>
+                )}
               </div>
-            </div>
-          ))}
+            )
+          })}
         </div>
       )}
 

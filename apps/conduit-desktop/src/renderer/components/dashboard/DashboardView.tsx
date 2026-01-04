@@ -1,6 +1,7 @@
 import { cn } from '@/lib/utils'
-import { useDaemonStore, useInstancesStore, useKBStore } from '@/stores'
+import { useDaemonStore, useInstancesStore, useKBStore, useSettingsStore } from '@/stores'
 import { OllamaModels } from './OllamaModels'
+import { RawJSONViewer } from '../ui/RawJSONViewer'
 import {
   Server,
   Database,
@@ -53,6 +54,7 @@ export function DashboardView(): JSX.Element {
   const { status, stats, refresh } = useDaemonStore()
   const { instances } = useInstancesStore()
   const { sources } = useKBStore()
+  const { isFeatureVisible } = useSettingsStore()
 
   const runningCount = instances.filter((i) => i.status === 'RUNNING').length
 
@@ -147,6 +149,27 @@ export function DashboardView(): JSX.Element {
 
       {/* Ollama Models */}
       <OllamaModels />
+
+      {/* Developer Mode: Raw JSON Status */}
+      {isFeatureVisible('showRawJSON') && (
+        <section>
+          <h2 className="text-lg font-medium mb-3">Raw API Response</h2>
+          <div className="space-y-3">
+            <RawJSONViewer
+              data={{ status, stats }}
+              title="Daemon Status & Stats"
+            />
+            <RawJSONViewer
+              data={{ instances, totalRunning: runningCount }}
+              title="Connector Instances"
+            />
+            <RawJSONViewer
+              data={{ sources, totalSources: sources.length }}
+              title="KB Sources"
+            />
+          </div>
+        </section>
+      )}
     </div>
   )
 }

@@ -7,6 +7,7 @@ export interface DaemonStatus {
   startTime?: string
   instances?: number
   bindings?: number
+  pid?: number
 }
 
 export interface DaemonStats {

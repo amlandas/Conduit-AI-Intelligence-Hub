@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { cn } from '@/lib/utils'
-import { useKBStore } from '@/stores'
+import { useKBStore, useSettingsStore } from '@/stores'
 import { AddSourceModal } from './AddSourceModal'
+import { RAGTuningPanel } from './RAGTuningPanel'
+import { KAGPanel } from './KAGPanel'
 import {
   FolderOpen,
   RefreshCw,
@@ -23,6 +25,7 @@ export function KBView(): JSX.Element {
     removeSource,
     addSource
   } = useKBStore()
+  const { isFeatureVisible } = useSettingsStore()
   const [query, setQuery] = useState(searchQuery)
   const [addModalOpen, setAddModalOpen] = useState(false)
 
@@ -172,6 +175,16 @@ export function KBView(): JSX.Element {
           </div>
         )}
       </section>
+
+      {/* Advanced Mode: RAG Tuning Panel */}
+      {isFeatureVisible('showRAGTuning') && (
+        <RAGTuningPanel className="mt-6" />
+      )}
+
+      {/* Advanced Mode: KAG Panel */}
+      {isFeatureVisible('showKAGPanel') && (
+        <KAGPanel className="mt-6" showSettings={true} />
+      )}
 
       <AddSourceModal
         open={addModalOpen}
