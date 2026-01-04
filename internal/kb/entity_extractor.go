@@ -87,7 +87,24 @@ func NewEntityExtractor(cfg EntityExtractorConfig) (*EntityExtractor, error) {
 
 // ExtractFromChunk extracts entities and relations from a single chunk.
 func (e *EntityExtractor) ExtractFromChunk(ctx context.Context, chunkID, documentID, documentTitle, content string) (*ExtractionResult, error) {
+	return e.ExtractFromChunkWithRetry(ctx, chunkID, documentID, documentTitle, content, 0)
+}
+
+// ExtractFromChunkWithRetry extracts with configurable retry attempts.
+// maxRetries of 0 uses the default from config (2), max allowed is 5.
+func (e *EntityExtractor) ExtractFromChunkWithRetry(ctx context.Context, chunkID, documentID, documentTitle, content string, maxRetries int) (*ExtractionResult, error) {
 	startTime := time.Now()
+
+	// Determine max retries: 0 means use config default, cap at 5
+	if maxRetries <= 0 {
+		maxRetries = e.config.Extraction.RetryAttempts
+		if maxRetries <= 0 {
+			maxRetries = 2 // Default
+		}
+	}
+	if maxRetries > 5 {
+		maxRetries = 5 // Cap at 5
+	}
 
 	// Build extraction request
 	req := &ExtractionRequest{
@@ -100,15 +117,57 @@ func (e *EntityExtractor) ExtractFromChunk(ctx context.Context, chunkID, documen
 		ConfidenceThreshold: e.config.Extraction.ConfidenceThreshold,
 	}
 
-	// Call LLM provider
-	resp, err := e.provider.ExtractEntities(ctx, req)
-	if err != nil {
-		e.updateExtractionStatus(chunkID, "error", 0, 0, err.Error())
+	// Call LLM provider with retry logic
+	var resp *ExtractionResponse
+	var lastErr error
+
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		resp, lastErr = e.provider.ExtractEntities(ctx, req)
+		if lastErr == nil {
+			break // Success
+		}
+
+		// Check if error is retryable
+		if !IsRetryableError(lastErr) {
+			e.logger.Debug().
+				Err(lastErr).
+				Str("chunk_id", chunkID).
+				Int("attempt", attempt).
+				Msg("non-retryable extraction error")
+			break // Don't retry non-retryable errors
+		}
+
+		// Log retry attempt
+		e.logger.Debug().
+			Err(lastErr).
+			Str("chunk_id", chunkID).
+			Int("attempt", attempt).
+			Int("max_retries", maxRetries).
+			Msg("retryable extraction error, will retry")
+
+		if attempt < maxRetries {
+			// Exponential backoff: 1s, 2s, 4s, 8s, 16s (capped at 16s)
+			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
+			if backoff > 16*time.Second {
+				backoff = 16 * time.Second
+			}
+
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+				// Continue to next attempt
+			}
+		}
+	}
+
+	if lastErr != nil {
+		e.updateExtractionStatus(chunkID, "error", 0, 0, lastErr.Error())
 		return &ExtractionResult{
 			ChunkID:    chunkID,
 			DocumentID: documentID,
-			Error:      err.Error(),
-		}, err
+			Error:      lastErr.Error(),
+		}, lastErr
 	}
 
 	// Validate extracted entities and relations

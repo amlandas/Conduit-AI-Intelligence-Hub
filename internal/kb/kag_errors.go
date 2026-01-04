@@ -87,6 +87,9 @@ var (
 	// ErrInvalidExtractionResponse is returned when LLM returns invalid format
 	ErrInvalidExtractionResponse = errors.New("invalid extraction response format")
 
+	// ErrIncompleteJSON is returned when LLM returns truncated JSON response
+	ErrIncompleteJSON = errors.New("incomplete JSON response from LLM")
+
 	// ErrTooManyEntities is returned when extraction exceeds entity limit
 	ErrTooManyEntities = errors.New("extraction returned too many entities")
 
@@ -116,7 +119,7 @@ func IsKAGError(err error) bool {
 		ErrGraphNotConnected, ErrGraphConnectionFailed, ErrEntityNotFound,
 		ErrRelationNotFound, ErrDuplicateEntity, ErrGraphQueryFailed,
 		ErrExtractionFailed, ErrExtractionTimeout, ErrLLMProviderNotAvailable,
-		ErrInvalidExtractionResponse, ErrTooManyEntities, ErrTooManyRelations,
+		ErrInvalidExtractionResponse, ErrIncompleteJSON, ErrTooManyEntities, ErrTooManyRelations,
 		ErrKAGDisabled, ErrInvalidGraphBackend, ErrInvalidLLMProvider,
 	}
 
@@ -129,11 +132,14 @@ func IsKAGError(err error) bool {
 }
 
 // IsRetryableError checks if an error is retryable.
+// Incomplete JSON is retryable because LLM responses can be truncated due to
+// transient issues (GPU memory pressure, context limits) that may resolve on retry.
 func IsRetryableError(err error) bool {
 	retryable := []error{
 		ErrGraphConnectionFailed,
 		ErrExtractionTimeout,
 		ErrLLMProviderNotAvailable,
+		ErrIncompleteJSON, // LLM truncation is often transient
 	}
 
 	for _, retryErr := range retryable {
