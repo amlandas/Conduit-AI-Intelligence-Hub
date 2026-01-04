@@ -3495,7 +3495,7 @@ func serviceStartCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch runtime.GOOS {
 			case "darwin":
-				return exec.Command("launchctl", "start", "com.simpleflo.conduit").Run()
+				return exec.Command("launchctl", "start", "dev.simpleflo.conduit").Run()
 			case "linux":
 				return exec.Command("systemctl", "--user", "start", "conduit").Run()
 			default:
@@ -3534,7 +3534,7 @@ func serviceStatusCmd() *cobra.Command {
 			switch runtime.GOOS {
 			case "darwin":
 				homeDir, _ := os.UserHomeDir()
-				plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.simpleflo.conduit.plist")
+				plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "dev.simpleflo.conduit.plist")
 				if _, err := os.Stat(plistPath); err == nil {
 					fmt.Println("✓ Daemon service is installed (launchd)")
 				} else {

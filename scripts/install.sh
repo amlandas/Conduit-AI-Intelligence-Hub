@@ -1550,13 +1550,13 @@ setup_service() {
 
 # Setup launchd service (macOS)
 setup_launchd_service() {
-    local PLIST_PATH="$HOME/Library/LaunchAgents/com.simpleflo.conduit.plist"
+    local PLIST_PATH="$HOME/Library/LaunchAgents/dev.simpleflo.conduit.plist"
 
     mkdir -p "$HOME/Library/LaunchAgents"
 
     # Stop any existing daemon completely
     info "Stopping any existing daemon..."
-    launchctl stop com.simpleflo.conduit 2>/dev/null || true
+    launchctl stop dev.simpleflo.conduit 2>/dev/null || true
     launchctl unload "$PLIST_PATH" 2>/dev/null || true
 
     # Kill any lingering daemon processes (in case started manually)
@@ -1578,7 +1578,7 @@ setup_launchd_service() {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.simpleflo.conduit</string>
+    <string>dev.simpleflo.conduit</string>
     <key>ProgramArguments</key>
     <array>
         <string>${INSTALL_DIR}/conduit-daemon</string>
@@ -1615,7 +1615,7 @@ EOF
     # Load and start the service
     info "Loading and starting daemon service..."
     launchctl load "$PLIST_PATH"
-    launchctl start com.simpleflo.conduit
+    launchctl start dev.simpleflo.conduit
 
     success "Conduit daemon installed as launchd service"
     success "PATH configured in service (includes /opt/homebrew/bin for Homebrew tools)"

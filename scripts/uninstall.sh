@@ -153,9 +153,9 @@ stop_daemon() {
         # Try to stop via service
         case $OS in
             darwin)
-                if launchctl list | grep -q "com.simpleflo.conduit"; then
+                if launchctl list | grep -q "dev.simpleflo.conduit"; then
                     info "Stopping launchd service..."
-                    launchctl stop com.simpleflo.conduit 2>/dev/null || true
+                    launchctl stop dev.simpleflo.conduit 2>/dev/null || true
                     success "Daemon stopped"
                 fi
                 ;;
@@ -195,7 +195,7 @@ remove_service() {
 
     case $OS in
         darwin)
-            local PLIST_PATH="$HOME/Library/LaunchAgents/com.simpleflo.conduit.plist"
+            local PLIST_PATH="$HOME/Library/LaunchAgents/dev.simpleflo.conduit.plist"
             if [[ -f "$PLIST_PATH" ]]; then
                 if confirm "Remove launchd service?"; then
                     info "Unloading service..."

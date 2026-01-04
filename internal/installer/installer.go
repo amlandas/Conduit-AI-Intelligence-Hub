@@ -1206,7 +1206,7 @@ func (i *Installer) setupLaunchdService(binaryPath string) InstallResult {
 	}
 
 	plistDir := filepath.Join(homeDir, "Library", "LaunchAgents")
-	plistPath := filepath.Join(plistDir, "com.simpleflo.conduit.plist")
+	plistPath := filepath.Join(plistDir, "dev.simpleflo.conduit.plist")
 	conduitHome := filepath.Join(homeDir, ".conduit")
 
 	// Create directory
@@ -1219,7 +1219,7 @@ func (i *Installer) setupLaunchdService(binaryPath string) InstallResult {
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.simpleflo.conduit</string>
+    <string>dev.simpleflo.conduit</string>
     <key>ProgramArguments</key>
     <array>
         <string>%s</string>
@@ -1252,7 +1252,7 @@ func (i *Installer) setupLaunchdService(binaryPath string) InstallResult {
 	}
 
 	// Start the service
-	_ = exec.Command("launchctl", "start", "com.simpleflo.conduit").Run()
+	_ = exec.Command("launchctl", "start", "dev.simpleflo.conduit").Run()
 
 	fmt.Println("✓ Daemon service installed (launchd)")
 	fmt.Println("  The daemon will start automatically on login.")
@@ -1322,7 +1322,7 @@ WantedBy=default.target
 func (i *Installer) StopDaemonService() error {
 	switch runtime.GOOS {
 	case "darwin":
-		return exec.Command("launchctl", "stop", "com.simpleflo.conduit").Run()
+		return exec.Command("launchctl", "stop", "dev.simpleflo.conduit").Run()
 	case "linux":
 		return exec.Command("systemctl", "--user", "stop", "conduit").Run()
 	default:
@@ -1336,7 +1336,7 @@ func (i *Installer) RemoveDaemonService() error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "com.simpleflo.conduit.plist")
+		plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "dev.simpleflo.conduit.plist")
 		_ = exec.Command("launchctl", "unload", plistPath).Run()
 		return os.Remove(plistPath)
 	case "linux":

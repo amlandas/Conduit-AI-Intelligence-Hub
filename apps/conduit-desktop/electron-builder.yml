@@ -1,7 +1,7 @@
 # Conduit Desktop - Electron Builder Configuration
 # https://www.electron.build/configuration
 
-appId: com.simpleflo.conduit
+appId: dev.simpleflo.conduit
 productName: Conduit
 copyright: Copyright © 2026 Simpleflo
 

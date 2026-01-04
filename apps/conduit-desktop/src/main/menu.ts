@@ -129,13 +129,13 @@ export function createApplicationMenu(): void {
         {
           label: 'Documentation',
           click: async (): Promise<void> => {
-            await shell.openExternal('https://github.com/simpleflo/conduit')
+            await shell.openExternal('https://conduit.simpleflo.dev')
           }
         },
         {
           label: 'Report Issue',
           click: async (): Promise<void> => {
-            await shell.openExternal('https://github.com/simpleflo/conduit/issues')
+            await shell.openExternal('https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues')
           }
         }
       ]

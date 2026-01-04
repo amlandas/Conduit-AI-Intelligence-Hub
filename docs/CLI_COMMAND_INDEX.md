@@ -127,7 +127,7 @@ conduit service install
 ```
 
 **Platform-specific locations**:
-- **macOS**: `~/Library/LaunchAgents/com.simpleflo.conduit.plist`
+- **macOS**: `~/Library/LaunchAgents/dev.simpleflo.conduit.plist`
 - **Linux**: `~/.config/systemd/user/conduit.service`
 
 ### `conduit service start`
