@@ -1,0 +1,93 @@
+# Conduit Desktop - Electron Builder Configuration
+# https://www.electron.build/configuration
+
+appId: com.simpleflo.conduit
+productName: Conduit
+copyright: Copyright © 2026 Simpleflo
+
+# Directories
+directories:
+  output: release/${version}
+  buildResources: build
+
+# Files to include
+files:
+  - dist/**/*
+  - "!node_modules/**/*"
+
+# Extra resources (copied to app resources folder)
+extraResources:
+  - from: resources/
+    to: resources/
+    filter:
+      - "**/*"
+
+# macOS Configuration
+mac:
+  category: public.app-category.developer-tools
+  # icon: build/icon.icns  # Uncomment when icon is available
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  target:
+    - target: dmg
+      arch:
+        - x64
+        - arm64
+    - target: zip
+      arch:
+        - x64
+        - arm64
+  # Code signing identity (set via environment or leave blank for ad-hoc)
+  # identity: "Developer ID Application: Your Name (TEAM_ID)"
+
+  # Notarization (requires Apple Developer account)
+  # notarize:
+  #   teamId: YOUR_TEAM_ID
+
+# DMG Configuration
+dmg:
+  # background: build/dmg-background.png  # Uncomment when background is available
+  # icon: build/icon.icns  # Uncomment when icon is available
+  iconSize: 100
+  contents:
+    - x: 130
+      y: 200
+      type: file
+    - x: 410
+      y: 200
+      type: link
+      path: /Applications
+  window:
+    width: 540
+    height: 380
+  title: "Install Conduit"
+
+# Auto-update configuration
+publish:
+  provider: github
+  owner: amlandas
+  repo: Conduit-AI-Intelligence-Hub
+  releaseType: release
+
+# ASAR packaging
+asar: true
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/sharp/**"
+
+# Compression
+compression: maximum
+
+# Remove unused locales to reduce size
+electronLanguages:
+  - en
+
+# Build lifecycle hooks
+# Uncomment to enable notarization (requires APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD, APPLE_TEAM_ID)
+# afterSign: scripts/notarize.js
+
+# Additional metadata
+extraMetadata:
+  main: dist/main/index.js

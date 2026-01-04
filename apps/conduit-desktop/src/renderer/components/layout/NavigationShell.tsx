@@ -31,6 +31,7 @@ interface NavigationShellProps {
   onNavigate: (route: Route) => void
   searchOpen: boolean
   onSearchOpenChange: (open: boolean) => void
+  className?: string
 }
 
 export function NavigationShell({
@@ -38,7 +39,8 @@ export function NavigationShell({
   currentRoute,
   onNavigate,
   searchOpen,
-  onSearchOpenChange
+  onSearchOpenChange,
+  className
 }: NavigationShellProps): JSX.Element {
   const { status, sseConnected } = useDaemonStore()
   const { instances } = useInstancesStore()
@@ -48,7 +50,7 @@ export function NavigationShell({
   const runningInstances = instances.filter((i) => i.status === 'RUNNING').length
 
   return (
-    <div className="h-full flex flex-col">
+    <div className={cn('h-full flex flex-col', className)}>
       {/* Title bar drag region */}
       <div className="h-[var(--titlebar-height)] flex-shrink-0 drag-region" />
 
