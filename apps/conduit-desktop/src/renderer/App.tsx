@@ -37,9 +37,9 @@ type Route = '/' | '/kb' | '/connectors' | '/settings'
 export default function App(): JSX.Element {
   const [route, setRoute] = useState<Route>('/')
   const [searchOpen, setSearchOpen] = useState(false)
-  const [cliVerified, setCLIVerified] = useState<boolean | null>(null) // null = checking, true = exists, false = missing
+  const [startupCheckDone, setStartupCheckDone] = useState(false) // Track if initial CLI check is done
   const { theme } = useSettingsStore()
-  const { setupCompleted, resetSetup, setCLIInstalled, completeSetup } = useSetupStore()
+  const { setupCompleted, cliInstalled, resetSetup, setCLIInstalled, completeSetup } = useSetupStore()
   const { setSSEConnected, setStatus, refresh: refreshDaemon } = useDaemonStore()
   const { updateInstance, addInstance, removeInstance, refresh: refreshInstances } = useInstancesStore()
   const { addSource, removeSource, updateSource, setSyncing, refresh: refreshKB } = useKBStore()
@@ -60,18 +60,17 @@ export default function App(): JSX.Element {
           // Setup completion is DERIVED from CLI existence, not persisted
           setCLIInstalled(true, result.version, result.path || undefined)
           completeSetup()  // CLI installed = setup complete
-          setCLIVerified(true)
         } else {
           // CLI NOT installed - show wizard to install it
           console.warn('CLI not found, showing setup wizard')
           resetSetup()
-          setCLIVerified(false)
         }
       } catch (error) {
         // Error checking CLI - assume not installed, show wizard
         console.error('Failed to verify CLI:', error)
         resetSetup()
-        setCLIVerified(false)
+      } finally {
+        setStartupCheckDone(true)
       }
     }
 
@@ -221,14 +220,15 @@ export default function App(): JSX.Element {
   // RENDER LOGIC: CLI verification gates everything
   // ═══════════════════════════════════════════════════════════════
 
-  // Still checking CLI - show loading spinner
-  if (cliVerified === null) {
+  // Still checking CLI on startup - show loading spinner
+  if (!startupCheckDone) {
     return <StartupLoader />
   }
 
   // CLI not installed OR setup not complete - show setup wizard
+  // Uses cliInstalled from store (updated during setup flow)
   // This ensures we NEVER show dashboard without verified CLI
-  if (!cliVerified || !setupCompleted) {
+  if (!cliInstalled || !setupCompleted) {
     return <SetupWizard />
   }
 

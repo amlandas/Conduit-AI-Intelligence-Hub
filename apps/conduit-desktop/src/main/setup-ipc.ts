@@ -404,25 +404,70 @@ export function setupSetupIpcHandlers(): void {
   })
 
   // Start a specific service
+  // NOTE: Uses timeout to prevent hanging on CLI commands
   ipcMain.handle('setup:start-service', async (_, { name }: { name: string }): Promise<{ success: boolean; error?: string }> => {
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+    const CLI_TIMEOUT = 60000 // 60 seconds timeout for service start commands
+
     try {
       switch (name) {
         case 'Conduit Daemon': {
           // Delegate to CLI: conduit service start
-          const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-          await execFileAsync(conduitPath, ['service', 'start'])
+          await execFileAsync(conduitPath, ['service', 'start'], { timeout: CLI_TIMEOUT })
           return { success: true }
+        }
+        case 'Ollama': {
+          // Ollama is started via system services or direct command
+          // Try brew services first (macOS), then systemctl (Linux), then direct
+          if (process.platform === 'darwin') {
+            try {
+              // Try brew services start first
+              await execFileAsync('/opt/homebrew/bin/brew', ['services', 'start', 'ollama'], { timeout: CLI_TIMEOUT })
+              return { success: true }
+            } catch {
+              // Try /usr/local/bin/brew for Intel Macs
+              try {
+                await execFileAsync('/usr/local/bin/brew', ['services', 'start', 'ollama'], { timeout: CLI_TIMEOUT })
+                return { success: true }
+              } catch {
+                // Fall back to direct ollama serve
+                try {
+                  const child = spawn('ollama', ['serve'], { detached: true, stdio: 'ignore' })
+                  child.unref()
+                  // Wait a bit for Ollama to start
+                  await new Promise(resolve => setTimeout(resolve, 2000))
+                  return { success: true }
+                } catch {
+                  return { success: false, error: 'Failed to start Ollama. Please start it manually with: ollama serve' }
+                }
+              }
+            }
+          } else {
+            // Linux
+            try {
+              await execFileAsync('sudo', ['systemctl', 'start', 'ollama'], { timeout: CLI_TIMEOUT })
+              return { success: true }
+            } catch {
+              // Try direct start
+              try {
+                const child = spawn('ollama', ['serve'], { detached: true, stdio: 'ignore' })
+                child.unref()
+                await new Promise(resolve => setTimeout(resolve, 2000))
+                return { success: true }
+              } catch {
+                return { success: false, error: 'Failed to start Ollama. Please start it manually with: ollama serve' }
+              }
+            }
+          }
         }
         case 'Qdrant': {
           // Delegate to CLI: conduit qdrant install
-          const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-          await execFileAsync(conduitPath, ['qdrant', 'install'])
+          await execFileAsync(conduitPath, ['qdrant', 'install'], { timeout: CLI_TIMEOUT })
           return { success: true }
         }
         case 'FalkorDB': {
           // Delegate to CLI: conduit falkordb install
-          const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-          await execFileAsync(conduitPath, ['falkordb', 'install'])
+          await execFileAsync(conduitPath, ['falkordb', 'install'], { timeout: CLI_TIMEOUT })
           return { success: true }
         }
         case 'Container Runtime':
@@ -433,7 +478,7 @@ export function setupSetupIpcHandlers(): void {
           if (process.platform === 'darwin') {
             try {
               // Try to start podman machine
-              await execFileAsync('podman', ['machine', 'start'])
+              await execFileAsync('podman', ['machine', 'start'], { timeout: CLI_TIMEOUT })
               return { success: true }
             } catch (podmanErr) {
               // If podman machine fails, maybe Docker is available?
@@ -451,39 +496,50 @@ export function setupSetupIpcHandlers(): void {
           return { success: false, error: `Unknown service: ${name}` }
       }
     } catch (err) {
-      return { success: false, error: (err as Error).message }
+      const errorMessage = (err as Error).message
+      // Provide more helpful error messages
+      if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('timed out')) {
+        return { success: false, error: `Starting ${name} timed out. The service may still be starting in the background.` }
+      }
+      return { success: false, error: errorMessage }
     }
   })
 
   // Start all services
+  // NOTE: Uses same timeout as individual service start
   ipcMain.handle('setup:start-all-services', async (): Promise<{ success: boolean; error?: string }> => {
     const errors: string[] = []
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+    const CLI_TIMEOUT = 60000 // 60 seconds timeout for service start commands
 
     // Start services in sequence - delegate to CLI commands
     const startService = async (name: string): Promise<{ success: boolean; error?: string }> => {
       try {
-        const conduitPath = path.join(getCLIInstallPath(), 'conduit')
         switch (name) {
           case 'Conduit Daemon': {
             // Delegate to CLI: conduit service start
-            await execFileAsync(conduitPath, ['service', 'start'])
+            await execFileAsync(conduitPath, ['service', 'start'], { timeout: CLI_TIMEOUT })
             return { success: true }
           }
           case 'Qdrant': {
             // Delegate to CLI: conduit qdrant install
-            await execFileAsync(conduitPath, ['qdrant', 'install'])
+            await execFileAsync(conduitPath, ['qdrant', 'install'], { timeout: CLI_TIMEOUT })
             return { success: true }
           }
           case 'FalkorDB': {
             // Delegate to CLI: conduit falkordb install
-            await execFileAsync(conduitPath, ['falkordb', 'install'])
+            await execFileAsync(conduitPath, ['falkordb', 'install'], { timeout: CLI_TIMEOUT })
             return { success: true }
           }
           default:
             return { success: false, error: `Unknown service: ${name}` }
         }
       } catch (err) {
-        return { success: false, error: (err as Error).message }
+        const errorMessage = (err as Error).message
+        if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('timed out')) {
+          return { success: false, error: `Starting ${name} timed out. The service may still be starting in the background.` }
+        }
+        return { success: false, error: errorMessage }
       }
     }
 
