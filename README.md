@@ -363,6 +363,15 @@ conduit ollama pull <model>   # Download a model from the registry
 conduit ollama warmup         # Preload required models into memory
 ```
 
+### MCP Configuration (v0.1.11+)
+```bash
+conduit mcp configure                   # Auto-configure MCP KB server in Claude Code
+conduit mcp configure --client cursor   # Configure for Cursor IDE
+conduit mcp configure --force           # Overwrite existing configuration
+```
+
+> **Note:** After running `conduit kb sync`, the MCP KB server is automatically configured in Claude Code. This command is for manual configuration or reconfiguration.
+
 **Search Modes:**
 - **Hybrid (default)**: Tries semantic search first, falls back to keyword search
 - **Semantic (`--semantic`)**: Vector-based search using embeddings (requires Qdrant + Ollama)
