@@ -1,19 +1,21 @@
 #!/bin/bash
 #
-# Conduit Complete Uninstallation Script
+# Conduit Uninstallation Script
 #
-# This script safely removes Conduit and optionally its dependencies:
+# This script safely removes Conduit components:
 # 1. Stops and removes daemon service
 # 2. Removes binaries from PATH
-# 3. Removes data directory
+# 3. Optionally removes data directory
 # 4. Cleans up shell configuration
-# 5. Optionally removes dependencies (Docker/Podman, Ollama, Go)
+#
+# NOTE: Dependencies (Ollama, Podman/Docker, containers) are NOT removed.
+#       These may be shared with other projects. See manual cleanup below.
 #
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
 #
 # Or with options:
-#   bash uninstall.sh --force --remove-all
+#   bash uninstall.sh --force --remove-data
 #
 
 set -e
@@ -29,7 +31,7 @@ NC='\033[0m' # No Color
 INSTALL_DIR="${HOME}/.local/bin"
 CONDUIT_HOME="${HOME}/.conduit"
 FORCE=false
-REMOVE_ALL=false
+REMOVE_DATA=false
 ERRORS=()
 
 # Detect OS
@@ -97,8 +99,8 @@ parse_args() {
                 FORCE=true
                 shift
                 ;;
-            --remove-all)
-                REMOVE_ALL=true
+            --remove-data)
+                REMOVE_DATA=true
                 shift
                 ;;
             --install-dir)
@@ -129,10 +131,16 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  --force              Skip confirmation prompts"
-    echo "  --remove-all         Remove all dependencies automatically"
+    echo "  --remove-data        Also remove data directory (~/.conduit)"
     echo "  --install-dir DIR    Binary installation directory (default: ~/.local/bin)"
     echo "  --conduit-home DIR   Conduit data directory (default: ~/.conduit)"
     echo "  --help               Show this help message"
+    echo ""
+    echo "NOTE: Dependencies (Ollama, Podman, containers) are NOT removed."
+    echo "      To remove manually:"
+    echo "        podman stop qdrant falkordb && podman rm qdrant falkordb"
+    echo "        rm -rf ~/.ollama && brew uninstall ollama"
+    echo "        podman machine stop && podman machine rm && brew uninstall podman"
 }
 
 # Stop Conduit daemon
@@ -263,168 +271,35 @@ remove_binaries() {
     done
 }
 
-# Remove all Conduit data (consolidated Qdrant + SQLite + config)
-remove_all_data() {
+# Remove Conduit data directory
+remove_data() {
     echo ""
     echo "Step 4: Remove Conduit Data"
     echo "──────────────────────────────────────────────────────────────"
 
-    # Detect container runtime for Qdrant
-    local CONTAINER_CMD=""
-    if command_exists podman; then
-        CONTAINER_CMD="podman"
-    elif command_exists docker; then
-        CONTAINER_CMD="docker"
-    fi
-
-    # Check what exists
-    local has_qdrant_container=false
-    local has_falkordb_container=false
-    local has_data_dir=false
-    local qdrant_vectors=0
-
-    if [[ -n "$CONTAINER_CMD" ]] && $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
-        has_qdrant_container=true
-        # Try to get vector count
-        qdrant_vectors=$(curl -s http://localhost:6333/collections/conduit_kb 2>/dev/null | grep -o '"points_count":[0-9]*' | cut -d: -f2 || echo "0")
-    fi
-
-    if [[ -n "$CONTAINER_CMD" ]] && $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-falkordb$"; then
-        has_falkordb_container=true
-    fi
-
-    if [[ -d "$CONDUIT_HOME" ]]; then
-        has_data_dir=true
-    fi
-
-    # Nothing to remove
-    if [[ "$has_qdrant_container" == "false" ]] && [[ "$has_falkordb_container" == "false" ]] && [[ "$has_data_dir" == "false" ]]; then
-        info "No Conduit data found"
+    if [[ ! -d "$CONDUIT_HOME" ]]; then
+        info "No data directory found at $CONDUIT_HOME"
         return 0
     fi
 
-    # Calculate sizes
-    local data_size="0"
-    local qdrant_data_size="0"
-    local falkordb_data_size="0"
-    local sqlite_size="0"
-    if [[ "$has_data_dir" == "true" ]]; then
-        data_size=$(du -sh "$CONDUIT_HOME" 2>/dev/null | cut -f1 || echo "unknown")
-        qdrant_data_size=$(du -sh "$CONDUIT_HOME/qdrant" 2>/dev/null | cut -f1 || echo "0")
-        falkordb_data_size=$(du -sh "$CONDUIT_HOME/falkordb" 2>/dev/null | cut -f1 || echo "0")
-        sqlite_size=$(du -sh "$CONDUIT_HOME/conduit.db" 2>/dev/null | cut -f1 || echo "0")
-    fi
+    local data_size=$(du -sh "$CONDUIT_HOME" 2>/dev/null | cut -f1 || echo "unknown")
 
-    # Present the choice clearly
-    echo ""
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════════${NC}"
-    echo -e "${YELLOW}                    DATA REMOVAL DECISION                        ${NC}"
-    echo -e "${YELLOW}════════════════════════════════════════════════════════════════${NC}"
-    echo ""
-    echo "Conduit stores the following data:"
-    echo ""
-    if [[ "$has_data_dir" == "true" ]]; then
-        echo "  📁 Data Directory: $CONDUIT_HOME"
-        echo "     ├── SQLite Database:     $sqlite_size (documents, sources, entities, relations)"
-        echo "     ├── Qdrant Vector Data:  $qdrant_data_size ($qdrant_vectors vectors)"
-        echo "     ├── FalkorDB Graph Data: $falkordb_data_size (knowledge graph)"
-        echo "     ├── Daemon logs"
-        echo "     └── Configuration files"
-        echo "     Total size: $data_size"
-    fi
-    if [[ "$has_qdrant_container" == "true" ]]; then
-        echo ""
-        echo "  🐳 Qdrant Container: conduit-qdrant"
-        echo "     Running on ports 6333 (HTTP) and 6334 (gRPC)"
-    fi
-    if [[ "$has_falkordb_container" == "true" ]]; then
-        echo ""
-        echo "  🐳 FalkorDB Container: conduit-falkordb"
-        echo "     Running on port 6379 (Redis protocol)"
-    fi
-    echo ""
-    echo -e "${YELLOW}────────────────────────────────────────────────────────────────${NC}"
-    echo ""
-    echo "Choose an option:"
-    echo ""
-    echo "  [1] DELETE ALL DATA - Remove everything (recommended for clean uninstall)"
-    echo "      • Stops and removes Qdrant container (RAG vectors)"
-    echo "      • Stops and removes FalkorDB container (KAG graph)"
-    echo "      • Deletes all vectors, documents, entities, and configuration"
-    echo "      • Fresh start if you reinstall"
-    echo ""
-    echo "  [2] KEEP DATA - Preserve data for potential reinstall"
-    echo "      • Qdrant container and vectors preserved"
-    echo "      • FalkorDB container and knowledge graph preserved"
-    echo "      • SQLite database (documents, entities) and config preserved"
-    echo "      • If reinstalling, run 'conduit qdrant purge' to clear stale vectors"
-    echo ""
-
-    local choice=""
-    if [[ "$FORCE" == "true" ]]; then
-        choice="1"
-        echo "  (--force flag set, selecting option 1)"
+    if [[ "$REMOVE_DATA" == "true" ]] || [[ "$FORCE" == "true" ]]; then
+        if [[ "$FORCE" != "true" ]]; then
+            warn "This will permanently delete all Conduit data ($data_size)!"
+            read -r -p "Type 'DELETE' to confirm: " confirm_delete </dev/tty
+            if [[ "$confirm_delete" != "DELETE" ]]; then
+                warn "Deletion cancelled. Data preserved."
+                return 0
+            fi
+        fi
+        info "Removing data directory ($data_size)..."
+        rm -rf "$CONDUIT_HOME" || error "Failed to remove $CONDUIT_HOME"
+        success "Data directory removed"
     else
-        read -r -p "Enter choice [1/2]: " choice </dev/tty
+        info "Data directory preserved at $CONDUIT_HOME ($data_size)"
+        echo "  Use --remove-data flag to remove data directory"
     fi
-
-    case "$choice" in
-        1)
-            echo ""
-            warn "This will permanently delete all Conduit data!"
-            echo ""
-            if [[ "$FORCE" != "true" ]]; then
-                read -r -p "Type 'DELETE' to confirm: " confirm_delete </dev/tty
-                if [[ "$confirm_delete" != "DELETE" ]]; then
-                    warn "Deletion cancelled. Data preserved."
-                    return 0
-                fi
-            fi
-
-            # Remove Qdrant container first
-            if [[ "$has_qdrant_container" == "true" ]] && [[ -n "$CONTAINER_CMD" ]]; then
-                info "Stopping and removing Qdrant container..."
-                $CONTAINER_CMD stop conduit-qdrant 2>/dev/null || true
-                $CONTAINER_CMD rm conduit-qdrant 2>/dev/null || true
-                success "Qdrant container removed"
-            fi
-
-            # Remove FalkorDB container
-            if [[ "$has_falkordb_container" == "true" ]] && [[ -n "$CONTAINER_CMD" ]]; then
-                info "Stopping and removing FalkorDB container..."
-                $CONTAINER_CMD stop conduit-falkordb 2>/dev/null || true
-                $CONTAINER_CMD rm conduit-falkordb 2>/dev/null || true
-                success "FalkorDB container removed"
-            fi
-
-            # Remove data directory
-            if [[ "$has_data_dir" == "true" ]]; then
-                info "Removing data directory..."
-                rm -rf "$CONDUIT_HOME" || error "Failed to remove $CONDUIT_HOME"
-                success "Data directory removed"
-            fi
-
-            echo ""
-            success "All Conduit data has been removed"
-            ;;
-        2|*)
-            warn "Data preserved"
-            echo ""
-            echo "  Your data remains at: $CONDUIT_HOME"
-            if [[ "$has_qdrant_container" == "true" ]]; then
-                echo "  Qdrant container: conduit-qdrant (still running)"
-            fi
-            if [[ "$has_falkordb_container" == "true" ]]; then
-                echo "  FalkorDB container: conduit-falkordb (still running)"
-            fi
-            echo ""
-            echo "  If you reinstall Conduit later:"
-            echo "    • Your KB sources, documents, and entities will be restored"
-            echo "    • Run 'conduit qdrant purge' if vectors seem stale"
-            echo "    • Run 'conduit kb sync' to re-index documents"
-            echo "    • Run 'conduit kb kag-sync' to re-extract entities"
-            ;;
-    esac
 }
 
 # Clean up shell configuration
@@ -474,328 +349,6 @@ cleanup_shell_config() {
     info "Backup copies saved with .conduit-backup extension"
 }
 
-# Remove Docker
-remove_docker() {
-    if ! command_exists docker; then
-        info "Docker is not installed"
-        return 0
-    fi
-
-    echo ""
-    echo "Docker Removal"
-    echo "──────────────────────────────────────────────────────────────"
-
-    if [[ "$REMOVE_ALL" != "true" ]]; then
-        if ! confirm "Remove Docker (used by Conduit)?"; then
-            info "Docker left in place"
-            return 0
-        fi
-    fi
-
-    # Check if Docker is running
-    if docker info >/dev/null 2>&1; then
-        warn "Docker is running and may have other containers"
-        if ! confirm "Stop Docker and proceed with removal?"; then
-            warn "Docker left in place"
-            return 0
-        fi
-    fi
-
-    case $OS in
-        darwin)
-            if command_exists brew && brew list --cask | grep -q docker; then
-                info "Removing Docker Desktop..."
-                # Close Docker Desktop first
-                osascript -e 'quit app "Docker"' 2>/dev/null || true
-                sleep 2
-                brew uninstall --cask docker || error "Failed to uninstall Docker"
-                success "Docker Desktop removed"
-            else
-                warn "Docker Desktop was not installed via Homebrew"
-                warn "Please uninstall manually from Applications folder"
-            fi
-            ;;
-        linux)
-            info "Removing Docker..."
-            sudo apt-get remove -y docker docker-engine docker.io containerd runc 2>/dev/null || \
-            sudo dnf remove -y docker docker-client docker-client-latest docker-common docker-latest docker-latest-logrotate docker-logrotate docker-engine 2>/dev/null || \
-            error "Failed to remove Docker (unsupported package manager)"
-            success "Docker removed"
-            ;;
-    esac
-}
-
-# Remove Podman
-remove_podman() {
-    if ! command_exists podman; then
-        info "Podman is not installed"
-        return 0
-    fi
-
-    echo ""
-    echo "Podman Removal"
-    echo "──────────────────────────────────────────────────────────────"
-
-    if [[ "$REMOVE_ALL" != "true" ]]; then
-        if ! confirm "Remove Podman (used by Conduit)?"; then
-            info "Podman left in place"
-            return 0
-        fi
-    fi
-
-    # Stop podman machine on macOS
-    if [[ "$OS" == "darwin" ]]; then
-        if podman machine list 2>/dev/null | grep -q "Currently running"; then
-            info "Stopping Podman machine..."
-            podman machine stop 2>/dev/null || true
-            sleep 2
-        fi
-        if podman machine list 2>/dev/null | grep -q "podman-machine"; then
-            info "Removing Podman machine..."
-            podman machine rm -f podman-machine-default 2>/dev/null || true
-        fi
-    fi
-
-    case $OS in
-        darwin)
-            if command_exists brew && brew list | grep -q podman; then
-                info "Removing Podman..."
-                brew uninstall podman || error "Failed to uninstall Podman"
-                success "Podman removed"
-            else
-                warn "Podman was not installed via Homebrew"
-            fi
-            ;;
-        linux)
-            info "Removing Podman..."
-            sudo apt-get remove -y podman 2>/dev/null || \
-            sudo dnf remove -y podman 2>/dev/null || \
-            sudo pacman -R --noconfirm podman 2>/dev/null || \
-            error "Failed to remove Podman (unsupported package manager)"
-            success "Podman removed"
-            ;;
-    esac
-}
-
-# Remove Ollama
-remove_ollama() {
-    if ! command_exists ollama; then
-        info "Ollama is not installed"
-        return 0
-    fi
-
-    echo ""
-    echo "Ollama Removal"
-    echo "──────────────────────────────────────────────────────────────"
-
-    # Check specifically for qwen2.5-coder model
-    local has_qwen_model=false
-    local model_size=""
-    if ollama list 2>/dev/null | grep -q "qwen2.5-coder"; then
-        has_qwen_model=true
-        model_size=$(ollama list 2>/dev/null | grep "qwen2.5-coder" | awk '{print $2}' || echo "~4.7GB")
-    fi
-
-    # Show what will be removed
-    if [[ "$has_qwen_model" == "true" ]]; then
-        warn "Ollama is installed with qwen2.5-coder:7b model ($model_size)"
-    else
-        local models=$(ollama list 2>/dev/null | tail -n +2 | wc -l | tr -d ' ')
-        if [[ "$models" -gt 0 ]]; then
-            warn "Ollama has $models model(s) installed"
-            ollama list 2>/dev/null | tail -n +2 || true
-        fi
-    fi
-
-    if [[ "$REMOVE_ALL" != "true" ]]; then
-        local prompt="Remove Ollama"
-        if [[ "$has_qwen_model" == "true" ]]; then
-            prompt="Remove Ollama and qwen2.5-coder:7b model ($model_size)?"
-        else
-            prompt="Remove Ollama and all models?"
-        fi
-
-        if ! confirm "$prompt"; then
-            info "Ollama left in place"
-            return 0
-        fi
-    fi
-
-    # Stop Ollama service
-    case $OS in
-        darwin)
-            pkill -f "ollama serve" 2>/dev/null || true
-            ;;
-        linux)
-            sudo systemctl stop ollama 2>/dev/null || true
-            sudo systemctl disable ollama 2>/dev/null || true
-            ;;
-    esac
-
-    # Remove Ollama
-    info "Removing Ollama..."
-    if [[ -f /usr/local/bin/ollama ]]; then
-        sudo rm -f /usr/local/bin/ollama || error "Failed to remove Ollama binary"
-    fi
-    if [[ -f /usr/bin/ollama ]]; then
-        sudo rm -f /usr/bin/ollama || error "Failed to remove Ollama binary"
-    fi
-
-    # Remove models and data
-    if [[ -d "$HOME/.ollama" ]]; then
-        local ollama_size=$(du -sh "$HOME/.ollama" 2>/dev/null | cut -f1 || echo "unknown")
-        info "Removing Ollama data directory (~$ollama_size)..."
-        rm -rf "$HOME/.ollama" || error "Failed to remove Ollama data"
-    fi
-
-    success "Ollama removed"
-}
-
-# Remove Go
-remove_go() {
-    if ! command_exists go; then
-        info "Go is not installed"
-        return 0
-    fi
-
-    echo ""
-    echo "Go Removal"
-    echo "──────────────────────────────────────────────────────────────"
-
-    warn "Go is a general-purpose programming language used by many tools"
-    warn "Removing it may affect other software on your system"
-    echo ""
-
-    if [[ "$REMOVE_ALL" != "true" ]] && ! confirm "Remove Go programming language?" "n"; then
-        info "Go left in place"
-        return 0
-    fi
-
-    # Check if installed via package manager
-    case $OS in
-        darwin)
-            if command_exists brew && brew list | grep -q "^go$"; then
-                info "Removing Go (Homebrew)..."
-                brew uninstall go || error "Failed to uninstall Go"
-                success "Go removed"
-                return 0
-            fi
-            ;;
-        linux)
-            if dpkg -l | grep -q "golang-go"; then
-                info "Removing Go (apt)..."
-                sudo apt-get remove -y golang-go || error "Failed to remove Go"
-                success "Go removed"
-                return 0
-            elif rpm -q golang >/dev/null 2>&1; then
-                info "Removing Go (dnf/yum)..."
-                sudo dnf remove -y golang || sudo yum remove -y golang || error "Failed to remove Go"
-                success "Go removed"
-                return 0
-            fi
-            ;;
-    esac
-
-    # Manual installation removal
-    if [[ -d "/usr/local/go" ]]; then
-        info "Removing manually installed Go..."
-        sudo rm -rf /usr/local/go || error "Failed to remove /usr/local/go"
-        success "Go removed"
-
-        # Clean up shell config
-        for config in "$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.profile"; do
-            if [[ -f "$config" ]] && grep -q "/usr/local/go/bin" "$config"; then
-                sed -i.bak "/export PATH.*\/usr\/local\/go\/bin/d" "$config" 2>/dev/null || \
-                sed -i '' "/export PATH.*\/usr\/local\/go\/bin/d" "$config" 2>/dev/null || true
-                rm -f "$config.bak" 2>/dev/null || true
-            fi
-        done
-    else
-        warn "Go installation not found in expected location"
-    fi
-}
-
-# Detect which container runtime Conduit was using
-detect_conduit_runtime() {
-    local RUNTIME=""
-
-    # Check Conduit config if it exists
-    if [[ -f "$CONDUIT_HOME/conduit.yaml" ]]; then
-        # Extract preferred runtime from config
-        RUNTIME=$(grep "preferred:" "$CONDUIT_HOME/conduit.yaml" 2>/dev/null | awk '{print $2}' | tr -d '"' || echo "")
-    fi
-
-    # If config says "auto" or not found, detect from what's running
-    if [[ -z "$RUNTIME" ]] || [[ "$RUNTIME" == "auto" ]]; then
-        if command_exists docker && docker info >/dev/null 2>&1; then
-            RUNTIME="docker"
-        elif command_exists podman && podman info >/dev/null 2>&1; then
-            RUNTIME="podman"
-        fi
-    fi
-
-    echo "$RUNTIME"
-}
-
-# Remove dependencies
-remove_dependencies() {
-    echo ""
-    echo "Step 6: Remove Dependencies"
-    echo "──────────────────────────────────────────────────────────────"
-
-    # Detect which runtime Conduit was using
-    local CONDUIT_RUNTIME=$(detect_conduit_runtime)
-
-    if [[ "$REMOVE_ALL" != "true" ]]; then
-        echo ""
-        echo "Conduit installed or used the following dependencies:"
-        echo ""
-
-        # Show runtime Conduit was actually using
-        if [[ "$CONDUIT_RUNTIME" == "docker" ]]; then
-            echo "  - Docker (used by Conduit)"
-        elif [[ "$CONDUIT_RUNTIME" == "podman" ]]; then
-            echo "  - Podman (used by Conduit)"
-        else
-            # Show both if we can't determine
-            command_exists docker && echo "  - Docker"
-            command_exists podman && echo "  - Podman"
-        fi
-
-        command_exists ollama && echo "  - Ollama (with qwen2.5-coder:7b model)"
-        command_exists go && echo "  - Go"
-        echo ""
-
-        if ! confirm "Remove dependencies?"; then
-            info "Dependencies left in place"
-            return 0
-        fi
-    fi
-
-    # Remove the container runtime Conduit was using
-    if [[ "$CONDUIT_RUNTIME" == "docker" ]]; then
-        remove_docker || true
-    elif [[ "$CONDUIT_RUNTIME" == "podman" ]]; then
-        remove_podman || true
-    elif [[ "$REMOVE_ALL" == "true" ]]; then
-        # In --remove-all mode, remove both if present
-        remove_docker || true
-        remove_podman || true
-    else
-        # Ask user which one they want to remove
-        if command_exists docker || command_exists podman; then
-            echo ""
-            warn "Could not determine which container runtime Conduit was using"
-            command_exists docker && remove_docker || true
-            command_exists podman && remove_podman || true
-        fi
-    fi
-
-    # Always ask about Ollama and Go
-    remove_ollama || true
-    remove_go || true
-}
-
 # Print summary
 print_summary() {
     echo ""
@@ -818,30 +371,20 @@ print_summary() {
         echo ""
     fi
 
-    echo "Summary of removals:"
+    echo "Summary:"
     echo ""
     [[ ! -f "$INSTALL_DIR/conduit" ]] && echo -e "  ${GREEN}✓${NC} Binaries removed"
     if [[ ! -d "$CONDUIT_HOME" ]]; then
-        echo -e "  ${GREEN}✓${NC} Data directory removed (SQLite, config, vectors)"
+        echo -e "  ${GREEN}✓${NC} Data directory removed"
     else
         echo -e "  ${YELLOW}○${NC} Data directory preserved at $CONDUIT_HOME"
     fi
-    # Check if containers were removed
-    local CONTAINER_CMD=""
-    command_exists podman && CONTAINER_CMD="podman"
-    command_exists docker && CONTAINER_CMD="docker"
-    if [[ -n "$CONTAINER_CMD" ]]; then
-        if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-qdrant$"; then
-            echo -e "  ${YELLOW}○${NC} Qdrant container preserved"
-        fi
-        if $CONTAINER_CMD ps -a --format "{{.Names}}" 2>/dev/null | grep -q "^conduit-falkordb$"; then
-            echo -e "  ${YELLOW}○${NC} FalkorDB container preserved"
-        fi
-    fi
-    ! command_exists docker && echo -e "  ${GREEN}✓${NC} Docker removed"
-    ! command_exists podman && echo -e "  ${GREEN}✓${NC} Podman removed"
-    ! command_exists ollama && echo -e "  ${GREEN}✓${NC} Ollama removed"
-    ! command_exists go && echo -e "  ${GREEN}✓${NC} Go removed"
+    echo ""
+
+    echo "To remove dependencies manually (if no longer needed):"
+    echo "  • Containers: podman stop qdrant falkordb && podman rm qdrant falkordb"
+    echo "  • Ollama: rm -rf ~/.ollama && brew uninstall ollama"
+    echo "  • Podman: podman machine stop && podman machine rm && brew uninstall podman"
     echo ""
 
     echo "You may want to:"
@@ -876,12 +419,9 @@ delegate_to_cli() {
         cli_flags="--force"
     fi
 
-    # Determine tier based on whether we're removing data
-    if [[ "$REMOVE_ALL" == "true" ]]; then
+    # Add --all flag if removing data
+    if [[ "$REMOVE_DATA" == "true" ]]; then
         cli_flags="$cli_flags --all"
-    else
-        # Interactive mode - let CLI handle it
-        cli_flags=""
     fi
 
     # Execute CLI uninstall for core components
@@ -905,7 +445,7 @@ main() {
     echo ""
     echo "  Installation directory: $INSTALL_DIR"
     echo "  Data directory:         $CONDUIT_HOME"
-    echo "  Remove dependencies:    $REMOVE_ALL"
+    echo "  Remove data:            $REMOVE_DATA"
     echo ""
 
     if [[ "$FORCE" != "true" ]] && ! confirm "Proceed with uninstallation?"; then
@@ -926,13 +466,8 @@ main() {
         stop_daemon || true
         remove_service || true
         remove_binaries || true
-        remove_all_data || true
+        remove_data || true
         cleanup_shell_config || true
-    fi
-
-    # Script always handles dependency removal (CLI doesn't remove Docker/Podman/Go)
-    if [[ "$REMOVE_ALL" == "true" ]] || confirm "Remove Conduit dependencies (Ollama, container runtime)?"; then
-        remove_dependencies || true
     fi
 
     print_summary

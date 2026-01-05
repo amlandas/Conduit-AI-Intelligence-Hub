@@ -935,7 +935,12 @@ async function ensurePodmanMachineReady(podmanPath: string): Promise<{ ready: bo
 // Helper: Execute container command (tries podman first, then docker)
 // Uses findBinary() to locate the binary in known paths
 // On macOS with Podman, ensures the Podman machine is running first
+// For commands that may pull images (run, pull), skips credential helpers to avoid
+// issues with external credential helpers (e.g., docker-credential-gcloud) not in PATH
 async function execContainerCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  // Check if this is a command that might pull images
+  const isPullCommand = args[0] === 'run' || args[0] === 'pull'
+
   // Try Podman first
   const podmanResult = await findBinary('podman')
   if (podmanResult.found && podmanResult.path) {
@@ -946,18 +951,36 @@ async function execContainerCommand(args: string[]): Promise<{ stdout: string; s
         throw new Error(machineStatus.error || 'Podman machine not ready')
       }
     }
-    return await execFileAsync(podmanResult.path, args)
+
+    // For pull commands, skip credential helpers to avoid issues with
+    // external helpers like docker-credential-gcloud not being in Electron's PATH
+    // Our images (qdrant/qdrant, falkordb/falkordb) are public and don't need auth
+    let podmanArgs = args
+    if (isPullCommand) {
+      // Insert --authfile /dev/null after the subcommand to skip credential helpers
+      podmanArgs = [args[0], '--authfile', '/dev/null', ...args.slice(1)]
+    }
+
+    return await execFileAsync(podmanResult.path, podmanArgs)
   }
 
   // Fall back to Docker
   const dockerResult = await findBinary('docker')
   if (dockerResult.found && dockerResult.path) {
-    return await execFileAsync(dockerResult.path, args)
+    // Docker doesn't have an equivalent --authfile flag, but we can try
+    // setting DOCKER_CONFIG to an empty directory to skip credential helpers
+    const dockerEnv = isPullCommand
+      ? { ...process.env, DOCKER_CONFIG: '/dev/null' }
+      : process.env
+    return await execFileAsync(dockerResult.path, args, { env: dockerEnv })
   }
 
   // Last resort: try PATH-based execution
   try {
-    return await execFileAsync('podman', args)
+    const podmanArgs = isPullCommand
+      ? [args[0], '--authfile', '/dev/null', ...args.slice(1)]
+      : args
+    return await execFileAsync('podman', podmanArgs)
   } catch {
     return await execFileAsync('docker', args)
   }

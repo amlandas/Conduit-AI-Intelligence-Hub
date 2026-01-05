@@ -15,6 +15,9 @@ import (
 )
 
 // UninstallOptions configures what components to remove during uninstallation.
+// Note: We intentionally DON'T manage containers (Qdrant, FalkorDB) or Ollama removal.
+// These are shared dependencies that users may have installed for other projects.
+// Users should manage these manually if they want to remove them.
 type UninstallOptions struct {
 	// Core removal
 	RemoveDaemonService bool // Stop daemon, remove launchd/systemd service
@@ -25,13 +28,6 @@ type UninstallOptions struct {
 	// Data removal
 	RemoveDataDir    bool // Remove ~/.conduit/ entirely
 	RemoveConfigOnly bool // Remove only ~/.conduit/conduit.yaml (keep data)
-
-	// Container removal (selective)
-	RemoveQdrantContainer   bool // Stop and rm conduit-qdrant container
-	RemoveFalkorDBContainer bool // Stop and rm conduit-falkordb container
-
-	// Dependency removal
-	RemoveOllama bool // Remove Ollama binary and ~/.ollama models
 
 	// Safety flags
 	Force  bool // Skip confirmations
@@ -97,6 +93,7 @@ type UninstallResult struct {
 }
 
 // NewUninstallOptionsKeepData returns options for Tier 1: Uninstall only (keep data).
+// Removes binaries and service but preserves data for potential reinstall.
 func NewUninstallOptionsKeepData() UninstallOptions {
 	return UninstallOptions{
 		RemoveDaemonService: true,
@@ -104,31 +101,20 @@ func NewUninstallOptionsKeepData() UninstallOptions {
 		RemoveShellConfig:   true,
 		RemoveSymlinks:      true,
 		RemoveDataDir:       false,
-		RemoveQdrantContainer:   false,
-		RemoveFalkorDBContainer: false,
-		RemoveOllama:        false,
 	}
 }
 
-// NewUninstallOptionsAll returns options for Tier 2: Uninstall with data.
+// NewUninstallOptionsAll returns options for Tier 2: Complete uninstall with data removal.
+// Note: Does NOT remove containers (Qdrant, FalkorDB) or Ollama - these are shared
+// dependencies that users should manage manually.
 func NewUninstallOptionsAll() UninstallOptions {
 	return UninstallOptions{
-		RemoveDaemonService:     true,
-		RemoveBinaries:          true,
-		RemoveShellConfig:       true,
-		RemoveSymlinks:          true,
-		RemoveDataDir:           true,
-		RemoveQdrantContainer:   true,
-		RemoveFalkorDBContainer: true,
-		RemoveOllama:            false,
+		RemoveDaemonService: true,
+		RemoveBinaries:      true,
+		RemoveShellConfig:   true,
+		RemoveSymlinks:      true,
+		RemoveDataDir:       true,
 	}
-}
-
-// NewUninstallOptionsFull returns options for Tier 3: Full cleanup.
-func NewUninstallOptionsFull() UninstallOptions {
-	opts := NewUninstallOptionsAll()
-	opts.RemoveOllama = true
-	return opts
 }
 
 // GetUninstallInfo gathers information about what's installed for UI display.
@@ -216,6 +202,8 @@ func (i *Installer) GetUninstallInfo(ctx context.Context) (*UninstallInfo, error
 }
 
 // UninstallWithOptions performs uninstallation based on provided options.
+// This only removes Conduit-specific components. Dependencies (containers, Ollama)
+// should be managed by users manually.
 func (i *Installer) UninstallWithOptions(ctx context.Context, opts UninstallOptions) (*UninstallResult, error) {
 	result := &UninstallResult{Success: true}
 	homeDir, _ := os.UserHomeDir()
@@ -224,61 +212,47 @@ func (i *Installer) UninstallWithOptions(ctx context.Context, opts UninstallOpti
 		return i.dryRunUninstall(ctx, opts)
 	}
 
-	// 1. Stop and remove daemon service
+	// 1. Stop and remove daemon service (gracefully handle if not installed)
 	if opts.RemoveDaemonService {
-		if err := i.StopDaemonService(); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to stop daemon: %v", err))
-		} else {
-			result.ItemsRemoved = append(result.ItemsRemoved, "Daemon service stopped")
+		exists, _ := i.checkDaemonServiceExists(homeDir)
+		if exists {
+			if err := i.StopDaemonService(); err != nil {
+				// Not a failure - daemon might not be running
+				// Just log it silently
+			}
+			if err := i.RemoveDaemonService(); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove daemon service: %v", err))
+				result.ItemsFailed = append(result.ItemsFailed, "Daemon service")
+			} else {
+				result.ItemsRemoved = append(result.ItemsRemoved, "Daemon service removed")
+			}
 		}
-
-		if err := i.RemoveDaemonService(); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove daemon service: %v", err))
-			result.ItemsFailed = append(result.ItemsFailed, "Daemon service")
-		} else {
-			result.ItemsRemoved = append(result.ItemsRemoved, "Daemon service removed")
-		}
+		// If service doesn't exist, we don't report it as a failure
 	}
 
-	// 2. Remove containers before data (they may write to data dir)
-	containerRuntime := i.detectContainerRuntime()
-	if opts.RemoveQdrantContainer && containerRuntime != "" {
-		if err := i.removeContainer(containerRuntime, "conduit-qdrant"); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove Qdrant container: %v", err))
-			result.ItemsFailed = append(result.ItemsFailed, "Qdrant container")
-		} else {
-			result.ItemsRemoved = append(result.ItemsRemoved, "Qdrant container removed")
-		}
-	}
-
-	if opts.RemoveFalkorDBContainer && containerRuntime != "" {
-		if err := i.removeContainer(containerRuntime, "conduit-falkordb"); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove FalkorDB container: %v", err))
-			result.ItemsFailed = append(result.ItemsFailed, "FalkorDB container")
-		} else {
-			result.ItemsRemoved = append(result.ItemsRemoved, "FalkorDB container removed")
-		}
-	}
-
-	// 3. Remove data directory
+	// 2. Remove data directory
 	if opts.RemoveDataDir {
 		conduitHome := filepath.Join(homeDir, ".conduit")
-		if err := os.RemoveAll(conduitHome); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove data dir: %v", err))
-			result.ItemsFailed = append(result.ItemsFailed, conduitHome)
-		} else {
-			result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("Data directory: %s", conduitHome))
+		if _, err := os.Stat(conduitHome); err == nil {
+			if err := os.RemoveAll(conduitHome); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove data dir: %v", err))
+				result.ItemsFailed = append(result.ItemsFailed, conduitHome)
+			} else {
+				result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("Data directory: %s", conduitHome))
+			}
 		}
 	} else if opts.RemoveConfigOnly {
 		configPath := filepath.Join(homeDir, ".conduit", "conduit.yaml")
-		if err := os.Remove(configPath); err != nil && !os.IsNotExist(err) {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove config: %v", err))
-		} else {
-			result.ItemsRemoved = append(result.ItemsRemoved, "Config file removed")
+		if _, err := os.Stat(configPath); err == nil {
+			if err := os.Remove(configPath); err != nil {
+				result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove config: %v", err))
+			} else {
+				result.ItemsRemoved = append(result.ItemsRemoved, "Config file removed")
+			}
 		}
 	}
 
-	// 4. Remove binaries
+	// 3. Remove binaries
 	if opts.RemoveBinaries {
 		localBin := filepath.Join(homeDir, ".local", "bin")
 		binaries := []string{
@@ -297,7 +271,7 @@ func (i *Installer) UninstallWithOptions(ctx context.Context, opts UninstallOpti
 		}
 	}
 
-	// 5. Clean shell config
+	// 4. Clean shell config
 	if opts.RemoveShellConfig {
 		removed := i.cleanupShellConfigSilent(homeDir)
 		for _, f := range removed {
@@ -305,7 +279,7 @@ func (i *Installer) UninstallWithOptions(ctx context.Context, opts UninstallOpti
 		}
 	}
 
-	// 6. Remove symlinks
+	// 5. Remove symlinks
 	if opts.RemoveSymlinks {
 		removed := i.cleanupSymlinksSilent()
 		for _, s := range removed {
@@ -313,15 +287,8 @@ func (i *Installer) UninstallWithOptions(ctx context.Context, opts UninstallOpti
 		}
 	}
 
-	// 7. Remove Ollama
-	if opts.RemoveOllama {
-		if err := i.removeOllama(homeDir); err != nil {
-			result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove Ollama: %v", err))
-			result.ItemsFailed = append(result.ItemsFailed, "Ollama")
-		} else {
-			result.ItemsRemoved = append(result.ItemsRemoved, "Ollama and models removed")
-		}
-	}
+	// Note: We intentionally DON'T remove containers or Ollama
+	// These are shared dependencies that users should manage manually
 
 	// Set success based on failures
 	result.Success = len(result.ItemsFailed) == 0
@@ -337,19 +304,6 @@ func (i *Installer) dryRunUninstall(ctx context.Context, opts UninstallOptions) 
 	if opts.RemoveDaemonService {
 		if exists, path := i.checkDaemonServiceExists(homeDir); exists {
 			result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("[DRY RUN] Would remove daemon service: %s", path))
-		}
-	}
-
-	containerRuntime := i.detectContainerRuntime()
-	if opts.RemoveQdrantContainer && containerRuntime != "" {
-		if exists, _ := i.checkContainer(containerRuntime, "conduit-qdrant"); exists {
-			result.ItemsRemoved = append(result.ItemsRemoved, "[DRY RUN] Would remove container: conduit-qdrant")
-		}
-	}
-
-	if opts.RemoveFalkorDBContainer && containerRuntime != "" {
-		if exists, _ := i.checkContainer(containerRuntime, "conduit-falkordb"); exists {
-			result.ItemsRemoved = append(result.ItemsRemoved, "[DRY RUN] Would remove container: conduit-falkordb")
 		}
 	}
 
@@ -383,12 +337,6 @@ func (i *Installer) dryRunUninstall(ctx context.Context, opts UninstallOptions) 
 		for _, s := range symlinks {
 			result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("[DRY RUN] Would remove symlink: %s", s))
 		}
-	}
-
-	if opts.RemoveOllama && i.commandExists("ollama") {
-		ollamaDir := filepath.Join(homeDir, ".ollama")
-		size := formatSize(i.getDirSize(ollamaDir))
-		result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("[DRY RUN] Would remove Ollama and ~/.ollama (%s)", size))
 	}
 
 	return result, nil
@@ -451,14 +399,6 @@ func (i *Installer) checkContainer(runtime, name string) (exists bool, running b
 	return true, strings.Contains(string(out), name)
 }
 
-func (i *Installer) removeContainer(runtime, name string) error {
-	// Stop container
-	_ = exec.Command(runtime, "stop", name).Run()
-
-	// Remove container
-	return exec.Command(runtime, "rm", name).Run()
-}
-
 func (i *Installer) checkOllamaRunning() bool {
 	client := &http.Client{Timeout: 2 * time.Second}
 	resp, err := client.Get("http://localhost:11434/api/tags")
@@ -491,43 +431,6 @@ func (i *Installer) getOllamaModels() []string {
 		models = append(models, m.Name)
 	}
 	return models
-}
-
-func (i *Installer) removeOllama(homeDir string) error {
-	// Stop Ollama service
-	switch runtime.GOOS {
-	case "darwin":
-		_ = exec.Command("pkill", "-f", "ollama serve").Run()
-	case "linux":
-		_ = exec.Command("systemctl", "--user", "stop", "ollama").Run()
-		_ = exec.Command("sudo", "systemctl", "stop", "ollama").Run()
-	}
-
-	// Wait for it to stop
-	time.Sleep(time.Second)
-
-	// Remove Ollama binary
-	binaryPaths := []string{
-		"/usr/local/bin/ollama",
-		"/usr/bin/ollama",
-	}
-	for _, path := range binaryPaths {
-		if _, err := os.Stat(path); err == nil {
-			// Need sudo to remove from these paths
-			if err := exec.Command("sudo", "rm", "-f", path).Run(); err != nil {
-				// Try without sudo (might work if user owns it)
-				_ = os.Remove(path)
-			}
-		}
-	}
-
-	// Remove ~/.ollama directory (models and data)
-	ollamaDir := filepath.Join(homeDir, ".ollama")
-	if err := os.RemoveAll(ollamaDir); err != nil {
-		return fmt.Errorf("failed to remove ~/.ollama: %w", err)
-	}
-
-	return nil
 }
 
 func (i *Installer) findShellConfigsWithConduit(homeDir string) []string {
