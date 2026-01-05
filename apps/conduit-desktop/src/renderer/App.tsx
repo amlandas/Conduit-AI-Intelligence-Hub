@@ -39,14 +39,14 @@ export default function App(): JSX.Element {
   const [searchOpen, setSearchOpen] = useState(false)
   const [cliVerified, setCLIVerified] = useState<boolean | null>(null) // null = checking, true = exists, false = missing
   const { theme } = useSettingsStore()
-  const { setupCompleted, resetSetup, setCLIInstalled } = useSetupStore()
+  const { setupCompleted, resetSetup, setCLIInstalled, completeSetup } = useSetupStore()
   const { setSSEConnected, setStatus, refresh: refreshDaemon } = useDaemonStore()
   const { updateInstance, addInstance, removeInstance, refresh: refreshInstances } = useInstancesStore()
   const { addSource, removeSource, updateSource, setSyncing, refresh: refreshKB } = useKBStore()
 
   // ═══════════════════════════════════════════════════════════════
   // CRITICAL: Verify CLI exists on startup - this is the FIRST check
-  // GUI cannot function without CLI. Never trust localStorage alone.
+  // GUI cannot function without CLI. Setup state is derived from CLI.
   // ═══════════════════════════════════════════════════════════════
   useEffect(() => {
     const verifyCLI = async (): Promise<void> => {
@@ -56,12 +56,14 @@ export default function App(): JSX.Element {
         const result = await window.conduit.checkCLI()
 
         if (result.installed && result.version) {
-          // CLI exists - update store and mark as verified
+          // CLI exists - update store and mark setup as complete
+          // Setup completion is DERIVED from CLI existence, not persisted
           setCLIInstalled(true, result.version, result.path || undefined)
+          completeSetup()  // CLI installed = setup complete
           setCLIVerified(true)
         } else {
-          // CLI NOT installed - reset setup state and show wizard
-          console.warn('CLI not found, resetting setup state')
+          // CLI NOT installed - show wizard to install it
+          console.warn('CLI not found, showing setup wizard')
           resetSetup()
           setCLIVerified(false)
         }
