@@ -15,7 +15,7 @@ Download and install via the graphical interface:
 3. **Launch** Conduit - the **First-Run Setup Wizard** will guide you through:
    - CLI installation (bundled in the app, no Go required)
    - Dependency installation with **one-click auto-install** or manual options:
-     - **Ollama**: Auto-install using official installer, or download manually
+     - **Ollama**: Auto-install via Homebrew (macOS) or official installer (Linux)
      - **Podman** (recommended): Auto-install via Homebrew, or download manually
      - **Docker**: Download from Docker website
    - If dependencies are already installed but not detected, use **"Locate"** to specify the path manually
