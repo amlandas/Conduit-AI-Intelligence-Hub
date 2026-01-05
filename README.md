@@ -344,6 +344,14 @@ conduit falkordb start        # Start existing container
 conduit falkordb stop         # Stop container (preserves data)
 ```
 
+### Ollama Management
+```bash
+conduit ollama status         # Show Ollama status and loaded models
+conduit ollama models         # List available Ollama models
+conduit ollama pull <model>   # Download a model from the registry
+conduit ollama warmup         # Preload required models into memory
+```
+
 **Search Modes:**
 - **Hybrid (default)**: Tries semantic search first, falls back to keyword search
 - **Semantic (`--semantic`)**: Vector-based search using embeddings (requires Qdrant + Ollama)
@@ -708,7 +716,7 @@ mv ~/.docker/config.json.backup ~/.docker/config.json
 conduit falkordb status
 
 # Check if extraction model is available
-ollama list | grep mistral
+conduit ollama models
 
 # Check extraction status (shows progress, errors, system resources)
 conduit kb kag-status
