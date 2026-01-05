@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 
 	"github.com/simpleflo/conduit/internal/ai"
 	"github.com/simpleflo/conduit/internal/config"
@@ -130,6 +132,7 @@ VS Code, Gemini CLI, and more.`,
 	// Add subcommands
 	rootCmd.AddCommand(setupCmd())
 	rootCmd.AddCommand(installDepsCmd())
+	rootCmd.AddCommand(depsCmd())
 	rootCmd.AddCommand(statusCmd())
 	rootCmd.AddCommand(installCmd())
 	rootCmd.AddCommand(listCmd())
@@ -209,6 +212,511 @@ This command will prompt for confirmation before installing each component.`,
 	}
 
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "Show verbose output")
+
+	return cmd
+}
+
+// depsCmd manages Conduit dependencies (status, install, validate)
+func depsCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "deps",
+		Short: "Manage Conduit dependencies",
+		Long: `Check, install, and validate Conduit dependencies.
+
+This command provides programmatic access to dependency management
+for use by the GUI and automation tools.
+
+Available subcommands:
+  status    - Check status of all dependencies
+  install   - Install a dependency
+  validate  - Validate a custom binary path`,
+	}
+
+	cmd.AddCommand(depsStatusCmd())
+	cmd.AddCommand(depsInstallCmd())
+	cmd.AddCommand(depsValidateCmd())
+
+	return cmd
+}
+
+// DependencyInfo holds information about a dependency
+type DependencyInfo struct {
+	Installed bool   `json:"installed"`
+	Path      string `json:"path,omitempty"`
+	Version   string `json:"version,omitempty"`
+	Required  bool   `json:"required"`
+}
+
+// depsStatusCmd checks status of all dependencies
+func depsStatusCmd() *cobra.Command {
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Check status of all dependencies",
+		Long: `Check the installation status of all Conduit dependencies.
+
+Dependencies checked:
+  - Homebrew (package manager, macOS/Linux)
+  - Ollama (local AI runtime)
+  - Podman (container runtime, preferred)
+  - Docker (container runtime, alternative)
+
+Examples:
+  conduit deps status
+  conduit deps status --json`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			deps := map[string]*DependencyInfo{
+				"homebrew": {Required: false},
+				"ollama":   {Required: true},
+				"podman":   {Required: false},
+				"docker":   {Required: false},
+			}
+
+			// Map dependency names to binary names
+			binaryNames := map[string]string{
+				"homebrew": "brew",
+				"ollama":   "ollama",
+				"podman":   "podman",
+				"docker":   "docker",
+			}
+
+			// Check each dependency
+			for name := range deps {
+				binName := binaryNames[name]
+				binPath := findBinaryPath(binName)
+				if binPath != "" {
+					deps[name].Installed = true
+					deps[name].Path = binPath
+
+					// Get version
+					var versionCmd *exec.Cmd
+					if name == "homebrew" {
+						versionCmd = exec.Command(binPath, "--version")
+					} else {
+						versionCmd = exec.Command(binPath, "--version")
+					}
+					if output, err := versionCmd.Output(); err == nil {
+						version := strings.TrimSpace(string(output))
+						// Extract first line only
+						if idx := strings.Index(version, "\n"); idx > 0 {
+							version = version[:idx]
+						}
+						deps[name].Version = version
+					}
+				}
+			}
+
+			// Check if we have at least one container runtime
+			hasContainerRuntime := deps["podman"].Installed || deps["docker"].Installed
+
+			if jsonOutput {
+				// JSON output for GUI
+				output, _ := json.Marshal(deps)
+				fmt.Println(string(output))
+			} else {
+				// Human-readable output
+				fmt.Println("Dependency Status:")
+				fmt.Println()
+
+				for _, name := range []string{"homebrew", "ollama", "podman", "docker"} {
+					info := deps[name]
+					displayName := strings.Title(name)
+					if info.Installed {
+						fmt.Printf("  ✓ %-12s %s\n", displayName, info.Path)
+						if info.Version != "" {
+							fmt.Printf("    %-12s %s\n", "", info.Version)
+						}
+					} else {
+						status := "not installed"
+						if name == "docker" && deps["podman"].Installed {
+							status = "not installed (using Podman)"
+						} else if name == "podman" && deps["docker"].Installed {
+							status = "not installed (using Docker)"
+						}
+						fmt.Printf("  ✗ %-12s %s\n", displayName, status)
+					}
+				}
+
+				fmt.Println()
+				if !deps["ollama"].Installed {
+					fmt.Println("⚠ Ollama is required for AI features")
+					fmt.Println("  Install with: conduit deps install ollama")
+				}
+				if !hasContainerRuntime {
+					fmt.Println("⚠ A container runtime (Podman or Docker) is required")
+					fmt.Println("  Install with: conduit deps install podman")
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
+
+	return cmd
+}
+
+// depsInstallCmd installs a dependency
+func depsInstallCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "install <dependency>",
+		Short: "Install a dependency",
+		Long: `Install a Conduit dependency using the appropriate method for your platform.
+
+Supported dependencies:
+  ollama   - Local AI runtime
+  podman   - Container runtime (recommended)
+  docker   - Container runtime (alternative)
+  homebrew - Package manager (macOS/Linux)
+
+Installation methods by platform:
+  macOS:
+    ollama  → brew install ollama && brew services start ollama
+    podman  → brew install podman && podman machine init && podman machine start
+    docker  → Opens Docker Desktop download page
+    homebrew → Official Homebrew installer
+
+  Linux:
+    ollama  → Official Ollama installer script
+    podman  → System package manager (apt/dnf)
+    docker  → Official Docker installer
+    homebrew → Official Homebrew installer
+
+Progress output format (for GUI):
+  PROGRESS:<percent>:<message>
+
+Examples:
+  conduit deps install ollama
+  conduit deps install podman`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			dep := strings.ToLower(args[0])
+			return installDependency(dep)
+		},
+	}
+
+	return cmd
+}
+
+// installDependency installs a specific dependency
+func installDependency(dep string) error {
+	// Progress helper
+	progress := func(percent int, msg string) {
+		fmt.Printf("PROGRESS:%d:%s\n", percent, msg)
+	}
+
+	switch dep {
+	case "ollama":
+		return installOllama(progress)
+	case "podman":
+		return installPodman(progress)
+	case "docker":
+		return installDocker(progress)
+	case "homebrew", "brew":
+		return installHomebrew(progress)
+	default:
+		return fmt.Errorf("unknown dependency: %s (supported: ollama, podman, docker, homebrew)", dep)
+	}
+}
+
+// installOllama installs Ollama using platform-appropriate method
+func installOllama(progress func(int, string)) error {
+	// Check if already installed
+	if path := findBinaryPath("ollama"); path != "" {
+		progress(100, "Ollama is already installed at "+path)
+		return nil
+	}
+
+	progress(10, "Checking prerequisites...")
+
+	if runtime.GOOS == "darwin" {
+		// macOS: Use Homebrew
+		brewPath := findBinaryPath("brew")
+		if brewPath == "" {
+			return fmt.Errorf("Homebrew is required for Ollama installation on macOS. Install with: conduit deps install homebrew")
+		}
+
+		progress(20, "Installing Ollama via Homebrew...")
+		installCmd := exec.Command(brewPath, "install", "ollama")
+		installCmd.Stdout = os.Stdout
+		installCmd.Stderr = os.Stderr
+		if err := installCmd.Run(); err != nil {
+			return fmt.Errorf("brew install ollama failed: %w", err)
+		}
+
+		progress(70, "Starting Ollama service...")
+		startCmd := exec.Command(brewPath, "services", "start", "ollama")
+		startCmd.Stdout = os.Stdout
+		startCmd.Stderr = os.Stderr
+		if err := startCmd.Run(); err != nil {
+			// Service start is not critical - user can start manually
+			fmt.Printf("Warning: Failed to start Ollama service: %v\n", err)
+		}
+
+		// Wait for service to initialize (generates keys)
+		progress(85, "Waiting for Ollama to initialize...")
+		time.Sleep(3 * time.Second)
+
+		progress(100, "Ollama installed successfully")
+		return nil
+	}
+
+	// Linux: Use official installer script
+	progress(20, "Downloading Ollama installer...")
+	installCmd := exec.Command("sh", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("Ollama installer failed: %w", err)
+	}
+
+	progress(100, "Ollama installed successfully")
+	return nil
+}
+
+// installPodman installs Podman using platform-appropriate method
+func installPodman(progress func(int, string)) error {
+	// Check if already installed
+	if path := findBinaryPath("podman"); path != "" {
+		progress(100, "Podman is already installed at "+path)
+		return nil
+	}
+
+	progress(10, "Checking prerequisites...")
+
+	if runtime.GOOS == "darwin" {
+		// macOS: Use Homebrew
+		brewPath := findBinaryPath("brew")
+		if brewPath == "" {
+			return fmt.Errorf("Homebrew is required for Podman installation on macOS. Install with: conduit deps install homebrew")
+		}
+
+		progress(20, "Installing Podman via Homebrew...")
+		installCmd := exec.Command(brewPath, "install", "podman")
+		installCmd.Stdout = os.Stdout
+		installCmd.Stderr = os.Stderr
+		if err := installCmd.Run(); err != nil {
+			return fmt.Errorf("brew install podman failed: %w", err)
+		}
+
+		// Initialize Podman machine
+		progress(60, "Initializing Podman machine...")
+		podmanPath := findBinaryPath("podman")
+		if podmanPath == "" {
+			podmanPath = "/opt/homebrew/bin/podman"
+		}
+
+		initCmd := exec.Command(podmanPath, "machine", "init")
+		initCmd.Stdout = os.Stdout
+		initCmd.Stderr = os.Stderr
+		// Ignore error if machine already exists
+		initCmd.Run()
+
+		progress(80, "Starting Podman machine...")
+		startCmd := exec.Command(podmanPath, "machine", "start")
+		startCmd.Stdout = os.Stdout
+		startCmd.Stderr = os.Stderr
+		if err := startCmd.Run(); err != nil {
+			fmt.Printf("Warning: Failed to start Podman machine: %v\n", err)
+			fmt.Println("You may need to start it manually with: podman machine start")
+		}
+
+		progress(100, "Podman installed successfully")
+		return nil
+	}
+
+	// Linux: Use package manager
+	progress(20, "Installing Podman...")
+	var installCmd *exec.Cmd
+	if _, err := exec.LookPath("apt"); err == nil {
+		installCmd = exec.Command("sudo", "apt", "install", "-y", "podman")
+	} else if _, err := exec.LookPath("dnf"); err == nil {
+		installCmd = exec.Command("sudo", "dnf", "install", "-y", "podman")
+	} else {
+		return fmt.Errorf("no supported package manager found (apt or dnf required)")
+	}
+
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("package manager install failed: %w", err)
+	}
+
+	progress(100, "Podman installed successfully")
+	return nil
+}
+
+// installDocker installs Docker
+func installDocker(progress func(int, string)) error {
+	// Check if already installed
+	if path := findBinaryPath("docker"); path != "" {
+		progress(100, "Docker is already installed at "+path)
+		return nil
+	}
+
+	progress(10, "Checking prerequisites...")
+
+	if runtime.GOOS == "darwin" {
+		// macOS: Direct users to Docker Desktop
+		progress(50, "Docker Desktop required for macOS")
+		fmt.Println()
+		fmt.Println("Docker on macOS requires Docker Desktop.")
+		fmt.Println("Download from: https://www.docker.com/products/docker-desktop/")
+		fmt.Println()
+		fmt.Println("Alternatively, use Podman (recommended):")
+		fmt.Println("  conduit deps install podman")
+		return nil
+	}
+
+	// Linux: Use official installer
+	progress(20, "Installing Docker...")
+	installCmd := exec.Command("sh", "-c", "curl -fsSL https://get.docker.com | sh")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("Docker installer failed: %w", err)
+	}
+
+	progress(100, "Docker installed successfully")
+	return nil
+}
+
+// installHomebrew installs Homebrew package manager
+func installHomebrew(progress func(int, string)) error {
+	// Check if already installed
+	if path := findBinaryPath("brew"); path != "" {
+		progress(100, "Homebrew is already installed at "+path)
+		return nil
+	}
+
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return fmt.Errorf("Homebrew is only available on macOS and Linux")
+	}
+
+	progress(10, "Downloading Homebrew installer...")
+	progress(30, "Installing Homebrew (this may take a few minutes)...")
+
+	// Run the official installer
+	installCmd := exec.Command("/bin/bash", "-c", "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	installCmd.Stdin = os.Stdin // Allow interactive prompts
+
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("Homebrew installer failed: %w", err)
+	}
+
+	progress(100, "Homebrew installed successfully")
+	fmt.Println()
+	fmt.Println("Note: You may need to restart your terminal or run:")
+	if runtime.GOOS == "darwin" {
+		fmt.Println("  eval \"$(/opt/homebrew/bin/brew shellenv)\"")
+	} else {
+		fmt.Println("  eval \"$(/home/linuxbrew/.linuxbrew/bin/brew shellenv)\"")
+	}
+
+	return nil
+}
+
+// depsValidateCmd validates a custom binary path
+func depsValidateCmd() *cobra.Command {
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "validate <path>",
+		Short: "Validate a custom binary path",
+		Long: `Validate that a custom binary path is valid and executable.
+
+Checks:
+  - File exists
+  - File is executable
+  - Can run --version
+
+Examples:
+  conduit deps validate /custom/path/to/ollama
+  conduit deps validate /custom/path/to/podman --json`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			binaryPath := args[0]
+
+			result := struct {
+				Valid   bool   `json:"valid"`
+				Path    string `json:"path"`
+				Version string `json:"version,omitempty"`
+				Error   string `json:"error,omitempty"`
+			}{
+				Path: binaryPath,
+			}
+
+			// Check if file exists
+			info, err := os.Stat(binaryPath)
+			if os.IsNotExist(err) {
+				result.Error = "File not found"
+				if jsonOutput {
+					output, _ := json.Marshal(result)
+					fmt.Println(string(output))
+					return nil
+				}
+				return fmt.Errorf("file not found: %s", binaryPath)
+			}
+			if err != nil {
+				result.Error = err.Error()
+				if jsonOutput {
+					output, _ := json.Marshal(result)
+					fmt.Println(string(output))
+					return nil
+				}
+				return err
+			}
+
+			// Check if executable
+			if info.Mode()&0111 == 0 {
+				result.Error = "File is not executable"
+				if jsonOutput {
+					output, _ := json.Marshal(result)
+					fmt.Println(string(output))
+					return nil
+				}
+				return fmt.Errorf("file is not executable: %s", binaryPath)
+			}
+
+			// Try to get version
+			versionCmd := exec.Command(binaryPath, "--version")
+			if output, err := versionCmd.Output(); err == nil {
+				version := strings.TrimSpace(string(output))
+				if idx := strings.Index(version, "\n"); idx > 0 {
+					version = version[:idx]
+				}
+				result.Version = version
+			} else {
+				result.Error = fmt.Sprintf("Failed to run --version: %v", err)
+				if jsonOutput {
+					output, _ := json.Marshal(result)
+					fmt.Println(string(output))
+					return nil
+				}
+				return fmt.Errorf("failed to run %s --version: %w", binaryPath, err)
+			}
+
+			result.Valid = true
+
+			if jsonOutput {
+				output, _ := json.Marshal(result)
+				fmt.Println(string(output))
+			} else {
+				fmt.Printf("✓ Valid: %s\n", binaryPath)
+				if result.Version != "" {
+					fmt.Printf("  Version: %s\n", result.Version)
+				}
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output in JSON format")
 
 	return cmd
 }
@@ -3203,6 +3711,17 @@ Examples:
 // knownBinaryPaths maps binary names to common installation locations.
 // This is needed because Electron apps don't inherit shell PATH.
 var knownBinaryPaths = map[string][]string{
+	"brew": {
+		"/opt/homebrew/bin/brew",            // macOS Homebrew (Apple Silicon)
+		"/usr/local/bin/brew",               // macOS Homebrew (Intel)
+		"/home/linuxbrew/.linuxbrew/bin/brew", // Linux Homebrew
+	},
+	"ollama": {
+		"/opt/homebrew/bin/ollama",     // macOS Homebrew (Apple Silicon)
+		"/usr/local/bin/ollama",        // macOS Homebrew (Intel) / Linux
+		"/usr/bin/ollama",              // Linux system install
+		"/snap/bin/ollama",             // Linux snap install
+	},
 	"podman": {
 		"/opt/homebrew/bin/podman",     // macOS Homebrew (Apple Silicon)
 		"/usr/local/bin/podman",        // macOS Homebrew (Intel) / Linux
@@ -3364,7 +3883,211 @@ Examples:
 
 	cmd.Flags().BoolVarP(&showAll, "all", "a", false, "Show all configuration options")
 
+	// Add subcommands
+	cmd.AddCommand(configGetCmd())
+	cmd.AddCommand(configSetCmd())
+	cmd.AddCommand(configUnsetCmd())
+
 	return cmd
+}
+
+// configGetCmd retrieves a configuration value
+func configGetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "get <key>",
+		Short: "Get a configuration value",
+		Long: `Get a specific configuration value.
+
+Keys use dot notation to access nested values.
+
+Examples:
+  conduit config get ai.model
+  conduit config get deps.ollama.path
+  conduit config get runtime.preferred`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			key := args[0]
+
+			homeDir, _ := os.UserHomeDir()
+			configPath := filepath.Join(homeDir, ".conduit", "conduit.yaml")
+
+			v := viper.New()
+			v.SetConfigFile(configPath)
+			v.SetConfigType("yaml")
+
+			if err := v.ReadInConfig(); err != nil {
+				// If config file doesn't exist, return empty
+				if os.IsNotExist(err) {
+					return nil
+				}
+				return fmt.Errorf("read config: %w", err)
+			}
+
+			value := v.Get(key)
+			if value == nil {
+				return nil // Key not found, return empty
+			}
+
+			// Output the value
+			switch v := value.(type) {
+			case string:
+				fmt.Println(v)
+			case bool:
+				fmt.Printf("%v\n", v)
+			case int, int64, float64:
+				fmt.Printf("%v\n", v)
+			default:
+				// For complex values, output as JSON
+				data, _ := json.Marshal(v)
+				fmt.Println(string(data))
+			}
+
+			return nil
+		},
+	}
+}
+
+// configSetCmd sets a configuration value
+func configSetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "set <key> <value>",
+		Short: "Set a configuration value",
+		Long: `Set a specific configuration value.
+
+Keys use dot notation to access nested values.
+Values are stored in ~/.conduit/conduit.yaml.
+
+Examples:
+  conduit config set ai.model qwen2.5-coder:7b
+  conduit config set deps.ollama.path /custom/path/ollama
+  conduit config set runtime.preferred podman`,
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			key := args[0]
+			value := args[1]
+
+			homeDir, _ := os.UserHomeDir()
+			configDir := filepath.Join(homeDir, ".conduit")
+			configPath := filepath.Join(configDir, "conduit.yaml")
+
+			// Ensure config directory exists
+			if err := os.MkdirAll(configDir, 0700); err != nil {
+				return fmt.Errorf("create config directory: %w", err)
+			}
+
+			v := viper.New()
+			v.SetConfigFile(configPath)
+			v.SetConfigType("yaml")
+
+			// Read existing config if it exists
+			if err := v.ReadInConfig(); err != nil {
+				if !os.IsNotExist(err) {
+					return fmt.Errorf("read config: %w", err)
+				}
+				// Config doesn't exist yet, that's fine
+			}
+
+			// Set the value
+			v.Set(key, value)
+
+			// Write the config
+			if err := v.WriteConfig(); err != nil {
+				// If the config file doesn't exist, create it
+				if os.IsNotExist(err) {
+					if err := v.SafeWriteConfig(); err != nil {
+						return fmt.Errorf("write config: %w", err)
+					}
+				} else {
+					return fmt.Errorf("write config: %w", err)
+				}
+			}
+
+			fmt.Printf("Set %s = %s\n", key, value)
+			return nil
+		},
+	}
+}
+
+// configUnsetCmd removes a configuration value
+func configUnsetCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "unset <key>",
+		Short: "Remove a configuration value",
+		Long: `Remove a specific configuration value.
+
+Keys use dot notation to access nested values.
+The value will be removed from ~/.conduit/conduit.yaml.
+
+Examples:
+  conduit config unset deps.ollama.path
+  conduit config unset runtime.preferred`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			key := args[0]
+
+			homeDir, _ := os.UserHomeDir()
+			configPath := filepath.Join(homeDir, ".conduit", "conduit.yaml")
+
+			// Read current config file directly as YAML
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				if os.IsNotExist(err) {
+					// Config doesn't exist, nothing to unset
+					return nil
+				}
+				return fmt.Errorf("read config: %w", err)
+			}
+
+			// Parse the YAML into a map
+			var configMap map[string]interface{}
+			if err := yaml.Unmarshal(data, &configMap); err != nil {
+				return fmt.Errorf("parse config: %w", err)
+			}
+
+			// Remove the key using dot notation
+			if removeNestedKey(configMap, strings.Split(key, ".")) {
+				// Write back
+				newData, err := yaml.Marshal(configMap)
+				if err != nil {
+					return fmt.Errorf("marshal config: %w", err)
+				}
+				if err := os.WriteFile(configPath, newData, 0600); err != nil {
+					return fmt.Errorf("write config: %w", err)
+				}
+				fmt.Printf("Unset %s\n", key)
+			}
+
+			return nil
+		},
+	}
+}
+
+// removeNestedKey removes a nested key from a map using a slice of key parts
+func removeNestedKey(m map[string]interface{}, keys []string) bool {
+	if len(keys) == 0 {
+		return false
+	}
+
+	if len(keys) == 1 {
+		if _, exists := m[keys[0]]; exists {
+			delete(m, keys[0])
+			return true
+		}
+		return false
+	}
+
+	// Navigate to nested map
+	if nested, ok := m[keys[0]].(map[string]interface{}); ok {
+		if removeNestedKey(nested, keys[1:]) {
+			// If the nested map is now empty, remove it too
+			if len(nested) == 0 {
+				delete(m, keys[0])
+			}
+			return true
+		}
+	}
+
+	return false
 }
 
 // backupCmd creates a backup of Conduit data
