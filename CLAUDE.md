@@ -51,6 +51,65 @@ After making code changes:
 
 ---
 
+## GUI-to-CLI Compliance Rules (Design Principle)
+
+> **CLI is the single source of truth. GUI is a thin wrapper over CLI.**
+
+This is the **ABSOLUTE** architectural principle for Conduit. No exceptions.
+
+### Core Rules
+
+1. **ALL GUI operations MUST call CLI commands** (no direct HTTP API to daemon)
+   - Never implement business logic in the GUI
+   - If the CLI doesn't have a command for something, add it to CLI first
+   - NO exceptions - not even for "real-time" or "performance" reasons
+   - CLI and GUI user experience MUST be identical
+
+2. **GUI state MUST be removed by `conduit uninstall`**
+   - Electron userData directory is removed on uninstall
+   - User gets a clean slate on reinstall
+   - Only RAG/KAG data can be preserved with `--keep-data`
+
+3. **GUI MUST NOT compensate for missing CLI functionality**
+   - If CLI uninstall is incomplete, fix CLI, not GUI
+   - If CLI doesn't report status, add CLI command, don't inspect files directly
+
+4. **GUI localStorage is ephemeral**
+   - Used only for session optimization (avoid re-fetching)
+   - Must not be treated as authoritative state
+   - CLI/daemon is the authoritative source
+
+### Violation Examples (Don't Do This)
+
+```typescript
+// WRONG: GUI calls HTTP API directly
+const response = await fetch('http://localhost:8080/api/v1/kb/sources')
+const sources = await response.json()
+
+// CORRECT: GUI calls CLI
+const { stdout } = await execFile('conduit', ['kb', 'list', '--json'])
+const sources = JSON.parse(stdout)
+```
+
+```typescript
+// WRONG: GUI checks files directly
+const configPath = path.join(os.homedir(), '.claude.json')
+const configured = fs.existsSync(configPath)
+
+// CORRECT: GUI calls CLI
+const { stdout } = await execFile('conduit', ['mcp', 'status', '--json'])
+const configured = JSON.parse(stdout)['claude-code'].configured
+```
+
+### Why This Matters
+
+- **Consistency**: CLI and GUI behave identically
+- **Testability**: Test CLI, GUI inherits behavior
+- **Maintainability**: Single implementation of business logic
+- **User Choice**: Power users can use CLI, others use GUI - same experience
+
+---
+
 ## Project-Specific Guidelines
 
 ### Build Requirements

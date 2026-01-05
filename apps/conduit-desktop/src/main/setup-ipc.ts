@@ -864,34 +864,31 @@ export function setupSetupIpcHandlers(): void {
     }
   })
 
-  // MCP Check - Check if MCP KB server is configured
-  ipcMain.handle('mcp:check', async (_, options?: { client?: string }): Promise<{ configured: boolean; configPath?: string }> => {
-    const homeDir = os.homedir()
+  // MCP Check - DELEGATES TO CLI: conduit mcp status --json
+  // GUI should NOT inspect config files directly - CLI is single source of truth
+  ipcMain.handle('mcp:check', async (_, options?: { client?: string }): Promise<{ configured: boolean; configPath?: string; clients?: Record<string, { configured: boolean; configPath: string }> }> => {
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
     const clientId = options?.client || 'claude-code'
 
-    let configPath: string
-    switch (clientId) {
-      case 'claude-code':
-        configPath = path.join(homeDir, '.claude.json')
-        break
-      case 'cursor':
-        configPath = path.join(homeDir, '.cursor', 'settings', 'extensions.json')
-        break
-      case 'vscode':
-        configPath = path.join(homeDir, '.vscode', 'settings.json')
-        break
-      default:
-        return { configured: false }
-    }
-
     try {
-      const content = await fsPromises.readFile(configPath, 'utf-8')
-      const config = JSON.parse(content)
-      const servers = config.mcpServers || config['mcp.servers'] || {}
-      const configured = 'conduit-kb' in servers
-      return { configured, configPath }
-    } catch {
-      return { configured: false, configPath }
+      const { stdout } = await execFileAsync(conduitPath, ['mcp', 'status', '--json'])
+      const result = JSON.parse(stdout) as Record<string, { configured: boolean; configPath: string; serverName?: string }>
+
+      // Return configuration status for the requested client
+      const clientConfig = result[clientId]
+      if (clientConfig) {
+        return {
+          configured: clientConfig.configured,
+          configPath: clientConfig.configPath,
+          clients: result
+        }
+      }
+
+      return { configured: false, clients: result }
+    } catch (err) {
+      console.error('Failed to check MCP status via CLI:', err)
+      // Fallback: return not configured if CLI fails
+      return { configured: false }
     }
   })
 

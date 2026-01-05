@@ -3507,35 +3507,90 @@ Example MCP client configuration:
 
 // mcpStatusCmd shows MCP server status and capabilities
 func mcpStatusCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show MCP server status and capabilities",
 		Long: `Display the status and capabilities of the MCP KB server.
 
 Shows:
+- MCP configuration status in AI clients (Claude Code, Cursor, VS Code)
 - Search capabilities (FTS5, semantic search availability)
 - Qdrant and Ollama connectivity status
 - Knowledge base sources and statistics
-- MCP client configuration snippets`,
+
+Use --json for machine-readable output (used by GUI).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-
-			// Open database
 			homeDir, _ := os.UserHomeDir()
+
+			// Check MCP configuration in each supported client
+			type ClientConfig struct {
+				Configured bool   `json:"configured"`
+				ConfigPath string `json:"configPath"`
+				ServerName string `json:"serverName,omitempty"`
+			}
+
+			clients := map[string]ClientConfig{
+				"claude-code": {ConfigPath: filepath.Join(homeDir, ".claude.json")},
+				"cursor":      {ConfigPath: filepath.Join(homeDir, ".cursor", "settings", "extensions.json")},
+				"vscode":      {ConfigPath: filepath.Join(homeDir, ".vscode", "settings.json")},
+			}
+
+			// Check each client's configuration
+			for name, cfg := range clients {
+				configured, serverName := checkMCPClientConfigured(cfg.ConfigPath)
+				cfg.Configured = configured
+				cfg.ServerName = serverName
+				clients[name] = cfg
+			}
+
+			// JSON output mode for GUI consumption
+			if jsonOutput {
+				result := make(map[string]interface{})
+				for name, cfg := range clients {
+					result[name] = map[string]interface{}{
+						"configured": cfg.Configured,
+						"configPath": cfg.ConfigPath,
+						"serverName": cfg.ServerName,
+					}
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				return enc.Encode(result)
+			}
+
+			// Human-readable output
+			fmt.Println("MCP KB Server Status")
+			fmt.Println("════════════════════════════════════════════════════════")
+
+			// Client configuration status
+			fmt.Println("\n🔧 Client Configuration:")
+			fmt.Println("────────────────────────────────────────────────────────")
+			for name, cfg := range clients {
+				status := "✗ Not configured"
+				if cfg.Configured {
+					status = "✓ Configured"
+				}
+				fmt.Printf("  %-12s %s\n", name+":", status)
+				fmt.Printf("    └─ %s\n", cfg.ConfigPath)
+			}
+
+			// Open database for capabilities check
 			dataDir := filepath.Join(homeDir, ".conduit")
 			dbPath := filepath.Join(dataDir, "conduit.db")
 
 			st, err := store.New(dbPath)
 			if err != nil {
-				return fmt.Errorf("open database: %w", err)
+				// Database not available - skip capabilities section
+				fmt.Println("\n⚠️  Knowledge base not initialized. Run 'conduit kb add <path>' first.")
+				return nil
 			}
 			defer st.Close()
 
 			// Detect capabilities
 			caps := kb.DetectCapabilities(ctx, st.DB())
-
-			fmt.Println("MCP KB Server Status")
-			fmt.Println("════════════════════════════════════════════════════════")
 
 			// Capabilities
 			fmt.Println("\n📋 Search Capabilities:")
@@ -3576,12 +3631,22 @@ Shows:
 				}
 			}
 
-			// MCP configuration
-			fmt.Println("\n⚙️  MCP Client Configuration:")
-			fmt.Println("────────────────────────────────────────────────────────")
-			fmt.Println("Add to your AI client's MCP configuration:")
-			fmt.Println()
-			fmt.Println(`  {
+			// Configuration help if not configured
+			anyConfigured := false
+			for _, cfg := range clients {
+				if cfg.Configured {
+					anyConfigured = true
+					break
+				}
+			}
+
+			if !anyConfigured {
+				fmt.Println("\n⚙️  To configure MCP in an AI client:")
+				fmt.Println("────────────────────────────────────────────────────────")
+				fmt.Println("  Run: conduit mcp configure --client <client-name>")
+				fmt.Println()
+				fmt.Println("  Or add manually to client config:")
+				fmt.Println(`  {
     "mcpServers": {
       "conduit-kb": {
         "command": "conduit",
@@ -3589,15 +3654,46 @@ Shows:
       }
     }
   }`)
-			fmt.Println()
-			fmt.Println("Locations:")
-			fmt.Println("  • Claude Code: ~/.claude.json")
-			fmt.Println("  • Cursor: .cursor/settings/extensions.json")
-			fmt.Println("  • VS Code: .vscode/settings.json")
+			}
 
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+
+	return cmd
+}
+
+// checkMCPClientConfigured checks if conduit-kb MCP server is configured in a client config file
+func checkMCPClientConfigured(configPath string) (bool, string) {
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false, ""
+	}
+
+	var config map[string]interface{}
+	if err := json.Unmarshal(data, &config); err != nil {
+		return false, ""
+	}
+
+	// Check for mcpServers key (Claude Code, Cursor)
+	if mcpServers, ok := config["mcpServers"].(map[string]interface{}); ok {
+		if _, exists := mcpServers["conduit-kb"]; exists {
+			return true, "conduit-kb"
+		}
+	}
+
+	// Check for mcp.servers key (VS Code style)
+	if mcpSection, ok := config["mcp"].(map[string]interface{}); ok {
+		if servers, ok := mcpSection["servers"].(map[string]interface{}); ok {
+			if _, exists := servers["conduit-kb"]; exists {
+				return true, "conduit-kb"
+			}
+		}
+	}
+
+	return false, ""
 }
 
 // mcpLogsCmd shows MCP-related logs
@@ -4419,6 +4515,30 @@ Examples:
 			result, err := inst.UninstallWithOptions(ctx, opts)
 			if err != nil {
 				return fmt.Errorf("uninstall failed: %w", err)
+			}
+
+			// ALWAYS remove GUI state (Electron app userData)
+			// This ensures a clean slate on reinstall, regardless of --keep-data flag
+			// GUI state should NEVER persist independently of CLI state
+			home, _ := os.UserHomeDir()
+			electronDataDirs := []string{
+				filepath.Join(home, "Library", "Application Support", "conduit-desktop"),  // macOS
+				filepath.Join(home, ".config", "conduit-desktop"),                          // Linux
+			}
+
+			for _, dir := range electronDataDirs {
+				if _, statErr := os.Stat(dir); statErr == nil {
+					if dryRun {
+						result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("[DRY RUN] Would remove GUI state: %s", dir))
+					} else {
+						if removeErr := os.RemoveAll(dir); removeErr != nil {
+							result.ItemsFailed = append(result.ItemsFailed, fmt.Sprintf("GUI state: %s", dir))
+							result.Errors = append(result.Errors, fmt.Sprintf("Failed to remove GUI state %s: %v", dir, removeErr))
+						} else {
+							result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("GUI state: %s", dir))
+						}
+					}
+				}
 			}
 
 			// Output results
