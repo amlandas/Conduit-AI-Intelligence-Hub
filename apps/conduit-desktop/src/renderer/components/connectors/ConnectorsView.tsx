@@ -107,11 +107,11 @@ export function ConnectorsView(): JSX.Element {
       {/* Connectors List */}
       {instances.length === 0 ? (
         <div className="card p-8 text-center">
-          <Cable className="w-12 h-12 mx-auto text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
+          <Cable className="w-12 h-12 mx-auto text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary" />
           <p className="mt-3 text-macos-text-secondary dark:text-macos-text-dark-secondary">
             No connectors configured
           </p>
-          <p className="mt-1 text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+          <p className="mt-1 text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
             Add a connector to extend AI client capabilities
           </p>
         </div>

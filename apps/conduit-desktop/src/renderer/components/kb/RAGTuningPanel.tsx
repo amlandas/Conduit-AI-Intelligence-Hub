@@ -45,7 +45,7 @@ function Slider({ label, description, value, min, max, step, onChange }: SliderP
         <div className="flex items-center gap-1.5">
           <span className="text-sm font-medium">{label}</span>
           <button className="p-0.5 rounded hover:bg-macos-bg-secondary dark:hover:bg-macos-bg-dark-tertiary group">
-            <Info className="w-3.5 h-3.5 text-macos-text-tertiary group-hover:text-macos-text-secondary" />
+            <Info className="w-3.5 h-3.5 text-macos-text-tertiary dark:text-macos-text-dark-tertiary group-hover:text-macos-text-secondary" />
           </button>
         </div>
         <span className="text-sm font-mono text-macos-blue">{value.toFixed(2)}</span>
@@ -225,7 +225,7 @@ export function RAGTuningPanel({
               </button>
             ))}
           </div>
-          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
             {settings.searchMode === 'hybrid' && 'Combines semantic understanding with keyword matching (recommended)'}
             {settings.searchMode === 'semantic' && 'Uses vector similarity for meaning-based search'}
             {settings.searchMode === 'fts5' && 'Fast full-text search using SQLite FTS5'}

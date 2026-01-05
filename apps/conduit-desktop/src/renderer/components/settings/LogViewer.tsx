@@ -289,7 +289,7 @@ export function LogViewer({ className }: LogViewerProps): JSX.Element {
         className="h-[400px] overflow-auto font-mono text-xs"
       >
         {filteredLogs.length === 0 ? (
-          <div className="h-full flex items-center justify-center text-macos-text-tertiary">
+          <div className="h-full flex items-center justify-center text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
             No logs to display
           </div>
         ) : (
@@ -303,7 +303,7 @@ export function LogViewer({ className }: LogViewerProps): JSX.Element {
                 className={cn('px-3 py-1.5 border-b border-macos-separator/50 dark:border-macos-separator-dark/50', styles.bg)}
               >
                 <div className="flex items-start gap-2">
-                  <span className="text-macos-text-tertiary w-[140px] flex-shrink-0">
+                  <span className="text-macos-text-tertiary dark:text-macos-text-dark-tertiary w-[140px] flex-shrink-0">
                     {new Date(log.timestamp).toLocaleTimeString()}
                   </span>
                   <span className={cn('px-1.5 py-0.5 rounded text-[10px] uppercase font-medium w-[50px] text-center', styles.badge)}>
@@ -336,7 +336,7 @@ export function LogViewer({ className }: LogViewerProps): JSX.Element {
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-macos-separator dark:border-macos-separator-dark bg-macos-bg-secondary/30 dark:bg-macos-bg-dark-tertiary/30 text-xs text-macos-text-tertiary">
+      <div className="px-4 py-2 border-t border-macos-separator dark:border-macos-separator-dark bg-macos-bg-secondary/30 dark:bg-macos-bg-dark-tertiary/30 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
         <div className="flex items-center justify-between">
           <span>{filteredLogs.length} entries</span>
           <span>{paused ? 'Paused' : 'Auto-scrolling'}</span>

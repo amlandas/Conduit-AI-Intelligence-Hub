@@ -106,7 +106,7 @@ export function KBView(): JSX.Element {
                     <p className="mt-1 text-sm text-macos-text-secondary dark:text-macos-text-dark-secondary line-clamp-2">
                       {result.content}
                     </p>
-                    <div className="mt-2 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+                    <div className="mt-2 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
                       Score: {(result.score * 100).toFixed(1)}%
                     </div>
                   </div>
@@ -122,11 +122,11 @@ export function KBView(): JSX.Element {
         <h2 className="text-lg font-medium mb-3">Sources ({sources.length})</h2>
         {sources.length === 0 ? (
           <div className="card p-8 text-center">
-            <FolderOpen className="w-12 h-12 mx-auto text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
+            <FolderOpen className="w-12 h-12 mx-auto text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary" />
             <p className="mt-3 text-macos-text-secondary dark:text-macos-text-dark-secondary">
               No sources added yet
             </p>
-            <p className="mt-1 text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+            <p className="mt-1 text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
               Add a folder to start indexing documents
             </p>
           </div>

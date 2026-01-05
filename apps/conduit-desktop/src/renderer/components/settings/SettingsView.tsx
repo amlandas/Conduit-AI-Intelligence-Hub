@@ -257,7 +257,7 @@ export function SettingsView(): JSX.Element {
                     background: `linear-gradient(to right, rgb(52, 199, 89) 0%, rgb(52, 199, 89) ${((syncPolicy.syncInterval - 15) / 225) * 100}%, rgb(200, 200, 200) ${((syncPolicy.syncInterval - 15) / 225) * 100}%, rgb(200, 200, 200) 100%)`
                   }}
                 />
-                <div className="flex justify-between text-xs text-macos-text-tertiary">
+                <div className="flex justify-between text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                   <span>15 min</span>
                   <span>4 hours</span>
                 </div>
@@ -450,7 +450,7 @@ export function SettingsView(): JSX.Element {
               <p className="text-sm text-macos-text-secondary dark:text-macos-text-dark-secondary">
                 Version 0.1.0
               </p>
-              <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary mt-1">
+              <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary mt-1">
                 AI Intelligence Hub for macOS
               </p>
             </div>

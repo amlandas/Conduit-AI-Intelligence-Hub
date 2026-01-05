@@ -108,10 +108,10 @@ export function SearchModal({ open, onClose }: SearchModalProps): JSX.Element | 
               onClick={() => setQuery('')}
               className="p-1 rounded hover:bg-macos-bg-secondary dark:hover:bg-macos-bg-dark-tertiary"
             >
-              <X className="w-4 h-4 text-macos-text-tertiary" />
+              <X className="w-4 h-4 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
             </button>
           )}
-          <kbd className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary px-1.5 py-0.5 rounded bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary">
+          <kbd className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary px-1.5 py-0.5 rounded bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary">
             ESC
           </kbd>
         </div>
@@ -122,7 +122,7 @@ export function SearchModal({ open, onClose }: SearchModalProps): JSX.Element | 
             <div className="p-6 text-center text-macos-text-secondary dark:text-macos-text-dark-secondary">
               <p>No results found for "{query}"</p>
               {sources.length === 0 && (
-                <p className="text-sm mt-1 text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+                <p className="text-sm mt-1 text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
                   Add knowledge sources to enable search
                 </p>
               )}
@@ -152,7 +152,7 @@ export function SearchModal({ open, onClose }: SearchModalProps): JSX.Element | 
                       {result.content}
                     </p>
                   </div>
-                  <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary flex-shrink-0">
+                  <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary flex-shrink-0">
                     {(result.score * 100).toFixed(0)}%
                   </span>
                 </button>
@@ -161,7 +161,7 @@ export function SearchModal({ open, onClose }: SearchModalProps): JSX.Element | 
           ) : !query ? (
             <div className="p-6 text-center text-sm text-macos-text-secondary dark:text-macos-text-dark-secondary">
               <p>Type to search across {sources.length} knowledge source{sources.length !== 1 ? 's' : ''}</p>
-              <div className="flex items-center justify-center gap-4 mt-3 text-xs text-macos-text-tertiary">
+              <div className="flex items-center justify-center gap-4 mt-3 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                 <span><kbd className="px-1 py-0.5 rounded bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary">↑↓</kbd> Navigate</span>
                 <span><kbd className="px-1 py-0.5 rounded bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary">↵</kbd> Select</span>
                 <span><kbd className="px-1 py-0.5 rounded bg-macos-bg-secondary dark:bg-macos-bg-dark-tertiary">ESC</kbd> Close</span>

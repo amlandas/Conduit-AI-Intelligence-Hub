@@ -116,7 +116,7 @@ export function CLIInstallStep(): JSX.Element {
               ) : cliStatus.installed && cliStatus.needsUpdate ? (
                 <AlertCircle className="w-5 h-5 text-macos-orange flex-shrink-0 mt-0.5" />
               ) : (
-                <AlertCircle className="w-5 h-5 text-macos-text-tertiary flex-shrink-0 mt-0.5" />
+                <AlertCircle className="w-5 h-5 text-macos-text-tertiary dark:text-macos-text-dark-tertiary flex-shrink-0 mt-0.5" />
               )}
               <div className="flex-1">
                 <p className="font-medium text-macos-text-primary dark:text-macos-text-dark-primary">
@@ -142,7 +142,7 @@ export function CLIInstallStep(): JSX.Element {
                 className="p-2 rounded-lg hover:bg-macos-bg-tertiary dark:hover:bg-macos-bg-dark-tertiary transition-colors"
                 title="Refresh status"
               >
-                <RefreshCw className="w-4 h-4 text-macos-text-tertiary" />
+                <RefreshCw className="w-4 h-4 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
               </button>
             </div>
 
@@ -150,13 +150,13 @@ export function CLIInstallStep(): JSX.Element {
             {(!cliStatus.installed || cliStatus.needsUpdate) && (
               <div className="pt-4 border-t border-macos-separator dark:border-macos-separator-dark">
                 <div className="flex items-center gap-2 mb-3">
-                  <FolderOpen className="w-4 h-4 text-macos-text-tertiary" />
+                  <FolderOpen className="w-4 h-4 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
                   <span className="text-sm text-macos-text-secondary dark:text-macos-text-dark-secondary">
                     Install location: <code className="font-mono">{installPath}</code>
                   </span>
                 </div>
 
-                <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary mb-4">
+                <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary mb-4">
                   This will install <code className="font-mono">conduit</code> and{' '}
                   <code className="font-mono">conduit-daemon</code> to your local bin directory.
                   Make sure <code className="font-mono">{installPath}</code> is in your PATH.
@@ -168,7 +168,7 @@ export function CLIInstallStep(): JSX.Element {
                   className={cn(
                     'flex items-center gap-2 px-4 py-2 rounded-lg font-medium transition-colors',
                     isInstalling
-                      ? 'bg-macos-bg-tertiary text-macos-text-tertiary cursor-not-allowed'
+                      ? 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-tertiary dark:text-macos-text-dark-tertiary cursor-not-allowed'
                       : 'bg-macos-blue text-white hover:bg-macos-blue/90'
                   )}
                 >
@@ -207,7 +207,7 @@ export function CLIInstallStep(): JSX.Element {
               <p className="text-sm font-medium text-macos-text-primary dark:text-macos-text-dark-primary">
                 conduit
               </p>
-              <p className="text-xs text-macos-text-tertiary">CLI for managing sources and search</p>
+              <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">CLI for managing sources and search</p>
             </div>
           </div>
           <div className="flex items-start gap-2">
@@ -216,7 +216,7 @@ export function CLIInstallStep(): JSX.Element {
               <p className="text-sm font-medium text-macos-text-primary dark:text-macos-text-dark-primary">
                 conduit-daemon
               </p>
-              <p className="text-xs text-macos-text-tertiary">Background service for API access</p>
+              <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">Background service for API access</p>
             </div>
           </div>
         </div>
@@ -238,7 +238,7 @@ export function CLIInstallStep(): JSX.Element {
             'flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition-colors',
             canContinue
               ? 'bg-macos-blue text-white hover:bg-macos-blue/90'
-              : 'bg-macos-bg-tertiary text-macos-text-tertiary cursor-not-allowed'
+              : 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-tertiary dark:text-macos-text-dark-tertiary cursor-not-allowed'
           )}
         >
           Continue

@@ -880,12 +880,72 @@ function compareVersions(a: string, b: string): number {
   return 0
 }
 
+// Helper: Ensure Podman machine is initialized and running (macOS only)
+// On macOS, Podman requires a Linux VM to run containers
+async function ensurePodmanMachineReady(podmanPath: string): Promise<{ ready: boolean; error?: string }> {
+  // Only needed on macOS
+  if (process.platform !== 'darwin') {
+    return { ready: true }
+  }
+
+  try {
+    // Check if any machine exists
+    const { stdout: machineList } = await execFileAsync(podmanPath, ['machine', 'list', '--format', '{{.Name}}'])
+    const machines = machineList.trim().split('\n').filter(Boolean)
+
+    if (machines.length === 0) {
+      // No machine exists, create one
+      console.log('Initializing Podman machine...')
+      try {
+        await execFileAsync(podmanPath, ['machine', 'init'], { timeout: 300000 }) // 5 min timeout
+      } catch (initErr) {
+        return { ready: false, error: `Failed to initialize Podman machine: ${(initErr as Error).message}` }
+      }
+    }
+
+    // Check if machine is running
+    const { stdout: statusOutput } = await execFileAsync(podmanPath, ['machine', 'list', '--format', '{{.Name}},{{.Running}}'])
+    const statusLines = statusOutput.trim().split('\n').filter(Boolean)
+
+    let isRunning = false
+    for (const line of statusLines) {
+      const [, running] = line.split(',')
+      if (running === 'true') {
+        isRunning = true
+        break
+      }
+    }
+
+    if (!isRunning) {
+      // Machine exists but not running, start it
+      console.log('Starting Podman machine...')
+      try {
+        await execFileAsync(podmanPath, ['machine', 'start'], { timeout: 120000 }) // 2 min timeout
+      } catch (startErr) {
+        return { ready: false, error: `Failed to start Podman machine: ${(startErr as Error).message}` }
+      }
+    }
+
+    return { ready: true }
+  } catch (err) {
+    return { ready: false, error: `Podman machine check failed: ${(err as Error).message}` }
+  }
+}
+
 // Helper: Execute container command (tries podman first, then docker)
 // Uses findBinary() to locate the binary in known paths
+// On macOS with Podman, ensures the Podman machine is running first
 async function execContainerCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {
   // Try Podman first
   const podmanResult = await findBinary('podman')
   if (podmanResult.found && podmanResult.path) {
+    // On macOS, ensure Podman machine is ready before running commands
+    if (process.platform === 'darwin') {
+      const machineStatus = await ensurePodmanMachineReady(podmanResult.path)
+      if (!machineStatus.ready) {
+        throw new Error(machineStatus.error || 'Podman machine not ready')
+      }
+    }
     return await execFileAsync(podmanResult.path, args)
   }
 
