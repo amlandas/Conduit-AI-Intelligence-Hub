@@ -347,6 +347,23 @@ export function setupSetupIpcHandlers(): void {
       })
     }
 
+    // Check Ollama via CLI: conduit ollama status
+    try {
+      const { stdout } = await execFileAsync(conduitPath, ['ollama', 'status'])
+      // CLI outputs "✓ Ollama is running" when running
+      const isRunning = stdout.includes('✓ Ollama is running') || stdout.includes('is running')
+      results.push({
+        name: 'Ollama',
+        running: isRunning,
+        port: isRunning ? 11434 : undefined,
+      })
+    } catch {
+      results.push({
+        name: 'Ollama',
+        running: false,
+      })
+    }
+
     // Check Qdrant via CLI: conduit qdrant status
     try {
       const { stdout } = await execFileAsync(conduitPath, ['qdrant', 'status'])
@@ -618,6 +635,242 @@ export function setupSetupIpcHandlers(): void {
         resolve({ success: false, error: `Failed to run CLI: ${err.message}` })
       })
     })
+  })
+
+  // KB Sync with progress - DELEGATES TO CLI: conduit kb sync
+  ipcMain.handle('kb:sync-with-progress', async (_, sourceId?: string): Promise<{ success: boolean; processed: number; errors: number; errorTypes: string[]; error?: string }> => {
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+    const windows = BrowserWindow.getAllWindows()
+
+    const sendProgress = (percent: number, message: string, stats?: { processed: number; errors: number }): void => {
+      windows.forEach((window) => {
+        window.webContents.send('kb:sync-progress', { sourceId, percent, message, ...stats })
+      })
+    }
+
+    return new Promise((resolve) => {
+      const args = ['kb', 'sync']
+      if (sourceId) {
+        args.push(sourceId)
+      }
+
+      const child = spawn(conduitPath, args, { env: { ...process.env } })
+
+      let processed = 0
+      let errors = 0
+      const errorTypes: string[] = []
+      let lastOutput = ''
+
+      // Parse CLI output for progress
+      child.stdout?.on('data', (data: Buffer) => {
+        const output = data.toString()
+        lastOutput += output
+
+        // Parse progress from CLI output
+        // Example: "Syncing... 50% (100/200 chunks)"
+        const progressMatch = output.match(/(\d+)%/)
+        if (progressMatch) {
+          const percent = parseInt(progressMatch[1], 10)
+          sendProgress(percent, `Syncing... ${percent}%`, { processed, errors })
+        }
+
+        // Parse processed count
+        const processedMatch = output.match(/Processed:\s*(\d+)/)
+        if (processedMatch) {
+          processed = parseInt(processedMatch[1], 10)
+        }
+
+        // Parse error count
+        const errorsMatch = output.match(/Errors?:\s*(\d+)/)
+        if (errorsMatch) {
+          errors = parseInt(errorsMatch[1], 10)
+        }
+
+        // Parse error types
+        const errorTypeMatch = output.match(/Error:\s*(.+)/g)
+        if (errorTypeMatch) {
+          errorTypeMatch.forEach((e) => {
+            const type = e.replace('Error: ', '').trim()
+            if (!errorTypes.includes(type)) {
+              errorTypes.push(type)
+            }
+          })
+        }
+      })
+
+      child.stderr?.on('data', (data: Buffer) => {
+        lastOutput += data.toString()
+      })
+
+      child.on('close', async (code) => {
+        if (code === 0) {
+          sendProgress(100, 'Sync complete', { processed, errors })
+
+          // Auto-configure MCP KB server after successful sync
+          try {
+            await execFileAsync(conduitPath, ['mcp', 'configure', '--client', 'claude-code'])
+            console.log('MCP KB server auto-configured for Claude Code')
+          } catch (mcpErr) {
+            console.warn('Failed to auto-configure MCP:', mcpErr)
+            // Don't fail the sync if MCP configuration fails
+          }
+
+          resolve({ success: true, processed, errors, errorTypes })
+        } else {
+          resolve({ success: false, processed, errors, errorTypes, error: `Sync failed: ${lastOutput}` })
+        }
+      })
+
+      child.on('error', (err) => {
+        resolve({ success: false, processed, errors, errorTypes, error: err.message })
+      })
+    })
+  })
+
+  // KAG Sync with progress - DELEGATES TO CLI: conduit kb kag-sync
+  ipcMain.handle('kb:kag-sync-with-progress', async (_, sourceId?: string): Promise<{ success: boolean; extracted: number; errors: number; errorTypes: string[]; error?: string }> => {
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+    const windows = BrowserWindow.getAllWindows()
+
+    const sendProgress = (percent: number, message: string, stats?: { extracted: number; errors: number }): void => {
+      windows.forEach((window) => {
+        window.webContents.send('kb:kag-sync-progress', { sourceId, percent, message, ...stats })
+      })
+    }
+
+    return new Promise((resolve) => {
+      const args = ['kb', 'kag-sync']
+      if (sourceId) {
+        args.push(sourceId)
+      }
+
+      const child = spawn(conduitPath, args, { env: { ...process.env } })
+
+      let extracted = 0
+      let errors = 0
+      const errorTypes: string[] = []
+      let lastOutput = ''
+
+      // Parse CLI output for progress
+      child.stdout?.on('data', (data: Buffer) => {
+        const output = data.toString()
+        lastOutput += output
+
+        // Parse progress from CLI output
+        const progressMatch = output.match(/(\d+)%/)
+        if (progressMatch) {
+          const percent = parseInt(progressMatch[1], 10)
+          sendProgress(percent, `Extracting... ${percent}%`, { extracted, errors })
+        }
+
+        // Parse extracted count
+        const extractedMatch = output.match(/Extracted:\s*(\d+)/)
+        if (extractedMatch) {
+          extracted = parseInt(extractedMatch[1], 10)
+        }
+
+        // Parse entities/relations count
+        const entitiesMatch = output.match(/Entities:\s*(\d+)/)
+        if (entitiesMatch) {
+          extracted += parseInt(entitiesMatch[1], 10)
+        }
+
+        // Parse error count
+        const errorsMatch = output.match(/Errors?:\s*(\d+)/)
+        if (errorsMatch) {
+          errors = parseInt(errorsMatch[1], 10)
+        }
+
+        // Parse error types
+        const errorTypeMatch = output.match(/Error:\s*(.+)/g)
+        if (errorTypeMatch) {
+          errorTypeMatch.forEach((e) => {
+            const type = e.replace('Error: ', '').trim()
+            if (!errorTypes.includes(type)) {
+              errorTypes.push(type)
+            }
+          })
+        }
+      })
+
+      child.stderr?.on('data', (data: Buffer) => {
+        lastOutput += data.toString()
+      })
+
+      child.on('close', (code) => {
+        if (code === 0) {
+          sendProgress(100, 'KAG sync complete', { extracted, errors })
+          resolve({ success: true, extracted, errors, errorTypes })
+        } else {
+          resolve({ success: false, extracted, errors, errorTypes, error: `KAG sync failed: ${lastOutput}` })
+        }
+      })
+
+      child.on('error', (err) => {
+        resolve({ success: false, extracted, errors, errorTypes, error: err.message })
+      })
+    })
+  })
+
+  // MCP Auto-configure - DELEGATES TO CLI: conduit mcp configure
+  ipcMain.handle('mcp:configure', async (_, options?: { client?: string }): Promise<{ success: boolean; configured: boolean; configPath?: string; error?: string }> => {
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+    const clientId = options?.client || 'claude-code'
+
+    try {
+      const args = ['mcp', 'configure', '--client', clientId]
+      const { stdout, stderr } = await execFileAsync(conduitPath, args)
+
+      const alreadyConfigured = stdout.includes('already configured')
+      const configured = stdout.includes('configured')
+
+      // Extract config path from output
+      const pathMatch = stdout.match(/Config:\s*(.+)/)
+      const configPath = pathMatch ? pathMatch[1].trim() : undefined
+
+      return {
+        success: true,
+        configured: configured || alreadyConfigured,
+        configPath
+      }
+    } catch (err) {
+      return {
+        success: false,
+        configured: false,
+        error: (err as Error).message
+      }
+    }
+  })
+
+  // MCP Check - Check if MCP KB server is configured
+  ipcMain.handle('mcp:check', async (_, options?: { client?: string }): Promise<{ configured: boolean; configPath?: string }> => {
+    const homeDir = os.homedir()
+    const clientId = options?.client || 'claude-code'
+
+    let configPath: string
+    switch (clientId) {
+      case 'claude-code':
+        configPath = path.join(homeDir, '.claude.json')
+        break
+      case 'cursor':
+        configPath = path.join(homeDir, '.cursor', 'settings', 'extensions.json')
+        break
+      case 'vscode':
+        configPath = path.join(homeDir, '.vscode', 'settings.json')
+        break
+      default:
+        return { configured: false }
+    }
+
+    try {
+      const content = await fsPromises.readFile(configPath, 'utf-8')
+      const config = JSON.parse(content)
+      const servers = config.mcpServers || config['mcp.servers'] || {}
+      const configured = 'conduit-kb' in servers
+      return { configured, configPath }
+    } catch {
+      return { configured: false, configPath }
+    }
   })
 
   // Shell operations

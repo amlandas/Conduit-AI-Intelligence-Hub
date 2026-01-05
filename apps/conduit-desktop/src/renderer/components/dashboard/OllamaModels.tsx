@@ -1,13 +1,12 @@
+/**
+ * OllamaModels Component
+ *
+ * PRINCIPLE: GUI is a thin wrapper over CLI
+ * All operations delegate to `conduit` CLI commands via IPC - NO direct HTTP calls.
+ */
 import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
-import { Cpu, Download, Trash2, RefreshCw, Loader2, Check } from 'lucide-react'
-
-interface OllamaModel {
-  name: string
-  size: string
-  modified: string
-  digest: string
-}
+import { Cpu, Download, RefreshCw, Loader2, Check } from 'lucide-react'
 
 const RECOMMENDED_MODELS = [
   { name: 'nomic-embed-text', purpose: 'Embeddings', size: '~274MB' },
@@ -16,29 +15,20 @@ const RECOMMENDED_MODELS = [
 ]
 
 export function OllamaModels(): JSX.Element {
-  const [models, setModels] = useState<OllamaModel[]>([])
+  const [models, setModels] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
   const [pulling, setPulling] = useState<string | null>(null)
+  const [pullProgress, setPullProgress] = useState<number>(0)
 
+  // Fetch models via CLI: conduit ollama models
   const fetchModels = async (): Promise<void> => {
     setLoading(true)
     try {
-      // In a real implementation, this would call the daemon API
-      // which would proxy to Ollama's /api/tags endpoint
-      const response = await fetch('http://localhost:11434/api/tags')
-      if (response.ok) {
-        const data = await response.json()
-        setModels(
-          (data.models || []).map((m: { name: string; size: number; modified_at: string; digest: string }) => ({
-            name: m.name,
-            size: formatBytes(m.size),
-            modified: new Date(m.modified_at).toLocaleDateString(),
-            digest: m.digest?.slice(0, 12) || ''
-          }))
-        )
-      }
+      const installedModels = await window.conduit.checkModels()
+      setModels(installedModels)
     } catch (err) {
       console.error('Failed to fetch Ollama models:', err)
+      setModels([])
     } finally {
       setLoading(false)
     }
@@ -46,37 +36,40 @@ export function OllamaModels(): JSX.Element {
 
   useEffect(() => {
     fetchModels()
-  }, [])
 
-  const formatBytes = (bytes: number): string => {
-    if (bytes === 0) return '0 B'
-    const k = 1024
-    const sizes = ['B', 'KB', 'MB', 'GB']
-    const i = Math.floor(Math.log(bytes) / Math.log(k))
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i]
-  }
+    // Subscribe to pull progress events
+    const cleanup = window.conduit.onOllamaPullProgress(({ model, progress }: { model: string; progress: number }) => {
+      if (pulling === model || model) {
+        setPullProgress(progress)
+      }
+    })
 
+    return cleanup
+  }, [pulling])
+
+  // Pull model via CLI: conduit ollama pull <model>
   const handlePull = async (modelName: string): Promise<void> => {
     setPulling(modelName)
+    setPullProgress(0)
     try {
-      // This would trigger a model pull via the daemon
-      // For now, just simulate the API call
-      await fetch('http://localhost:11434/api/pull', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name: modelName })
-      })
+      const result = await window.conduit.pullModel({ model: modelName })
+      if (!result.success) {
+        console.error('Failed to pull model:', result.error)
+      }
       // Refresh the list after pulling
       await fetchModels()
     } catch (err) {
       console.error('Failed to pull model:', err)
     } finally {
       setPulling(null)
+      setPullProgress(0)
     }
   }
 
   const isModelInstalled = (modelName: string): boolean => {
-    return models.some((m) => m.name.startsWith(modelName.split(':')[0]))
+    // Check if any installed model starts with the base model name
+    const baseName = modelName.split(':')[0]
+    return models.some((m) => m.startsWith(baseName))
   }
 
   return (
@@ -102,29 +95,20 @@ export function OllamaModels(): JSX.Element {
             <Loader2 className="w-5 h-5 animate-spin text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
           </div>
         ) : models.length === 0 ? (
-          <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary py-2">
+          <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary py-2">
             No models installed. Pull a model below to get started.
           </p>
         ) : (
           <div className="space-y-2">
-            {models.map((model) => (
+            {models.map((modelName) => (
               <div
-                key={model.name}
+                key={modelName}
                 className="flex items-center gap-3 p-2 rounded-lg bg-macos-bg-secondary/50 dark:bg-macos-bg-dark-tertiary/50"
               >
                 <Cpu className="w-4 h-4 text-macos-purple flex-shrink-0" />
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{model.name}</p>
-                  <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
-                    {model.size}
-                  </p>
+                  <p className="text-sm font-medium truncate">{modelName}</p>
                 </div>
-                <button
-                  className="p-1 rounded hover:bg-macos-red/10 text-macos-red opacity-0 group-hover:opacity-100 transition-opacity"
-                  title="Delete model"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
               </div>
             ))}
           </div>
@@ -165,11 +149,16 @@ export function OllamaModels(): JSX.Element {
                     className="flex items-center gap-1 text-xs text-macos-blue hover:underline disabled:opacity-50"
                   >
                     {isPulling ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        {pullProgress > 0 ? `${pullProgress}%` : 'Starting...'}
+                      </>
                     ) : (
-                      <Download className="w-3.5 h-3.5" />
+                      <>
+                        <Download className="w-3.5 h-3.5" />
+                        Pull
+                      </>
                     )}
-                    {isPulling ? 'Pulling...' : 'Pull'}
                   </button>
                 )}
               </div>

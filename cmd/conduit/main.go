@@ -3220,6 +3220,112 @@ func mcpCmd() *cobra.Command {
 	cmd.AddCommand(mcpKBCmd())
 	cmd.AddCommand(mcpStatusCmd())
 	cmd.AddCommand(mcpLogsCmd())
+	cmd.AddCommand(mcpConfigureCmd())
+
+	return cmd
+}
+
+// mcpConfigureCmd auto-configures the MCP KB server in AI clients
+func mcpConfigureCmd() *cobra.Command {
+	var clientID string
+	var forceOverwrite bool
+
+	cmd := &cobra.Command{
+		Use:   "configure",
+		Short: "Auto-configure MCP KB server in AI clients",
+		Long: `Auto-configure the Conduit MCP KB server in AI clients.
+
+This adds the MCP server configuration to the client's config file,
+enabling AI-powered document search from your Knowledge Base.
+
+Supported clients:
+  - claude-code: Claude Code CLI (~/.claude.json)
+  - cursor: Cursor IDE (.cursor/settings/extensions.json)
+  - vscode: VS Code (.vscode/settings.json)
+
+Examples:
+  conduit mcp configure                    # Configure for Claude Code (default)
+  conduit mcp configure --client cursor    # Configure for Cursor IDE
+  conduit mcp configure --check            # Check if already configured`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			homeDir, _ := os.UserHomeDir()
+			var configPath string
+			var configKey string
+
+			switch clientID {
+			case "claude-code":
+				configPath = filepath.Join(homeDir, ".claude.json")
+				configKey = "mcpServers"
+			case "cursor":
+				configPath = filepath.Join(homeDir, ".cursor", "settings", "extensions.json")
+				configKey = "mcpServers"
+			case "vscode":
+				configPath = filepath.Join(homeDir, ".vscode", "settings.json")
+				configKey = "mcp.servers"
+			default:
+				return fmt.Errorf("unsupported client: %s", clientID)
+			}
+
+			// Read existing config or create new
+			var config map[string]interface{}
+			if data, err := os.ReadFile(configPath); err == nil {
+				if err := json.Unmarshal(data, &config); err != nil {
+					return fmt.Errorf("parse config: %w", err)
+				}
+			} else {
+				config = make(map[string]interface{})
+			}
+
+			// Get or create mcpServers section
+			var mcpServers map[string]interface{}
+			if servers, ok := config[configKey].(map[string]interface{}); ok {
+				mcpServers = servers
+			} else {
+				mcpServers = make(map[string]interface{})
+			}
+
+			// Check if already configured
+			if _, exists := mcpServers["conduit-kb"]; exists && !forceOverwrite {
+				fmt.Println("✓ MCP KB server already configured")
+				fmt.Printf("  Client: %s\n", clientID)
+				fmt.Printf("  Config: %s\n", configPath)
+				return nil
+			}
+
+			// Add conduit-kb configuration
+			mcpServers["conduit-kb"] = map[string]interface{}{
+				"command": "conduit",
+				"args":    []string{"mcp", "kb"},
+			}
+			config[configKey] = mcpServers
+
+			// Ensure directory exists
+			if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
+				return fmt.Errorf("create config directory: %w", err)
+			}
+
+			// Write config with pretty formatting
+			data, err := json.MarshalIndent(config, "", "  ")
+			if err != nil {
+				return fmt.Errorf("marshal config: %w", err)
+			}
+
+			if err := os.WriteFile(configPath, data, 0644); err != nil {
+				return fmt.Errorf("write config: %w", err)
+			}
+
+			fmt.Println("✓ MCP KB server configured")
+			fmt.Printf("  Client: %s\n", clientID)
+			fmt.Printf("  Config: %s\n", configPath)
+			fmt.Println()
+			fmt.Printf("Restart %s for the configuration to take effect.\n", clientID)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVarP(&clientID, "client", "c", "claude-code", "Client to configure (claude-code, cursor, vscode)")
+	cmd.Flags().BoolVarP(&forceOverwrite, "force", "f", false, "Overwrite existing configuration")
 
 	return cmd
 }

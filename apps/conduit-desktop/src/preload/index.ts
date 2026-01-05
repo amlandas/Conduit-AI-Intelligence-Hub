@@ -114,6 +114,11 @@ export interface ConduitAPI {
   syncKBSource: (id: string) => Promise<unknown>
   searchKB: (query: string, options?: object) => Promise<unknown>
   searchKAG: (query: string, options?: object) => Promise<unknown>
+  // KB Sync with progress (CLI-based)
+  syncKBWithProgress: (sourceId?: string) => Promise<{ success: boolean; processed: number; errors: number; errorTypes: string[]; error?: string }>
+  kagSyncWithProgress: (sourceId?: string) => Promise<{ success: boolean; extracted: number; errors: number; errorTypes: string[]; error?: string }>
+  onKBSyncProgress: (callback: (data: { sourceId?: string; percent: number; message: string; processed?: number; errors?: number }) => void) => () => void
+  onKAGSyncProgress: (callback: (data: { sourceId?: string; percent: number; message: string; extracted?: number; errors?: number }) => void) => () => void
 
   // Permissions (Advanced Mode)
   getInstancePermissions: (id: string) => Promise<unknown>
@@ -155,6 +160,10 @@ export interface ConduitAPI {
   onOllamaPullProgress: (callback: (data: { model: string; progress: number }) => void) => () => void
   autoInstallDependency: (options: { name: string }) => Promise<{ success: boolean; error?: string }>
   onInstallProgress: (callback: (data: { name: string; stage: string; percent: number; message: string }) => void) => () => void
+
+  // MCP configuration
+  configureMCP: (options?: { client?: string }) => Promise<{ success: boolean; configured: boolean; configPath?: string; error?: string }>
+  checkMCPConfig: (options?: { client?: string }) => Promise<{ configured: boolean; configPath?: string }>
 
   // Shell operations
   openExternal: (url: string) => Promise<void>
@@ -198,6 +207,19 @@ const conduitAPI: ConduitAPI = {
   syncKBSource: (id) => ipcRenderer.invoke('kb:sync', id),
   searchKB: (query, options) => ipcRenderer.invoke('kb:search', query, options),
   searchKAG: (query, options) => ipcRenderer.invoke('kb:kag-search', query, options),
+  // KB Sync with progress (CLI-based)
+  syncKBWithProgress: (sourceId) => ipcRenderer.invoke('kb:sync-with-progress', sourceId),
+  kagSyncWithProgress: (sourceId) => ipcRenderer.invoke('kb:kag-sync-with-progress', sourceId),
+  onKBSyncProgress: (callback) => {
+    const handler = (_: unknown, data: { sourceId?: string; percent: number; message: string; processed?: number; errors?: number }): void => callback(data)
+    ipcRenderer.on('kb:sync-progress', handler)
+    return () => ipcRenderer.removeListener('kb:sync-progress', handler)
+  },
+  onKAGSyncProgress: (callback) => {
+    const handler = (_: unknown, data: { sourceId?: string; percent: number; message: string; extracted?: number; errors?: number }): void => callback(data)
+    ipcRenderer.on('kb:kag-sync-progress', handler)
+    return () => ipcRenderer.removeListener('kb:kag-sync-progress', handler)
+  },
 
   // Permissions (Advanced Mode)
   getInstancePermissions: (id) => ipcRenderer.invoke('instances:permissions', id),
@@ -252,6 +274,10 @@ const conduitAPI: ConduitAPI = {
     ipcRenderer.on('install:progress', handler)
     return () => ipcRenderer.removeListener('install:progress', handler)
   },
+
+  // MCP configuration
+  configureMCP: (options) => ipcRenderer.invoke('mcp:configure', options),
+  checkMCPConfig: (options) => ipcRenderer.invoke('mcp:check', options),
 
   // Shell operations
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),
