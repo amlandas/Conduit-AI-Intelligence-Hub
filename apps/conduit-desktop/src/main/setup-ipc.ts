@@ -425,6 +425,28 @@ export function setupSetupIpcHandlers(): void {
           await execFileAsync(conduitPath, ['falkordb', 'install'])
           return { success: true }
         }
+        case 'Container Runtime':
+        case 'Podman': {
+          // Start Podman machine on macOS
+          // Note: CLI doesn't have a dedicated command for this yet
+          // This directly starts podman machine as infrastructure management
+          if (process.platform === 'darwin') {
+            try {
+              // Try to start podman machine
+              await execFileAsync('podman', ['machine', 'start'])
+              return { success: true }
+            } catch (podmanErr) {
+              // If podman machine fails, maybe Docker is available?
+              return {
+                success: false,
+                error: 'Could not start Podman machine. If using Docker, please start Docker Desktop manually.'
+              }
+            }
+          } else {
+            // On Linux, podman should just work if installed
+            return { success: true }
+          }
+        }
         default:
           return { success: false, error: `Unknown service: ${name}` }
       }

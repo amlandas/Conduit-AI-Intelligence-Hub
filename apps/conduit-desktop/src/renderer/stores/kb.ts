@@ -19,6 +19,16 @@ export interface SearchResult {
   source_id: string
 }
 
+// Sync operation result - persists across tab switches
+export interface SyncResult {
+  success: boolean
+  processed?: number
+  extracted?: number
+  errors: number
+  errorTypes: string[]
+  error?: string
+}
+
 interface KBStore {
   sources: KBSource[]
   searchResults: SearchResult[]
@@ -26,6 +36,15 @@ interface KBStore {
   loading: boolean
   syncing: { [sourceId: string]: boolean }
   syncProgress: { [sourceId: string]: number }
+
+  // Global RAG/KAG sync state - persists across tab switches
+  ragSyncing: boolean
+  ragProgress: number
+  ragResult: SyncResult | null
+  kagSyncing: boolean
+  kagProgress: number
+  kagResult: SyncResult | null
+  mcpConfigured: boolean
 
   setSources: (sources: KBSource[]) => void
   updateSource: (id: string, updates: Partial<KBSource>) => void
@@ -36,6 +55,16 @@ interface KBStore {
   setLoading: (loading: boolean) => void
   setSyncing: (sourceId: string, syncing: boolean) => void
   setSyncProgress: (sourceId: string, progress: number) => void
+
+  // Global RAG/KAG sync setters
+  setRagSyncing: (syncing: boolean) => void
+  setRagProgress: (progress: number) => void
+  setRagResult: (result: SyncResult | null) => void
+  setKagSyncing: (syncing: boolean) => void
+  setKagProgress: (progress: number) => void
+  setKagResult: (result: SyncResult | null) => void
+  setMcpConfigured: (configured: boolean) => void
+
   refresh: () => Promise<void>
   search: (query: string) => Promise<void>
 }
@@ -47,6 +76,15 @@ export const useKBStore = create<KBStore>((set, get) => ({
   loading: false,
   syncing: {},
   syncProgress: {},
+
+  // Global RAG/KAG sync state - initial values
+  ragSyncing: false,
+  ragProgress: 0,
+  ragResult: null,
+  kagSyncing: false,
+  kagProgress: 0,
+  kagResult: null,
+  mcpConfigured: false,
 
   setSources: (sources) => set({ sources }),
 
@@ -82,6 +120,15 @@ export const useKBStore = create<KBStore>((set, get) => ({
     set((state) => ({
       syncProgress: { ...state.syncProgress, [sourceId]: progress }
     })),
+
+  // Global RAG/KAG sync setters
+  setRagSyncing: (syncing) => set({ ragSyncing: syncing }),
+  setRagProgress: (progress) => set({ ragProgress: progress }),
+  setRagResult: (result) => set({ ragResult: result }),
+  setKagSyncing: (syncing) => set({ kagSyncing: syncing }),
+  setKagProgress: (progress) => set({ kagProgress: progress }),
+  setKagResult: (result) => set({ kagResult: result }),
+  setMcpConfigured: (configured) => set({ mcpConfigured: configured }),
 
   refresh: async () => {
     get().setLoading(true)

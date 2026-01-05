@@ -103,6 +103,10 @@ export function DashboardView(): JSX.Element {
     startService('FalkorDB')
   }
 
+  const handleStartContainerRuntime = (): void => {
+    startService('Container Runtime')
+  }
+
   return (
     <div className="space-y-6 animate-fade-in">
       <div className="flex items-center justify-between">
@@ -148,7 +152,10 @@ export function DashboardView(): JSX.Element {
             title="Container Runtime"
             icon={Box}
             status={stats.containerRuntime ? 'online' : 'offline'}
-            detail={stats.containerRuntime || 'Not available'}
+            detail={stats.containerRuntime || 'Not available (Podman/Docker)'}
+            onClick={handleStartContainerRuntime}
+            loading={startingService === 'Container Runtime'}
+            canStart={true}
           />
           <StatusCard
             title="SQLite/FTS5"

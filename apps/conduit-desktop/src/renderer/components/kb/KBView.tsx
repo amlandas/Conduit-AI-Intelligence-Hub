@@ -3,6 +3,7 @@
  *
  * PRINCIPLE: GUI is a thin wrapper over CLI
  * KB sync operations delegate to CLI with progress tracking.
+ * Sync state is stored in global Zustand store to persist across tab switches.
  */
 import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
@@ -22,17 +23,9 @@ import {
   GitBranch,
   CheckCircle,
   XCircle,
-  AlertCircle
+  AlertCircle,
+  ExternalLink
 } from 'lucide-react'
-
-interface SyncResult {
-  success: boolean
-  processed?: number
-  extracted?: number
-  errors: number
-  errorTypes: string[]
-  error?: string
-}
 
 export function KBView(): JSX.Element {
   const {
@@ -42,22 +35,29 @@ export function KBView(): JSX.Element {
     refresh,
     search,
     removeSource,
-    addSource
+    addSource,
+    // Global sync state - persists across tab switches
+    ragSyncing,
+    ragProgress,
+    ragResult,
+    kagSyncing,
+    kagProgress,
+    kagResult,
+    mcpConfigured,
+    // Setters for sync state
+    setRagSyncing,
+    setRagProgress,
+    setRagResult,
+    setKagSyncing,
+    setKagProgress,
+    setKagResult,
+    setMcpConfigured
   } = useKBStore()
   const { isFeatureVisible } = useSettingsStore()
   const [query, setQuery] = useState(searchQuery)
   const [addModalOpen, setAddModalOpen] = useState(false)
 
-  // Sync state
-  const [ragSyncing, setRagSyncing] = useState(false)
-  const [kagSyncing, setKagSyncing] = useState(false)
-  const [ragProgress, setRagProgress] = useState(0)
-  const [kagProgress, setKagProgress] = useState(0)
-  const [ragResult, setRagResult] = useState<SyncResult | null>(null)
-  const [kagResult, setKagResult] = useState<SyncResult | null>(null)
-  const [mcpConfigured, setMcpConfigured] = useState(false)
-
-  // Subscribe to progress events and check MCP config
+  // Subscribe to progress events and check MCP config on mount
   useEffect(() => {
     const cleanupRag = window.conduit.onKBSyncProgress(({ percent }: { percent: number }) => {
       setRagProgress(percent)
@@ -67,7 +67,7 @@ export function KBView(): JSX.Element {
       setKagProgress(percent)
     })
 
-    // Check if MCP is already configured
+    // Check if MCP is already configured (only on initial mount)
     window.conduit.checkMCPConfig().then(({ configured }: { configured: boolean }) => {
       setMcpConfigured(configured)
     })
@@ -76,7 +76,7 @@ export function KBView(): JSX.Element {
       cleanupRag()
       cleanupKag()
     }
-  }, [])
+  }, [setRagProgress, setKagProgress, setMcpConfigured])
 
   const handleSearch = (e: React.FormEvent): void => {
     e.preventDefault()
@@ -257,8 +257,8 @@ export function KBView(): JSX.Element {
                   )}
                   {ragResult.success && mcpConfigured && (
                     <div className="mt-1 flex items-center gap-1 text-macos-blue">
-                      <CheckCircle className="w-3 h-3" />
-                      <span>MCP KB server auto-configured</span>
+                      <ExternalLink className="w-3 h-3" />
+                      <span>KB search added to Claude Code (~/.claude.json)</span>
                     </div>
                   )}
                 </div>
