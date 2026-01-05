@@ -13,6 +13,7 @@ require (
 	github.com/spf13/cobra v1.10.2
 	github.com/spf13/viper v1.21.0
 	golang.org/x/text v0.31.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
