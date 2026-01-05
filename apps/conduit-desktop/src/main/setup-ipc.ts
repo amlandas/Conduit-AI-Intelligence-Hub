@@ -443,17 +443,19 @@ export function setupSetupIpcHandlers(): void {
     return { path: result.filePaths[0], cancelled: false }
   })
 
-  // Check services status
+  // Check services status - delegate to CLI commands
   ipcMain.handle('setup:check-services', async (): Promise<ServiceStatus[]> => {
     const results: ServiceStatus[] = []
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
 
-    // Check Conduit Daemon
+    // Check Conduit Daemon via CLI: conduit service status
     try {
-      const socketPath = path.join(os.homedir(), '.conduit', 'conduit.sock')
-      await fsPromises.access(socketPath)
+      const { stdout } = await execFileAsync(conduitPath, ['service', 'status'])
+      // CLI outputs "✓ Conduit daemon is running" when running
+      const isRunning = stdout.includes('daemon is running')
       results.push({
         name: 'Conduit Daemon',
-        running: true,
+        running: isRunning,
         port: undefined,
       })
     } catch {
@@ -463,16 +465,16 @@ export function setupSetupIpcHandlers(): void {
       })
     }
 
-    // Check Qdrant (via container runtime)
+    // Check Qdrant via CLI: conduit qdrant status
     try {
-      const { stdout } = await execContainerCommand(['ps', '--format', '{{.Names}}'])
-      const containers = stdout.trim().split('\n')
-      const qdrantRunning = containers.some(c => c.includes('qdrant'))
+      const { stdout } = await execFileAsync(conduitPath, ['qdrant', 'status'])
+      // CLI outputs "API Status:        ✓ reachable" when running
+      const isRunning = stdout.includes('✓ reachable') || stdout.includes('✓ running')
       results.push({
         name: 'Qdrant',
-        running: qdrantRunning,
-        port: qdrantRunning ? 6333 : undefined,
-        container: qdrantRunning ? 'qdrant' : undefined,
+        running: isRunning,
+        port: isRunning ? 6333 : undefined,
+        container: isRunning ? 'qdrant' : undefined,
       })
     } catch {
       results.push({
@@ -481,16 +483,16 @@ export function setupSetupIpcHandlers(): void {
       })
     }
 
-    // Check FalkorDB
+    // Check FalkorDB via CLI: conduit falkordb status
     try {
-      const { stdout } = await execContainerCommand(['ps', '--format', '{{.Names}}'])
-      const containers = stdout.trim().split('\n')
-      const falkorRunning = containers.some(c => c.includes('falkordb'))
+      const { stdout } = await execFileAsync(conduitPath, ['falkordb', 'status'])
+      // CLI outputs "✗ not installed" when not running
+      const isRunning = !stdout.includes('✗ not installed') && !stdout.includes('not running')
       results.push({
         name: 'FalkorDB',
-        running: falkorRunning,
-        port: falkorRunning ? 6379 : undefined,
-        container: falkorRunning ? 'falkordb' : undefined,
+        running: isRunning,
+        port: isRunning ? 6379 : undefined,
+        container: isRunning ? 'falkordb' : undefined,
       })
     } catch {
       results.push({
@@ -507,36 +509,21 @@ export function setupSetupIpcHandlers(): void {
     try {
       switch (name) {
         case 'Conduit Daemon': {
-          const installPath = getCLIInstallPath()
-          const daemonPath = path.join(installPath, 'conduit-daemon')
-          // Start daemon in background
-          const child = spawn(daemonPath, [], {
-            detached: true,
-            stdio: 'ignore',
-          })
-          child.unref()
-          // Wait a moment for startup
-          await new Promise(resolve => setTimeout(resolve, 1000))
+          // Delegate to CLI: conduit service start
+          const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+          await execFileAsync(conduitPath, ['service', 'start'])
           return { success: true }
         }
         case 'Qdrant': {
-          await execContainerCommand([
-            'run', '-d',
-            '--name', 'qdrant',
-            '-p', '6333:6333',
-            '-p', '6334:6334',
-            '-v', 'qdrant_storage:/qdrant/storage',
-            'qdrant/qdrant',
-          ])
+          // Delegate to CLI: conduit qdrant install
+          const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+          await execFileAsync(conduitPath, ['qdrant', 'install'])
           return { success: true }
         }
         case 'FalkorDB': {
-          await execContainerCommand([
-            'run', '-d',
-            '--name', 'falkordb',
-            '-p', '6379:6379',
-            'falkordb/falkordb',
-          ])
+          // Delegate to CLI: conduit falkordb install
+          const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+          await execFileAsync(conduitPath, ['falkordb', 'install'])
           return { success: true }
         }
         default:
@@ -551,39 +538,24 @@ export function setupSetupIpcHandlers(): void {
   ipcMain.handle('setup:start-all-services', async (): Promise<{ success: boolean; error?: string }> => {
     const errors: string[] = []
 
-    // Start services in sequence
+    // Start services in sequence - delegate to CLI commands
     const startService = async (name: string): Promise<{ success: boolean; error?: string }> => {
       try {
+        const conduitPath = path.join(getCLIInstallPath(), 'conduit')
         switch (name) {
           case 'Conduit Daemon': {
-            const installPath = getCLIInstallPath()
-            const daemonPath = path.join(installPath, 'conduit-daemon')
-            const child = spawn(daemonPath, [], {
-              detached: true,
-              stdio: 'ignore',
-            })
-            child.unref()
-            await new Promise(resolve => setTimeout(resolve, 1000))
+            // Delegate to CLI: conduit service start
+            await execFileAsync(conduitPath, ['service', 'start'])
             return { success: true }
           }
           case 'Qdrant': {
-            await execContainerCommand([
-              'run', '-d',
-              '--name', 'qdrant',
-              '-p', '6333:6333',
-              '-p', '6334:6334',
-              '-v', 'qdrant_storage:/qdrant/storage',
-              'qdrant/qdrant',
-            ])
+            // Delegate to CLI: conduit qdrant install
+            await execFileAsync(conduitPath, ['qdrant', 'install'])
             return { success: true }
           }
           case 'FalkorDB': {
-            await execContainerCommand([
-              'run', '-d',
-              '--name', 'falkordb',
-              '-p', '6379:6379',
-              'falkordb/falkordb',
-            ])
+            // Delegate to CLI: conduit falkordb install
+            await execFileAsync(conduitPath, ['falkordb', 'install'])
             return { success: true }
           }
           default:
@@ -608,43 +580,55 @@ export function setupSetupIpcHandlers(): void {
     return { success: true }
   })
 
-  // Check installed Ollama models
-  // Uses findBinary() to locate ollama in known paths
+  // Check installed Ollama models - delegate to CLI
   ipcMain.handle('setup:check-models', async (): Promise<string[]> => {
     try {
-      const ollamaResult = await findBinary('ollama')
-      if (!ollamaResult.found) {
-        return []
+      const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+      const { stdout } = await execFileAsync(conduitPath, ['ollama', 'models'])
+      // CLI outputs "Available models:" followed by model list lines
+      // Parse lines after "Available models:" to extract model names
+      const lines = stdout.trim().split('\n')
+      const models: string[] = []
+      let inModelList = false
+      for (const line of lines) {
+        if (line.includes('Available models:')) {
+          inModelList = true
+          continue
+        }
+        if (line.includes('Required models status:')) {
+          break // Stop at the required models section
+        }
+        if (inModelList && line.trim().startsWith('NAME')) {
+          continue // Skip header line
+        }
+        if (inModelList && line.trim()) {
+          // Model name is first column (e.g., "  nomic-embed-text:latest")
+          const modelName = line.trim().split(/\s+/)[0]
+          if (modelName && !modelName.startsWith('✓') && !modelName.startsWith('✗')) {
+            models.push(modelName)
+          }
+        }
       }
-      const ollamaPath = ollamaResult.path || 'ollama'
-      const { stdout } = await execFileAsync(ollamaPath, ['list'])
-      const lines = stdout.trim().split('\n').slice(1) // Skip header
-      return lines.map(line => line.split(/\s+/)[0]).filter(Boolean)
+      return models
     } catch {
       return []
     }
   })
 
-  // Pull an Ollama model with progress
-  // Uses findBinary() to locate ollama in known paths
+  // Pull an Ollama model with progress - delegate to CLI
   ipcMain.handle('setup:pull-model', async (event, { model }: { model: string }): Promise<{ success: boolean; error?: string }> => {
-    // Find ollama binary first
-    const ollamaResult = await findBinary('ollama')
-    if (!ollamaResult.found) {
-      return { success: false, error: 'Ollama is not installed' }
-    }
-    const ollamaPath = ollamaResult.path || 'ollama'
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
 
     return new Promise((resolve) => {
       const windows = BrowserWindow.getAllWindows()
       let child: ChildProcess
 
       try {
-        child = spawn(ollamaPath, ['pull', model])
+        // Delegate to CLI: conduit ollama pull <model>
+        child = spawn(conduitPath, ['ollama', 'pull', model])
 
         let lastProgress = 0
-        child.stdout?.on('data', (data: Buffer) => {
-          const output = data.toString()
+        const parseProgress = (output: string): void => {
           // Parse progress from output (e.g., "pulling manifest... 100%")
           const match = output.match(/(\d+)%/)
           if (match) {
@@ -656,21 +640,15 @@ export function setupSetupIpcHandlers(): void {
               })
             }
           }
+        }
+
+        child.stdout?.on('data', (data: Buffer) => {
+          parseProgress(data.toString())
         })
 
         child.stderr?.on('data', (data: Buffer) => {
-          const output = data.toString()
           // Ollama uses stderr for progress too
-          const match = output.match(/(\d+)%/)
-          if (match) {
-            const progress = parseInt(match[1], 10)
-            if (progress !== lastProgress) {
-              lastProgress = progress
-              windows.forEach((window) => {
-                window.webContents.send('ollama:pull-progress', { model, progress })
-              })
-            }
-          }
+          parseProgress(data.toString())
         })
 
         child.on('close', (code) => {
@@ -680,7 +658,7 @@ export function setupSetupIpcHandlers(): void {
             })
             resolve({ success: true })
           } else {
-            resolve({ success: false, error: `ollama pull exited with code ${code}` })
+            resolve({ success: false, error: `conduit ollama pull exited with code ${code}` })
           }
         })
 
@@ -935,12 +913,9 @@ async function ensurePodmanMachineReady(podmanPath: string): Promise<{ ready: bo
 // Helper: Execute container command (tries podman first, then docker)
 // Uses findBinary() to locate the binary in known paths
 // On macOS with Podman, ensures the Podman machine is running first
-// For commands that may pull images (run, pull), skips credential helpers to avoid
-// issues with external credential helpers (e.g., docker-credential-gcloud) not in PATH
+// NOTE: This function is now only used for read-only status checks (ps commands).
+//       Container run/pull operations should delegate to CLI commands instead.
 async function execContainerCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {
-  // Check if this is a command that might pull images
-  const isPullCommand = args[0] === 'run' || args[0] === 'pull'
-
   // Try Podman first
   const podmanResult = await findBinary('podman')
   if (podmanResult.found && podmanResult.path) {
@@ -951,36 +926,18 @@ async function execContainerCommand(args: string[]): Promise<{ stdout: string; s
         throw new Error(machineStatus.error || 'Podman machine not ready')
       }
     }
-
-    // For pull commands, skip credential helpers to avoid issues with
-    // external helpers like docker-credential-gcloud not being in Electron's PATH
-    // Our images (qdrant/qdrant, falkordb/falkordb) are public and don't need auth
-    let podmanArgs = args
-    if (isPullCommand) {
-      // Insert --authfile /dev/null after the subcommand to skip credential helpers
-      podmanArgs = [args[0], '--authfile', '/dev/null', ...args.slice(1)]
-    }
-
-    return await execFileAsync(podmanResult.path, podmanArgs)
+    return await execFileAsync(podmanResult.path, args)
   }
 
   // Fall back to Docker
   const dockerResult = await findBinary('docker')
   if (dockerResult.found && dockerResult.path) {
-    // Docker doesn't have an equivalent --authfile flag, but we can try
-    // setting DOCKER_CONFIG to an empty directory to skip credential helpers
-    const dockerEnv = isPullCommand
-      ? { ...process.env, DOCKER_CONFIG: '/dev/null' }
-      : process.env
-    return await execFileAsync(dockerResult.path, args, { env: dockerEnv })
+    return await execFileAsync(dockerResult.path, args)
   }
 
   // Last resort: try PATH-based execution
   try {
-    const podmanArgs = isPullCommand
-      ? [args[0], '--authfile', '/dev/null', ...args.slice(1)]
-      : args
-    return await execFileAsync('podman', podmanArgs)
+    return await execFileAsync('podman', args)
   } catch {
     return await execFileAsync('docker', args)
   }

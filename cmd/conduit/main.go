@@ -5781,11 +5781,13 @@ Conduit uses Ollama for:
 Examples:
   conduit ollama status     # Show loaded models and Ollama status
   conduit ollama models     # List available models
+  conduit ollama pull <model>  # Download a model
   conduit ollama warmup     # Preload required models into memory`,
 	}
 
 	cmd.AddCommand(ollamaStatusCmd())
 	cmd.AddCommand(ollamaModelsCmd())
+	cmd.AddCommand(ollamaPullCmd())
 	cmd.AddCommand(ollamaWarmupCmd())
 
 	return cmd
@@ -5952,6 +5954,53 @@ automatically downloaded on first use, or you can pull them manually:
 				fmt.Println("    Pull with: ollama pull mistral:7b-instruct-q4_K_M")
 			}
 
+			return nil
+		},
+	}
+}
+
+// ollamaPullCmd pulls an Ollama model with progress streaming
+func ollamaPullCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "pull <model>",
+		Short: "Pull an Ollama model",
+		Long: `Pull (download) an Ollama model from the registry.
+
+Progress is streamed to stdout, making it suitable for GUI integration.
+
+Examples:
+  conduit ollama pull nomic-embed-text
+  conduit ollama pull mistral:7b-instruct-q4_K_M`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			ctx := cmd.Context()
+			model := args[0]
+
+			// Check if Ollama is available
+			provider, err := kb.NewOllamaProvider(kb.OllamaProviderConfig{})
+			if err != nil {
+				return fmt.Errorf("create provider: %w", err)
+			}
+
+			if !provider.IsAvailable(ctx) {
+				return fmt.Errorf("Ollama is not running. Start with: ollama serve")
+			}
+
+			fmt.Printf("Pulling model: %s\n", model)
+
+			// Run ollama pull with output streaming
+			ollamaBin := findOllamaBinary()
+			pullCmd := exec.CommandContext(ctx, ollamaBin, "pull", model)
+
+			// Capture both stdout and stderr for progress
+			pullCmd.Stdout = os.Stdout
+			pullCmd.Stderr = os.Stderr
+
+			if err := pullCmd.Run(); err != nil {
+				return fmt.Errorf("pull failed: %w", err)
+			}
+
+			fmt.Printf("\n✓ Model %s pulled successfully\n", model)
 			return nil
 		},
 	}
