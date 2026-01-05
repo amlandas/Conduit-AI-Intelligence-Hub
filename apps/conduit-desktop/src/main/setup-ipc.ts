@@ -15,6 +15,86 @@ import * as os from 'os'
 const execFileAsync = promisify(execFile)
 const fsPromises = fs.promises
 
+// Known installation paths for dependencies
+// Electron apps don't inherit shell PATH, so we check common locations directly
+const KNOWN_PATHS: Record<string, string[]> = {
+  brew: [
+    '/opt/homebrew/bin/brew',       // macOS Apple Silicon
+    '/usr/local/bin/brew',          // macOS Intel
+    '/home/linuxbrew/.linuxbrew/bin/brew', // Linux
+  ],
+  ollama: [
+    '/opt/homebrew/bin/ollama',     // Homebrew Apple Silicon
+    '/usr/local/bin/ollama',        // Homebrew Intel / Official installer
+    '/usr/bin/ollama',              // System package
+    path.join(os.homedir(), '.ollama', 'bin', 'ollama'), // Ollama's own installer
+  ],
+  docker: [
+    '/opt/homebrew/bin/docker',     // Homebrew
+    '/usr/local/bin/docker',        // Docker Desktop symlink
+    '/usr/bin/docker',              // System package
+    '/Applications/Docker.app/Contents/Resources/bin/docker', // App bundle
+  ],
+  podman: [
+    '/opt/homebrew/bin/podman',     // Homebrew Apple Silicon
+    '/usr/local/bin/podman',        // Homebrew Intel / System
+    '/usr/bin/podman',              // System package
+  ],
+}
+
+interface BinaryResult {
+  found: boolean
+  path?: string
+  version?: string
+}
+
+// Find a binary by checking custom paths, known paths, then PATH
+async function findBinary(name: string, versionArgs: string[] = ['--version']): Promise<BinaryResult> {
+  // 0. Check for user-configured custom path first
+  try {
+    const customPaths = await loadCustomPaths()
+    const customPath = customPaths[name]
+    if (customPath) {
+      try {
+        await fsPromises.access(customPath, fs.constants.X_OK)
+        const { stdout } = await execFileAsync(customPath, versionArgs)
+        return { found: true, path: customPath, version: stdout.trim() }
+      } catch {
+        // Custom path no longer valid, continue with other checks
+      }
+    }
+  } catch {
+    // Ignore errors loading custom paths
+  }
+
+  const knownPaths = KNOWN_PATHS[name] || []
+
+  // 1. Check known installation paths
+  for (const binPath of knownPaths) {
+    try {
+      await fsPromises.access(binPath, fs.constants.X_OK)
+      // File exists and is executable, try to get version
+      try {
+        const { stdout } = await execFileAsync(binPath, versionArgs)
+        return { found: true, path: binPath, version: stdout.trim() }
+      } catch {
+        // Binary exists but version command failed - still counts as found
+        return { found: true, path: binPath }
+      }
+    } catch {
+      // Path doesn't exist or not executable, continue to next
+    }
+  }
+
+  // 2. Fall back to PATH-based detection
+  try {
+    const { stdout } = await execFileAsync(name, versionArgs)
+    return { found: true, version: stdout.trim() }
+  } catch {
+    return { found: false }
+  }
+}
+
 interface CLIStatus {
   installed: boolean
   version: string | null
@@ -30,6 +110,24 @@ interface DependencyStatus {
   required: boolean
   installUrl?: string
   brewFormula?: string
+  binaryPath?: string       // Path where the binary was found
+  customPath?: string       // User-specified custom path (if any)
+}
+
+// Store for custom binary paths (persisted in app data)
+const customPathsFile = path.join(app.getPath('userData'), 'custom-paths.json')
+
+async function loadCustomPaths(): Promise<Record<string, string>> {
+  try {
+    const content = await fsPromises.readFile(customPathsFile, 'utf-8')
+    return JSON.parse(content)
+  } catch {
+    return {}
+  }
+}
+
+async function saveCustomPaths(paths: Record<string, string>): Promise<void> {
+  await fsPromises.writeFile(customPathsFile, JSON.stringify(paths, null, 2))
 }
 
 interface ServiceStatus {
@@ -167,19 +265,25 @@ export function setupSetupIpcHandlers(): void {
   })
 
   // Check dependencies
+  // Uses findBinary() to check known installation paths first (fixes Homebrew detection)
   ipcMain.handle('setup:check-dependencies', async (): Promise<DependencyStatus[]> => {
     const results: DependencyStatus[] = []
 
+    // Load custom paths for reference
+    const customPaths = await loadCustomPaths()
+
     // Check Homebrew
-    try {
-      const { stdout } = await execFileAsync('brew', ['--version'])
+    const brewResult = await findBinary('brew')
+    if (brewResult.found) {
       results.push({
         name: 'Homebrew',
         installed: true,
-        version: stdout.split('\n')[0].replace('Homebrew ', ''),
+        version: brewResult.version?.split('\n')[0].replace('Homebrew ', ''),
         required: false,
+        binaryPath: brewResult.path,
+        customPath: customPaths['brew'],
       })
-    } catch {
+    } else {
       results.push({
         name: 'Homebrew',
         installed: false,
@@ -189,15 +293,17 @@ export function setupSetupIpcHandlers(): void {
     }
 
     // Check Ollama
-    try {
-      const { stdout } = await execFileAsync('ollama', ['--version'])
+    const ollamaResult = await findBinary('ollama')
+    if (ollamaResult.found) {
       results.push({
         name: 'Ollama',
         installed: true,
-        version: stdout.trim(),
+        version: ollamaResult.version,
         required: true,
+        binaryPath: ollamaResult.path,
+        customPath: customPaths['ollama'],
       })
-    } catch {
+    } else {
       results.push({
         name: 'Ollama',
         installed: false,
@@ -207,53 +313,134 @@ export function setupSetupIpcHandlers(): void {
       })
     }
 
-    // Check Docker or Podman
-    let containerRuntime = false
-    try {
-      const { stdout } = await execFileAsync('podman', ['--version'])
+    // Check Docker or Podman (prefer Podman)
+    const podmanResult = await findBinary('podman')
+    if (podmanResult.found) {
       results.push({
         name: 'Docker or Podman',
         installed: true,
-        version: `Podman ${stdout.trim().split(' ').pop()}`,
+        version: `Podman ${podmanResult.version?.split(' ').pop() || ''}`,
         required: true,
+        binaryPath: podmanResult.path,
+        customPath: customPaths['podman'],
       })
-      containerRuntime = true
-    } catch {
-      try {
-        const { stdout } = await execFileAsync('docker', ['--version'])
+    } else {
+      // Try Docker
+      const dockerResult = await findBinary('docker')
+      if (dockerResult.found) {
         results.push({
           name: 'Docker or Podman',
           installed: true,
-          version: stdout.trim(),
+          version: dockerResult.version,
           required: true,
+          binaryPath: dockerResult.path,
+          customPath: customPaths['docker'],
         })
-        containerRuntime = true
-      } catch {
+      } else {
         // Neither found
+        results.push({
+          name: 'Docker or Podman',
+          installed: false,
+          required: true,
+          installUrl: 'https://podman.io/getting-started/installation',
+          brewFormula: 'podman',
+        })
       }
-    }
-
-    if (!containerRuntime) {
-      results.push({
-        name: 'Docker or Podman',
-        installed: false,
-        required: true,
-        installUrl: 'https://podman.io/getting-started/installation',
-        brewFormula: 'podman',
-      })
     }
 
     return results
   })
 
   // Install dependency via Homebrew
+  // Uses findBinary() to locate brew in known paths
   ipcMain.handle('setup:install-dependency', async (_, { name, brewFormula }: { name: string; brewFormula: string }): Promise<{ success: boolean; error?: string }> => {
     try {
-      await execFileAsync('brew', ['install', brewFormula])
+      const brewResult = await findBinary('brew')
+      if (!brewResult.found) {
+        return { success: false, error: 'Homebrew is not installed. Please install it first.' }
+      }
+      const brewPath = brewResult.path || 'brew'
+      await execFileAsync(brewPath, ['install', brewFormula])
       return { success: true }
     } catch (err) {
       return { success: false, error: `Failed to install ${name}: ${(err as Error).message}` }
     }
+  })
+
+  // Validate a user-specified binary path
+  ipcMain.handle('setup:validate-binary-path', async (_, { name, binaryPath }: { name: string; binaryPath: string }): Promise<{ valid: boolean; version?: string; error?: string }> => {
+    try {
+      // Check if file exists and is executable
+      await fsPromises.access(binaryPath, fs.constants.X_OK)
+
+      // Try to run --version to verify it works
+      const { stdout } = await execFileAsync(binaryPath, ['--version'])
+      return { valid: true, version: stdout.trim() }
+    } catch (err) {
+      const error = err as NodeJS.ErrnoException
+      if (error.code === 'ENOENT') {
+        return { valid: false, error: 'File not found' }
+      } else if (error.code === 'EACCES') {
+        return { valid: false, error: 'File is not executable' }
+      } else {
+        return { valid: false, error: `Failed to run binary: ${error.message}` }
+      }
+    }
+  })
+
+  // Save a custom binary path
+  ipcMain.handle('setup:save-custom-path', async (_, { name, binaryPath }: { name: string; binaryPath: string }): Promise<{ success: boolean; error?: string }> => {
+    try {
+      // Map dependency display names to internal names
+      const nameMap: Record<string, string> = {
+        'Homebrew': 'brew',
+        'Ollama': 'ollama',
+        'Docker or Podman': 'podman', // Save as podman by default, could be docker
+      }
+      const internalName = nameMap[name] || name.toLowerCase()
+
+      const customPaths = await loadCustomPaths()
+      customPaths[internalName] = binaryPath
+      await saveCustomPaths(customPaths)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: (err as Error).message }
+    }
+  })
+
+  // Clear a custom binary path
+  ipcMain.handle('setup:clear-custom-path', async (_, { name }: { name: string }): Promise<{ success: boolean; error?: string }> => {
+    try {
+      const nameMap: Record<string, string> = {
+        'Homebrew': 'brew',
+        'Ollama': 'ollama',
+        'Docker or Podman': 'podman',
+      }
+      const internalName = nameMap[name] || name.toLowerCase()
+
+      const customPaths = await loadCustomPaths()
+      delete customPaths[internalName]
+      await saveCustomPaths(customPaths)
+      return { success: true }
+    } catch (err) {
+      return { success: false, error: (err as Error).message }
+    }
+  })
+
+  // Open file dialog to browse for a binary
+  ipcMain.handle('setup:browse-for-binary', async (_, { name }: { name: string }): Promise<{ path?: string; cancelled: boolean }> => {
+    const { dialog } = await import('electron')
+    const result = await dialog.showOpenDialog({
+      title: `Locate ${name}`,
+      properties: ['openFile'],
+      message: `Select the ${name} executable`,
+    })
+
+    if (result.canceled || result.filePaths.length === 0) {
+      return { cancelled: true }
+    }
+
+    return { path: result.filePaths[0], cancelled: false }
   })
 
   // Check services status
@@ -422,9 +609,15 @@ export function setupSetupIpcHandlers(): void {
   })
 
   // Check installed Ollama models
+  // Uses findBinary() to locate ollama in known paths
   ipcMain.handle('setup:check-models', async (): Promise<string[]> => {
     try {
-      const { stdout } = await execFileAsync('ollama', ['list'])
+      const ollamaResult = await findBinary('ollama')
+      if (!ollamaResult.found) {
+        return []
+      }
+      const ollamaPath = ollamaResult.path || 'ollama'
+      const { stdout } = await execFileAsync(ollamaPath, ['list'])
       const lines = stdout.trim().split('\n').slice(1) // Skip header
       return lines.map(line => line.split(/\s+/)[0]).filter(Boolean)
     } catch {
@@ -433,13 +626,21 @@ export function setupSetupIpcHandlers(): void {
   })
 
   // Pull an Ollama model with progress
+  // Uses findBinary() to locate ollama in known paths
   ipcMain.handle('setup:pull-model', async (event, { model }: { model: string }): Promise<{ success: boolean; error?: string }> => {
+    // Find ollama binary first
+    const ollamaResult = await findBinary('ollama')
+    if (!ollamaResult.found) {
+      return { success: false, error: 'Ollama is not installed' }
+    }
+    const ollamaPath = ollamaResult.path || 'ollama'
+
     return new Promise((resolve) => {
       const windows = BrowserWindow.getAllWindows()
       let child: ChildProcess
 
       try {
-        child = spawn('ollama', ['pull', model])
+        child = spawn(ollamaPath, ['pull', model])
 
         let lastProgress = 0
         child.stdout?.on('data', (data: Buffer) => {
@@ -492,6 +693,166 @@ export function setupSetupIpcHandlers(): void {
     })
   })
 
+  // Auto-install dependency (one-click installation)
+  // Supports: Ollama (official installer), Podman (Homebrew)
+  ipcMain.handle('setup:auto-install-dependency', async (_, { name }: { name: string }): Promise<{ success: boolean; error?: string }> => {
+    const windows = BrowserWindow.getAllWindows()
+
+    const sendProgress = (stage: string, percent: number, message: string): void => {
+      windows.forEach((window) => {
+        window.webContents.send('install:progress', { name, stage, percent, message })
+      })
+    }
+
+    try {
+      switch (name) {
+        case 'Ollama': {
+          // Install Ollama using official installer script
+          sendProgress('downloading', 10, 'Downloading Ollama installer...')
+
+          return new Promise((resolve) => {
+            // Use the official Ollama installer
+            // This script is safe and doesn't require sudo for most operations
+            const child = spawn('sh', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], {
+              shell: true,
+              env: { ...process.env }
+            })
+
+            let output = ''
+            let errorOutput = ''
+
+            child.stdout?.on('data', (data: Buffer) => {
+              output += data.toString()
+              // Parse progress from installer output
+              if (output.includes('Downloading')) {
+                sendProgress('downloading', 30, 'Downloading Ollama...')
+              } else if (output.includes('Installing')) {
+                sendProgress('installing', 60, 'Installing Ollama...')
+              }
+            })
+
+            child.stderr?.on('data', (data: Buffer) => {
+              errorOutput += data.toString()
+              // Installer also outputs progress to stderr
+              if (errorOutput.includes('Downloading') || errorOutput.includes('curl')) {
+                sendProgress('downloading', 40, 'Downloading Ollama...')
+              }
+            })
+
+            child.on('close', async (code) => {
+              if (code === 0) {
+                sendProgress('verifying', 90, 'Verifying installation...')
+                // Verify installation
+                const result = await findBinary('ollama')
+                if (result.found) {
+                  sendProgress('complete', 100, 'Ollama installed successfully!')
+                  resolve({ success: true })
+                } else {
+                  resolve({ success: false, error: 'Installation completed but Ollama not found in PATH' })
+                }
+              } else {
+                resolve({ success: false, error: `Installer exited with code ${code}: ${errorOutput}` })
+              }
+            })
+
+            child.on('error', (err) => {
+              resolve({ success: false, error: `Failed to run installer: ${err.message}` })
+            })
+          })
+        }
+
+        case 'Podman':
+        case 'Docker or Podman': {
+          // Check if Homebrew is available for Podman installation
+          const brewResult = await findBinary('brew')
+          if (!brewResult.found) {
+            return {
+              success: false,
+              error: 'Homebrew is required for automatic Podman installation. Please install Homebrew first, or download Podman manually.'
+            }
+          }
+
+          sendProgress('installing', 20, 'Installing Podman via Homebrew...')
+
+          return new Promise((resolve) => {
+            const brewPath = brewResult.path || 'brew'
+            const child = spawn(brewPath, ['install', 'podman'], {
+              env: { ...process.env }
+            })
+
+            let errorOutput = ''
+
+            child.stdout?.on('data', (data: Buffer) => {
+              const output = data.toString()
+              // Homebrew outputs progress to stdout
+              if (output.includes('Downloading')) {
+                sendProgress('downloading', 40, 'Downloading Podman...')
+              } else if (output.includes('Installing') || output.includes('Pouring')) {
+                sendProgress('installing', 60, 'Installing Podman...')
+              }
+            })
+
+            child.stderr?.on('data', (data: Buffer) => {
+              errorOutput += data.toString()
+            })
+
+            child.on('close', async (code) => {
+              if (code === 0) {
+                sendProgress('verifying', 90, 'Verifying installation...')
+                // Verify installation
+                const result = await findBinary('podman')
+                if (result.found) {
+                  sendProgress('complete', 100, 'Podman installed successfully!')
+                  resolve({ success: true })
+                } else {
+                  resolve({ success: false, error: 'Installation completed but Podman not found' })
+                }
+              } else {
+                resolve({ success: false, error: `Homebrew install failed: ${errorOutput}` })
+              }
+            })
+
+            child.on('error', (err) => {
+              resolve({ success: false, error: `Failed to run Homebrew: ${err.message}` })
+            })
+          })
+        }
+
+        case 'Homebrew': {
+          // Install Homebrew using official installer
+          sendProgress('downloading', 10, 'Downloading Homebrew installer...')
+
+          return new Promise((resolve) => {
+            // Official Homebrew installer - requires user interaction for sudo
+            // We use osascript to run in a new Terminal window so user can provide password
+            const installCommand = '/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"'
+
+            if (process.platform === 'darwin') {
+              // Open Terminal with the install command
+              const script = `tell application "Terminal"
+                activate
+                do script "${installCommand}"
+              end tell`
+
+              spawn('osascript', ['-e', script], { detached: true, stdio: 'ignore' }).unref()
+
+              // We can't track progress for Terminal-based install
+              sendProgress('installing', 50, 'Homebrew installer opened in Terminal. Follow the prompts to complete installation.')
+              resolve({ success: true })
+            } else {
+              resolve({ success: false, error: 'Automatic Homebrew installation is only supported on macOS' })
+            }
+          })
+        }
+
+        default:
+          return { success: false, error: `Auto-installation not supported for ${name}. Please install manually.` }
+      }
+    } catch (err) {
+      return { success: false, error: (err as Error).message }
+    }
+  })
+
   // Shell operations
   ipcMain.handle('shell:open-external', async (_, url: string): Promise<void> => {
     await shell.openExternal(url)
@@ -520,7 +881,21 @@ function compareVersions(a: string, b: string): number {
 }
 
 // Helper: Execute container command (tries podman first, then docker)
+// Uses findBinary() to locate the binary in known paths
 async function execContainerCommand(args: string[]): Promise<{ stdout: string; stderr: string }> {
+  // Try Podman first
+  const podmanResult = await findBinary('podman')
+  if (podmanResult.found && podmanResult.path) {
+    return await execFileAsync(podmanResult.path, args)
+  }
+
+  // Fall back to Docker
+  const dockerResult = await findBinary('docker')
+  if (dockerResult.found && dockerResult.path) {
+    return await execFileAsync(dockerResult.path, args)
+  }
+
+  // Last resort: try PATH-based execution
   try {
     return await execFileAsync('podman', args)
   } catch {

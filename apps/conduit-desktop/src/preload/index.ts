@@ -31,6 +31,8 @@ export interface DependencyStatus {
   required: boolean
   installUrl?: string
   brewFormula?: string
+  binaryPath?: string       // Path where the binary was found
+  customPath?: string       // User-specified custom path (if any)
 }
 
 export interface ServiceStatus {
@@ -141,12 +143,18 @@ export interface ConduitAPI {
   installCLI: (options?: { installPath?: string }) => Promise<{ success: boolean; version?: string; path?: string; error?: string }>
   checkDependencies: () => Promise<DependencyStatus[]>
   installDependency: (options: { name: string; brewFormula: string }) => Promise<{ success: boolean; error?: string }>
+  validateBinaryPath: (options: { name: string; binaryPath: string }) => Promise<{ valid: boolean; version?: string; error?: string }>
+  saveCustomPath: (options: { name: string; binaryPath: string }) => Promise<{ success: boolean; error?: string }>
+  clearCustomPath: (options: { name: string }) => Promise<{ success: boolean; error?: string }>
+  browseForBinary: (options: { name: string }) => Promise<{ path?: string; cancelled: boolean }>
   checkServices: () => Promise<ServiceStatus[]>
   startService: (options: { name: string }) => Promise<{ success: boolean; error?: string }>
   startAllServices: () => Promise<{ success: boolean; error?: string }>
   checkModels: () => Promise<string[]>
   pullModel: (options: { model: string }) => Promise<{ success: boolean; error?: string }>
   onOllamaPullProgress: (callback: (data: { model: string; progress: number }) => void) => () => void
+  autoInstallDependency: (options: { name: string }) => Promise<{ success: boolean; error?: string }>
+  onInstallProgress: (callback: (data: { name: string; stage: string; percent: number; message: string }) => void) => () => void
 
   // Shell operations
   openExternal: (url: string) => Promise<void>
@@ -224,6 +232,10 @@ const conduitAPI: ConduitAPI = {
   installCLI: (options) => ipcRenderer.invoke('setup:install-cli', options),
   checkDependencies: () => ipcRenderer.invoke('setup:check-dependencies'),
   installDependency: (options) => ipcRenderer.invoke('setup:install-dependency', options),
+  validateBinaryPath: (options) => ipcRenderer.invoke('setup:validate-binary-path', options),
+  saveCustomPath: (options) => ipcRenderer.invoke('setup:save-custom-path', options),
+  clearCustomPath: (options) => ipcRenderer.invoke('setup:clear-custom-path', options),
+  browseForBinary: (options) => ipcRenderer.invoke('setup:browse-for-binary', options),
   checkServices: () => ipcRenderer.invoke('setup:check-services'),
   startService: (options) => ipcRenderer.invoke('setup:start-service', options),
   startAllServices: () => ipcRenderer.invoke('setup:start-all-services'),
@@ -233,6 +245,12 @@ const conduitAPI: ConduitAPI = {
     const handler = (_: unknown, data: { model: string; progress: number }): void => callback(data)
     ipcRenderer.on('ollama:pull-progress', handler)
     return () => ipcRenderer.removeListener('ollama:pull-progress', handler)
+  },
+  autoInstallDependency: (options) => ipcRenderer.invoke('setup:auto-install-dependency', options),
+  onInstallProgress: (callback) => {
+    const handler = (_: unknown, data: { name: string; stage: string; percent: number; message: string }): void => callback(data)
+    ipcRenderer.on('install:progress', handler)
+    return () => ipcRenderer.removeListener('install:progress', handler)
   },
 
   // Shell operations
