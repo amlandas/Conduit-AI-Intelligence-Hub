@@ -3420,39 +3420,33 @@ Examples:
 // uninstallCmd removes Conduit
 func uninstallCmd() *cobra.Command {
 	var (
-		keepData      bool
-		all           bool
-		full          bool
-		force         bool
-		dryRun        bool
-		jsonOutput    bool
-		removeOllama  bool
-		removeQdrant  bool
-		removeFalkorDB bool
-		showInfo      bool
+		keepData   bool
+		all        bool
+		force      bool
+		dryRun     bool
+		jsonOutput bool
+		showInfo   bool
 	)
 
 	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Uninstall Conduit",
-		Long: `Remove Conduit daemon service, binaries, and optionally data/dependencies.
+		Long: `Remove Conduit daemon service, binaries, and optionally data.
 
-UNINSTALL TIERS:
-  --keep-data    Tier 1: Remove binaries and service, keep data for reinstall
-  --all          Tier 2: Remove everything including data and containers
-  --full         Tier 3: Full cleanup including Ollama (with --remove-ollama)
-
-SELECTIVE REMOVAL:
-  --remove-qdrant      Remove Qdrant container
-  --remove-falkordb    Remove FalkorDB container
-  --remove-ollama      Remove Ollama and all models
+UNINSTALL OPTIONS:
+  --keep-data    Remove binaries and service, keep data for reinstall
+  --all          Remove everything including data directory
 
 SAFETY FLAGS:
   --force        Skip all confirmations
   --dry-run      Show what would be removed without removing
   --json         Output results as JSON
 
-NOTE: Docker/Podman are NEVER removed as they are system tools.
+NOTE: Dependencies (Ollama, container runtimes, containers) are NOT removed.
+      These may be shared with other projects. To remove manually:
+      - Stop containers: podman stop qdrant falkordb && podman rm qdrant falkordb
+      - Remove Ollama: See https://ollama.com/download for uninstall instructions
+      - Remove Podman: brew uninstall podman
 
 Examples:
   conduit uninstall                    # Interactive mode
@@ -3483,9 +3477,6 @@ Examples:
 			var opts installer.UninstallOptions
 
 			switch {
-			case full:
-				opts = installer.NewUninstallOptionsFull()
-				opts.RemoveOllama = removeOllama // Still require explicit flag for Ollama
 			case all:
 				opts = installer.NewUninstallOptionsAll()
 			case keepData:
@@ -3508,13 +3499,12 @@ Examples:
 				fmt.Println("Choose uninstall option:")
 				fmt.Println()
 				fmt.Println("  [1] Keep Data - Remove service/binaries, keep data for reinstall")
-				fmt.Println("  [2] Remove All - Remove service/binaries/data/containers")
-				fmt.Println("  [3] Full Cleanup - Remove everything including Ollama")
+				fmt.Println("  [2] Remove All - Remove service/binaries/data")
 				fmt.Println("  [q] Cancel")
 				fmt.Println()
 
 				reader := bufio.NewReader(os.Stdin)
-				fmt.Print("Enter choice [1/2/3/q]: ")
+				fmt.Print("Enter choice [1/2/q]: ")
 				choice, _ := reader.ReadString('\n')
 				choice = strings.TrimSpace(choice)
 
@@ -3523,26 +3513,10 @@ Examples:
 					opts = installer.NewUninstallOptionsKeepData()
 				case "2":
 					opts = installer.NewUninstallOptionsAll()
-				case "3":
-					opts = installer.NewUninstallOptionsFull()
-					fmt.Print("Remove Ollama and all models? [y/N]: ")
-					ollamaChoice, _ := reader.ReadString('\n')
-					opts.RemoveOllama = strings.ToLower(strings.TrimSpace(ollamaChoice)) == "y"
 				default:
 					fmt.Println("Uninstallation cancelled.")
 					return nil
 				}
-			}
-
-			// Apply selective flags (override tier settings)
-			if removeQdrant {
-				opts.RemoveQdrantContainer = true
-			}
-			if removeFalkorDB {
-				opts.RemoveFalkorDBContainer = true
-			}
-			if removeOllama {
-				opts.RemoveOllama = true
 			}
 
 			opts.Force = force
@@ -3611,21 +3585,24 @@ Examples:
 				}
 			}
 
+			// Print manual cleanup guidance
+			if !dryRun && result.Success {
+				fmt.Println()
+				fmt.Println("To remove dependencies manually (if no longer needed):")
+				fmt.Println("  • Containers: podman stop qdrant falkordb && podman rm qdrant falkordb")
+				fmt.Println("  • Ollama: rm -rf ~/.ollama && brew uninstall ollama")
+				fmt.Println("  • Podman: podman machine stop && podman machine rm && brew uninstall podman")
+			}
+
 			fmt.Println()
 
 			return nil
 		},
 	}
 
-	// Tier flags
-	cmd.Flags().BoolVar(&keepData, "keep-data", false, "Tier 1: Remove binaries/service, keep data")
-	cmd.Flags().BoolVar(&all, "all", false, "Tier 2: Remove everything including data and containers")
-	cmd.Flags().BoolVar(&full, "full", false, "Tier 3: Full cleanup (use with --remove-ollama for Ollama)")
-
-	// Selective flags
-	cmd.Flags().BoolVar(&removeQdrant, "remove-qdrant", false, "Remove Qdrant container")
-	cmd.Flags().BoolVar(&removeFalkorDB, "remove-falkordb", false, "Remove FalkorDB container")
-	cmd.Flags().BoolVar(&removeOllama, "remove-ollama", false, "Remove Ollama and all models")
+	// Uninstall options
+	cmd.Flags().BoolVar(&keepData, "keep-data", false, "Remove binaries/service, keep data for reinstall")
+	cmd.Flags().BoolVar(&all, "all", false, "Remove everything including data directory")
 
 	// Safety flags
 	cmd.Flags().BoolVar(&force, "force", false, "Skip all confirmations")
