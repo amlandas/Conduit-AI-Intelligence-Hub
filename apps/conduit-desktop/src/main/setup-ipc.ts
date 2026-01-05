@@ -685,12 +685,75 @@ export function setupSetupIpcHandlers(): void {
     try {
       switch (name) {
         case 'Ollama': {
-          // Install Ollama using official installer script
+          // macOS: Use Homebrew (the official install.sh is Linux-only)
+          // Linux: Use official installer script
+          if (process.platform === 'darwin') {
+            // Check if Homebrew is available
+            const brewResult = await findBinary('brew')
+            if (!brewResult.found) {
+              return {
+                success: false,
+                error: 'Homebrew is required for automatic Ollama installation on macOS. Please install Homebrew first, or download Ollama from https://ollama.com/download'
+              }
+            }
+
+            sendProgress('installing', 20, 'Installing Ollama via Homebrew...')
+
+            return new Promise((resolve) => {
+              const brewPath = brewResult.path || 'brew'
+              const child = spawn(brewPath, ['install', 'ollama'], {
+                env: { ...process.env }
+              })
+
+              let errorOutput = ''
+
+              child.stdout?.on('data', (data: Buffer) => {
+                const output = data.toString()
+                if (output.includes('Downloading')) {
+                  sendProgress('downloading', 40, 'Downloading Ollama...')
+                } else if (output.includes('Installing') || output.includes('Pouring')) {
+                  sendProgress('installing', 60, 'Installing Ollama...')
+                }
+              })
+
+              child.stderr?.on('data', (data: Buffer) => {
+                errorOutput += data.toString()
+              })
+
+              child.on('close', async (code) => {
+                if (code === 0) {
+                  sendProgress('verifying', 80, 'Verifying installation...')
+                  const result = await findBinary('ollama')
+                  if (result.found) {
+                    // Start Ollama service to generate ed25519 keys (required for model pulls)
+                    sendProgress('starting', 90, 'Starting Ollama service...')
+                    try {
+                      await execFileAsync(brewPath, ['services', 'start', 'ollama'])
+                      // Wait a moment for service to initialize and generate keys
+                      await new Promise(r => setTimeout(r, 3000))
+                    } catch {
+                      // Service start failed, but binary is installed - user may need to start manually
+                    }
+                    sendProgress('complete', 100, 'Ollama installed successfully!')
+                    resolve({ success: true })
+                  } else {
+                    resolve({ success: false, error: 'Installation completed but Ollama not found' })
+                  }
+                } else {
+                  resolve({ success: false, error: `Homebrew install failed: ${errorOutput}` })
+                }
+              })
+
+              child.on('error', (err) => {
+                resolve({ success: false, error: `Failed to run Homebrew: ${err.message}` })
+              })
+            })
+          }
+
+          // Linux: Use official installer script
           sendProgress('downloading', 10, 'Downloading Ollama installer...')
 
           return new Promise((resolve) => {
-            // Use the official Ollama installer
-            // This script is safe and doesn't require sudo for most operations
             const child = spawn('sh', ['-c', 'curl -fsSL https://ollama.com/install.sh | sh'], {
               shell: true,
               env: { ...process.env }
@@ -701,7 +764,6 @@ export function setupSetupIpcHandlers(): void {
 
             child.stdout?.on('data', (data: Buffer) => {
               output += data.toString()
-              // Parse progress from installer output
               if (output.includes('Downloading')) {
                 sendProgress('downloading', 30, 'Downloading Ollama...')
               } else if (output.includes('Installing')) {
@@ -711,7 +773,6 @@ export function setupSetupIpcHandlers(): void {
 
             child.stderr?.on('data', (data: Buffer) => {
               errorOutput += data.toString()
-              // Installer also outputs progress to stderr
               if (errorOutput.includes('Downloading') || errorOutput.includes('curl')) {
                 sendProgress('downloading', 40, 'Downloading Ollama...')
               }
@@ -720,7 +781,6 @@ export function setupSetupIpcHandlers(): void {
             child.on('close', async (code) => {
               if (code === 0) {
                 sendProgress('verifying', 90, 'Verifying installation...')
-                // Verify installation
                 const result = await findBinary('ollama')
                 if (result.found) {
                   sendProgress('complete', 100, 'Ollama installed successfully!')
