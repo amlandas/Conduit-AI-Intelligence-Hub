@@ -20,16 +20,61 @@ function ViewLoader(): JSX.Element {
   )
 }
 
+// Startup loading component
+function StartupLoader(): JSX.Element {
+  return (
+    <div className="h-screen flex flex-col items-center justify-center bg-macos-bg-primary dark:bg-macos-bg-primary-dark">
+      <Loader2 className="w-12 h-12 animate-spin text-macos-blue mb-4" />
+      <p className="text-macos-text-secondary dark:text-macos-text-secondary-dark">
+        Checking Conduit installation...
+      </p>
+    </div>
+  )
+}
+
 type Route = '/' | '/kb' | '/connectors' | '/settings'
 
 export default function App(): JSX.Element {
   const [route, setRoute] = useState<Route>('/')
   const [searchOpen, setSearchOpen] = useState(false)
+  const [cliVerified, setCLIVerified] = useState<boolean | null>(null) // null = checking, true = exists, false = missing
   const { theme } = useSettingsStore()
-  const { setupCompleted } = useSetupStore()
+  const { setupCompleted, resetSetup, setCLIInstalled } = useSetupStore()
   const { setSSEConnected, setStatus, refresh: refreshDaemon } = useDaemonStore()
   const { updateInstance, addInstance, removeInstance, refresh: refreshInstances } = useInstancesStore()
   const { addSource, removeSource, updateSource, setSyncing, refresh: refreshKB } = useKBStore()
+
+  // ═══════════════════════════════════════════════════════════════
+  // CRITICAL: Verify CLI exists on startup - this is the FIRST check
+  // GUI cannot function without CLI. Never trust localStorage alone.
+  // ═══════════════════════════════════════════════════════════════
+  useEffect(() => {
+    const verifyCLI = async (): Promise<void> => {
+      try {
+        // Check if CLI binary exists and is executable
+        // Uses existing setup:check-cli IPC handler
+        const result = await window.conduit.checkCLI()
+
+        if (result.installed && result.version) {
+          // CLI exists - update store and mark as verified
+          setCLIInstalled(true, result.version, result.path || undefined)
+          setCLIVerified(true)
+        } else {
+          // CLI NOT installed - reset setup state and show wizard
+          console.warn('CLI not found, resetting setup state')
+          resetSetup()
+          setCLIVerified(false)
+        }
+      } catch (error) {
+        // Error checking CLI - assume not installed, show wizard
+        console.error('Failed to verify CLI:', error)
+        resetSetup()
+        setCLIVerified(false)
+      }
+    }
+
+    verifyCLI()
+  }, []) // Only run once on mount
 
   // Apply theme with system preference detection and live updates
   useEffect(() => {
@@ -170,11 +215,22 @@ export default function App(): JSX.Element {
     setSearchOpen(open)
   }, [])
 
-  // Show setup wizard if setup is not completed
-  if (!setupCompleted) {
+  // ═══════════════════════════════════════════════════════════════
+  // RENDER LOGIC: CLI verification gates everything
+  // ═══════════════════════════════════════════════════════════════
+
+  // Still checking CLI - show loading spinner
+  if (cliVerified === null) {
+    return <StartupLoader />
+  }
+
+  // CLI not installed OR setup not complete - show setup wizard
+  // This ensures we NEVER show dashboard without verified CLI
+  if (!cliVerified || !setupCompleted) {
     return <SetupWizard />
   }
 
+  // CLI verified AND setup complete - show main app
   return (
     <div className="h-screen flex flex-col">
       {/* Global update banner */}
