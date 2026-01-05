@@ -3200,12 +3200,48 @@ Examples:
 	return cmd
 }
 
+// knownBinaryPaths maps binary names to common installation locations.
+// This is needed because Electron apps don't inherit shell PATH.
+var knownBinaryPaths = map[string][]string{
+	"podman": {
+		"/opt/homebrew/bin/podman",     // macOS Homebrew (Apple Silicon)
+		"/usr/local/bin/podman",        // macOS Homebrew (Intel) / Linux
+		"/usr/bin/podman",              // System package
+	},
+	"docker": {
+		"/opt/homebrew/bin/docker",                                    // Homebrew
+		"/usr/local/bin/docker",                                       // Docker Desktop symlink
+		"/usr/bin/docker",                                             // System package
+		"/Applications/Docker.app/Contents/Resources/bin/docker",      // App bundle
+	},
+}
+
+// findBinaryPath finds a binary by checking PATH first, then known installation locations.
+// Returns the full path if found, empty string otherwise.
+func findBinaryPath(cmd string) string {
+	// Check PATH first
+	if path, err := exec.LookPath(cmd); err == nil {
+		return path
+	}
+
+	// Check known installation paths
+	if paths, ok := knownBinaryPaths[cmd]; ok {
+		for _, p := range paths {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+
+	return ""
+}
+
 // detectContainerRuntime finds the available container runtime
 func detectContainerRuntime() string {
-	if _, err := exec.LookPath("podman"); err == nil {
+	if findBinaryPath("podman") != "" {
 		return "podman"
 	}
-	if _, err := exec.LookPath("docker"); err == nil {
+	if findBinaryPath("docker") != "" {
 		return "docker"
 	}
 	return ""
@@ -3668,11 +3704,76 @@ func serviceStartCmd() *cobra.Command {
 		Use:   "start",
 		Short: "Start the daemon service",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			inst := installer.New(false)
+
+			// First, check if the daemon is already running
+			if inst.IsDaemonRunning() {
+				fmt.Println("✓ Daemon is already running")
+				return nil
+			}
+
+			// Check if service is installed, if not, install it first
 			switch runtime.GOOS {
 			case "darwin":
-				return exec.Command("launchctl", "start", "dev.simpleflo.conduit").Run()
+				homeDir, _ := os.UserHomeDir()
+				plistPath := filepath.Join(homeDir, "Library", "LaunchAgents", "dev.simpleflo.conduit.plist")
+				if _, err := os.Stat(plistPath); os.IsNotExist(err) {
+					fmt.Println("Service not installed. Installing...")
+					// Find the daemon binary
+					daemonPath, err := exec.LookPath("conduit-daemon")
+					if err != nil {
+						// Try relative to conduit binary
+						conduitPath, err := os.Executable()
+						if err != nil {
+							return fmt.Errorf("could not find conduit-daemon binary")
+						}
+						daemonPath = filepath.Join(filepath.Dir(conduitPath), "conduit-daemon")
+						if _, err := os.Stat(daemonPath); err != nil {
+							return fmt.Errorf("could not find conduit-daemon binary")
+						}
+					}
+					result := inst.SetupDaemonService(cmd.Context(), daemonPath)
+					if result.Error != nil {
+						return result.Error
+					}
+					fmt.Println("✓ Service installed")
+				}
+				// Now start the service
+				if err := exec.Command("launchctl", "start", "dev.simpleflo.conduit").Run(); err != nil {
+					return fmt.Errorf("failed to start service: %w", err)
+				}
+				fmt.Println("✓ Daemon service started")
+				return nil
+
 			case "linux":
-				return exec.Command("systemctl", "--user", "start", "conduit").Run()
+				homeDir, _ := os.UserHomeDir()
+				servicePath := filepath.Join(homeDir, ".config", "systemd", "user", "conduit.service")
+				if _, err := os.Stat(servicePath); os.IsNotExist(err) {
+					fmt.Println("Service not installed. Installing...")
+					// Find the daemon binary
+					daemonPath, err := exec.LookPath("conduit-daemon")
+					if err != nil {
+						conduitPath, err := os.Executable()
+						if err != nil {
+							return fmt.Errorf("could not find conduit-daemon binary")
+						}
+						daemonPath = filepath.Join(filepath.Dir(conduitPath), "conduit-daemon")
+						if _, err := os.Stat(daemonPath); err != nil {
+							return fmt.Errorf("could not find conduit-daemon binary")
+						}
+					}
+					result := inst.SetupDaemonService(cmd.Context(), daemonPath)
+					if result.Error != nil {
+						return result.Error
+					}
+					fmt.Println("✓ Service installed")
+				}
+				if err := exec.Command("systemctl", "--user", "start", "conduit").Run(); err != nil {
+					return fmt.Errorf("failed to start service: %w", err)
+				}
+				fmt.Println("✓ Daemon service started")
+				return nil
+
 			default:
 				fmt.Println("Start the daemon manually: conduit-daemon --foreground")
 				return nil

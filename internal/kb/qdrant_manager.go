@@ -151,30 +151,31 @@ func (m *QdrantManager) ensureStorageDir() error {
 }
 
 // detectContainerRuntime finds an available container runtime.
+// Uses findBinaryPath to locate binaries in known paths (not just PATH).
 func (m *QdrantManager) detectContainerRuntime() error {
 	// Check for podman first (preferred on macOS with Podman machine)
-	if m.commandExists("podman") {
+	if podmanPath := findBinaryPath("podman"); podmanPath != "" {
 		// On macOS, check if podman machine is running
 		if runtime.GOOS == "darwin" {
-			out, err := exec.Command("podman", "machine", "list", "--format", "{{.Running}}").Output()
+			out, err := exec.Command(podmanPath, "machine", "list", "--format", "{{.Running}}").Output()
 			if err == nil && strings.Contains(string(out), "true") {
-				m.containerCmd = "podman"
-				m.logger.Debug().Str("runtime", "podman").Msg("using container runtime")
+				m.containerCmd = podmanPath
+				m.logger.Debug().Str("runtime", "podman").Str("path", podmanPath).Msg("using container runtime")
 				return nil
 			}
 		} else {
-			m.containerCmd = "podman"
-			m.logger.Debug().Str("runtime", "podman").Msg("using container runtime")
+			m.containerCmd = podmanPath
+			m.logger.Debug().Str("runtime", "podman").Str("path", podmanPath).Msg("using container runtime")
 			return nil
 		}
 	}
 
 	// Check for docker
-	if m.commandExists("docker") {
+	if dockerPath := findBinaryPath("docker"); dockerPath != "" {
 		// Verify Docker daemon is running
-		if err := exec.Command("docker", "info").Run(); err == nil {
-			m.containerCmd = "docker"
-			m.logger.Debug().Str("runtime", "docker").Msg("using container runtime")
+		if err := exec.Command(dockerPath, "info").Run(); err == nil {
+			m.containerCmd = dockerPath
+			m.logger.Debug().Str("runtime", "docker").Str("path", dockerPath).Msg("using container runtime")
 			return nil
 		}
 	}
@@ -475,9 +476,44 @@ func (m *QdrantManager) runContainerCmd(ctx context.Context, args ...string) err
 }
 
 // commandExists checks if a command is available.
+// knownBinaryPaths maps binary names to common installation locations.
+// This is needed because Electron apps don't inherit shell PATH.
+var knownBinaryPaths = map[string][]string{
+	"podman": {
+		"/opt/homebrew/bin/podman",     // macOS Homebrew (Apple Silicon)
+		"/usr/local/bin/podman",        // macOS Homebrew (Intel) / Linux
+		"/usr/bin/podman",              // System package
+	},
+	"docker": {
+		"/opt/homebrew/bin/docker",                                    // Homebrew
+		"/usr/local/bin/docker",                                       // Docker Desktop symlink
+		"/usr/bin/docker",                                             // System package
+		"/Applications/Docker.app/Contents/Resources/bin/docker",      // App bundle
+	},
+}
+
+// findBinaryPath finds a binary by checking PATH first, then known installation locations.
+// Returns the full path if found, empty string otherwise.
+func findBinaryPath(cmd string) string {
+	// Check PATH first
+	if path, err := exec.LookPath(cmd); err == nil {
+		return path
+	}
+
+	// Check known installation paths
+	if paths, ok := knownBinaryPaths[cmd]; ok {
+		for _, p := range paths {
+			if _, err := os.Stat(p); err == nil {
+				return p
+			}
+		}
+	}
+
+	return ""
+}
+
 func (m *QdrantManager) commandExists(cmd string) bool {
-	_, err := exec.LookPath(cmd)
-	return err == nil
+	return findBinaryPath(cmd) != ""
 }
 
 // GetStorageDir returns the Qdrant storage directory path.
