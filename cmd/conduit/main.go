@@ -3236,6 +3236,19 @@ func findBinaryPath(cmd string) string {
 	return ""
 }
 
+// getEmptyAuthFile returns path to an empty auth file for bypassing credential helpers.
+// This is needed when running from Electron where credential helpers (like gcloud) aren't in PATH.
+func getEmptyAuthFile() string {
+	authFile := filepath.Join(os.TempDir(), "conduit-empty-auth.json")
+	// Create or verify the file exists with valid JSON content
+	if _, err := os.Stat(authFile); os.IsNotExist(err) {
+		if err := os.WriteFile(authFile, []byte("{}"), 0600); err != nil {
+			return "" // Fall back to no auth file
+		}
+	}
+	return authFile
+}
+
 // detectContainerRuntime finds the available container runtime
 func detectContainerRuntime() string {
 	if findBinaryPath("podman") != "" {
@@ -4453,9 +4466,35 @@ After installation, enable KAG with:
 			}
 			fmt.Printf("Using %s as container runtime\n", filepath.Base(runtimePath))
 
+			// Bypass credential helpers (gcloud, docker-credential-desktop, etc.)
+			// Podman: use --authfile with empty JSON
+			// Docker: use DOCKER_CONFIG env pointing to dir with empty config.json
+			isPodman := strings.Contains(filepath.Base(runtimePath), "podman")
+			authFile := ""
+			dockerConfigDir := ""
+			if isPodman {
+				authFile = getEmptyAuthFile()
+			} else {
+				// For Docker, create a temp config directory with empty config.json
+				dockerConfigDir = filepath.Join(os.TempDir(), "conduit-docker-config")
+				os.MkdirAll(dockerConfigDir, 0700)
+				configPath := filepath.Join(dockerConfigDir, "config.json")
+				if _, err := os.Stat(configPath); os.IsNotExist(err) {
+					os.WriteFile(configPath, []byte("{}"), 0600)
+				}
+			}
+
 			// Pull FalkorDB image
 			fmt.Println("Pulling FalkorDB image...")
-			pullCmd := exec.CommandContext(ctx, runtimePath, "pull", "falkordb/falkordb:latest")
+			pullArgs := []string{"pull"}
+			if authFile != "" {
+				pullArgs = append(pullArgs, "--authfile", authFile)
+			}
+			pullArgs = append(pullArgs, "falkordb/falkordb:latest")
+			pullCmd := exec.CommandContext(ctx, runtimePath, pullArgs...)
+			if dockerConfigDir != "" {
+				pullCmd.Env = append(os.Environ(), "DOCKER_CONFIG="+dockerConfigDir)
+			}
 			pullCmd.Stdout = os.Stdout
 			pullCmd.Stderr = os.Stderr
 			if err := pullCmd.Run(); err != nil {
@@ -4468,15 +4507,21 @@ After installation, enable KAG with:
 
 			// Create and start container
 			fmt.Println("Starting FalkorDB container...")
-			runArgs := []string{
-				"run", "-d",
+			runArgs := []string{"run"}
+			if authFile != "" {
+				runArgs = append(runArgs, "--authfile", authFile)
+			}
+			runArgs = append(runArgs, "-d",
 				"--name", "conduit-falkordb",
 				"-p", "6379:6379",
-				"-v", dataDir + ":/data",
+				"-v", dataDir+":/data",
 				"--restart", "unless-stopped",
 				"falkordb/falkordb:latest",
-			}
+			)
 			runCmd := exec.CommandContext(ctx, runtimePath, runArgs...)
+			if dockerConfigDir != "" {
+				runCmd.Env = append(os.Environ(), "DOCKER_CONFIG="+dockerConfigDir)
+			}
 			if output, err := runCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("start container: %w\n%s", err, string(output))
 			}

@@ -465,12 +465,66 @@ func (m *QdrantManager) RecreateContainer(ctx context.Context) error {
 	return m.createContainer(ctx)
 }
 
+// getEmptyAuthFile returns path to an empty auth file for bypassing credential helpers.
+// This is needed when running from Electron where credential helpers (like gcloud) aren't in PATH.
+func (m *QdrantManager) getEmptyAuthFile() (string, error) {
+	authFile := filepath.Join(os.TempDir(), "conduit-empty-auth.json")
+	// Create or verify the file exists with valid JSON content
+	if _, err := os.Stat(authFile); os.IsNotExist(err) {
+		if err := os.WriteFile(authFile, []byte("{}"), 0600); err != nil {
+			return "", fmt.Errorf("create empty auth file: %w", err)
+		}
+	}
+	return authFile, nil
+}
+
+// getDockerConfigDir returns path to a temp directory with empty Docker config.
+// This bypasses credential helpers (docker-credential-desktop, etc.) for Docker.
+func (m *QdrantManager) getDockerConfigDir() string {
+	configDir := filepath.Join(os.TempDir(), "conduit-docker-config")
+	os.MkdirAll(configDir, 0700)
+	configPath := filepath.Join(configDir, "config.json")
+	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+		os.WriteFile(configPath, []byte("{}"), 0600)
+	}
+	return configDir
+}
+
 // runContainerCmd runs a container command.
+// For pull/run commands, it bypasses credential helpers:
+// - Podman: uses --authfile with empty JSON
+// - Docker: uses DOCKER_CONFIG env pointing to dir with empty config.json
 func (m *QdrantManager) runContainerCmd(ctx context.Context, args ...string) error {
-	cmd := exec.CommandContext(ctx, m.containerCmd, args...)
+	// Check if this is a pull or run command that needs auth bypass
+	finalArgs := args
+	isPodman := strings.Contains(filepath.Base(m.containerCmd), "podman")
+	var dockerConfigDir string
+
+	if len(args) > 0 && (args[0] == "pull" || args[0] == "run") {
+		if isPodman {
+			// Podman: use --authfile
+			authFile, err := m.getEmptyAuthFile()
+			if err != nil {
+				m.logger.Warn().Err(err).Msg("could not create empty auth file, trying without")
+			} else {
+				finalArgs = make([]string, 0, len(args)+2)
+				finalArgs = append(finalArgs, args[0])
+				finalArgs = append(finalArgs, "--authfile", authFile)
+				finalArgs = append(finalArgs, args[1:]...)
+			}
+		} else {
+			// Docker: use DOCKER_CONFIG env
+			dockerConfigDir = m.getDockerConfigDir()
+		}
+	}
+
+	cmd := exec.CommandContext(ctx, m.containerCmd, finalArgs...)
+	if dockerConfigDir != "" {
+		cmd.Env = append(os.Environ(), "DOCKER_CONFIG="+dockerConfigDir)
+	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("%s %v: %w (output: %s)", m.containerCmd, args, err, string(output))
+		return fmt.Errorf("%s %v: %w (output: %s)", m.containerCmd, finalArgs, err, string(output))
 	}
 	return nil
 }
