@@ -266,6 +266,17 @@ conduit uninstall --info      # Show what's installed
 conduit uninstall --all       # Uninstall Conduit (see Uninstalling section)
 ```
 
+### Dependency Management (v0.1.10+)
+```bash
+conduit deps status           # Check all dependencies (Homebrew, Ollama, Podman/Docker)
+conduit deps status --json    # JSON output for scripting/GUI
+conduit deps install ollama   # Install Ollama (platform-aware: Homebrew on macOS, curl on Linux)
+conduit deps install podman   # Install Podman (with machine init on macOS)
+conduit deps install homebrew # Install Homebrew
+conduit deps validate <path>  # Validate a custom binary path
+conduit deps validate <path> --json  # JSON output for scripting
+```
+
 ### Service Management
 ```bash
 conduit service install       # Install daemon as system service
@@ -377,6 +388,9 @@ Semantic search understands meaning - "understanding text with computers" matche
 conduit status                # Show daemon status
 conduit config                # Show configuration
 conduit config --all          # Show full configuration
+conduit config get <key>      # Get a specific config value (e.g., ai.model)
+conduit config set <key> <val>  # Set a config value (e.g., deps.ollama.path)
+conduit config unset <key>    # Remove a config value
 conduit backup                # Backup data directory
 conduit doctor                # Run comprehensive diagnostics
 ```
