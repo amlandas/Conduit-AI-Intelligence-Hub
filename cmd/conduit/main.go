@@ -139,6 +139,8 @@ VS Code, Gemini CLI, and more.`,
 	rootCmd.AddCommand(startCmd())
 	rootCmd.AddCommand(stopCmd())
 	rootCmd.AddCommand(removeCmd())
+	rootCmd.AddCommand(createCmd())
+	rootCmd.AddCommand(statsCmd())
 	rootCmd.AddCommand(logsCmd())
 	rootCmd.AddCommand(clientCmd())
 	rootCmd.AddCommand(kbCmd())
@@ -1107,14 +1109,26 @@ func getActiveContainerRuntime(ctx context.Context) (name string, version string
 
 // statusCmd shows the overall status
 func statusCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "status",
 		Short: "Show Conduit status",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClient(socketPath)
 			data, err := c.get("/api/v1/status")
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"daemon not running or unreachable: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("daemon not running or unreachable: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				fmt.Println(string(data))
+				return nil
 			}
 
 			var status map[string]interface{}
@@ -1312,6 +1326,9 @@ func statusCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
 }
 
 // installCmd installs a connector from a URL
@@ -1635,15 +1652,27 @@ func confirmAction(prompt string) bool {
 
 // listCmd lists all instances
 func listCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List connector instances",
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:     "list",
+		Short:   "List connector instances",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClient(socketPath)
 			data, err := c.get("/api/v1/instances")
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"failed to list instances: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("failed to list instances: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				fmt.Println(string(data))
+				return nil
 			}
 
 			var resp map[string]interface{}
@@ -1669,11 +1698,16 @@ func listCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
 }
 
 // startCmd starts an instance
 func startCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "start <instance-id>",
 		Short: "Start a connector instance",
 		Args:  cobra.ExactArgs(1),
@@ -1681,20 +1715,40 @@ func startCmd() *cobra.Command {
 			instanceID := args[0]
 			c := newClient(socketPath)
 
-			_, err := c.post("/api/v1/instances/"+instanceID+"/start", nil)
+			data, err := c.post("/api/v1/instances/"+instanceID+"/start", nil)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"instance_id":"%s","error":"failed to start instance: %s"}`, instanceID, err.Error())
+					return nil
+				}
 				return fmt.Errorf("failed to start instance: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				// Return the response from the API, or construct a success response
+				if len(data) > 0 {
+					fmt.Println(string(data))
+				} else {
+					fmt.Printf(`{"success":true,"instance_id":"%s","message":"Started instance"}`, instanceID)
+				}
+				return nil
 			}
 
 			fmt.Printf("Started instance %s\n", instanceID)
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
 }
 
 // stopCmd stops an instance
 func stopCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "stop <instance-id>",
 		Short: "Stop a connector instance",
 		Args:  cobra.ExactArgs(1),
@@ -1702,20 +1756,39 @@ func stopCmd() *cobra.Command {
 			instanceID := args[0]
 			c := newClient(socketPath)
 
-			_, err := c.post("/api/v1/instances/"+instanceID+"/stop", nil)
+			data, err := c.post("/api/v1/instances/"+instanceID+"/stop", nil)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"instance_id":"%s","error":"failed to stop instance: %s"}`, instanceID, err.Error())
+					return nil
+				}
 				return fmt.Errorf("failed to stop instance: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				if len(data) > 0 {
+					fmt.Println(string(data))
+				} else {
+					fmt.Printf(`{"success":true,"instance_id":"%s","message":"Stopped instance"}`, instanceID)
+				}
+				return nil
 			}
 
 			fmt.Printf("Stopped instance %s\n", instanceID)
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
 }
 
 // removeCmd removes an instance
 func removeCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "remove <instance-id>",
 		Short: "Remove a connector instance",
 		Args:  cobra.ExactArgs(1),
@@ -1725,13 +1798,241 @@ func removeCmd() *cobra.Command {
 
 			err := c.delete("/api/v1/instances/" + instanceID)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"instance_id":"%s","error":"failed to remove instance: %s"}`, instanceID, err.Error())
+					return nil
+				}
 				return fmt.Errorf("failed to remove instance: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				fmt.Printf(`{"success":true,"instance_id":"%s","message":"Removed instance"}`, instanceID)
+				return nil
 			}
 
 			fmt.Printf("Removed instance %s\n", instanceID)
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
+}
+
+// statsCmd shows daemon statistics
+func statsCmd() *cobra.Command {
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "stats",
+		Short: "Show daemon statistics",
+		Long: `Show statistics about the Conduit daemon including instance counts,
+knowledge base stats, and resource usage.
+
+Examples:
+  conduit stats
+  conduit stats --json   # JSON output for GUI`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			c := newClient(socketPath)
+
+			// Get status data (includes instances, bindings count)
+			statusData, err := c.get("/api/v1/status")
+			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"daemon not running: %s"}`, err.Error())
+					return nil
+				}
+				return fmt.Errorf("daemon not running: %w", err)
+			}
+
+			// Get KB sources
+			kbData, _ := c.get("/api/v1/kb/sources")
+
+			var status map[string]interface{}
+			json.Unmarshal(statusData, &status)
+
+			var kbResp struct {
+				Sources []map[string]interface{} `json:"sources"`
+			}
+			json.Unmarshal(kbData, &kbResp)
+
+			// Build stats
+			stats := make(map[string]interface{})
+
+			// Instance stats
+			instanceTotal := 0
+			instanceRunning := 0
+			if instances, ok := status["instances"].(map[string]interface{}); ok {
+				if total, ok := instances["total"].(float64); ok {
+					instanceTotal = int(total)
+				}
+				if running, ok := instances["running"].(float64); ok {
+					instanceRunning = int(running)
+				}
+			}
+			stats["instances"] = map[string]int{
+				"total":   instanceTotal,
+				"running": instanceRunning,
+			}
+
+			// Binding stats
+			bindingTotal := 0
+			if bindings, ok := status["bindings"].(map[string]interface{}); ok {
+				if total, ok := bindings["total"].(float64); ok {
+					bindingTotal = int(total)
+				}
+			}
+			stats["bindings"] = map[string]int{
+				"total": bindingTotal,
+			}
+
+			// KB stats
+			kbSources := len(kbResp.Sources)
+			kbDocs := 0
+			kbChunks := 0
+			for _, src := range kbResp.Sources {
+				if dc, ok := src["doc_count"].(float64); ok {
+					kbDocs += int(dc)
+				}
+				if cc, ok := src["chunk_count"].(float64); ok {
+					kbChunks += int(cc)
+				}
+			}
+			stats["knowledge_base"] = map[string]int{
+				"sources":   kbSources,
+				"documents": kbDocs,
+				"chunks":    kbChunks,
+			}
+
+			// Daemon info
+			if daemon, ok := status["daemon"].(map[string]interface{}); ok {
+				stats["daemon"] = daemon
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				jsonBytes, _ := json.MarshalIndent(stats, "", "  ")
+				fmt.Println(string(jsonBytes))
+				return nil
+			}
+
+			// Human-readable output
+			fmt.Println("Conduit Statistics")
+			fmt.Println("══════════════════════════════════════")
+			fmt.Println()
+			fmt.Println("📊 Instances")
+			fmt.Printf("   Total:   %d\n", instanceTotal)
+			fmt.Printf("   Running: %d\n", instanceRunning)
+			fmt.Println()
+			fmt.Println("🔗 Bindings")
+			fmt.Printf("   Total:   %d\n", bindingTotal)
+			fmt.Println()
+			fmt.Println("📚 Knowledge Base")
+			fmt.Printf("   Sources:   %d\n", kbSources)
+			fmt.Printf("   Documents: %d\n", kbDocs)
+			fmt.Printf("   Chunks:    %d\n", kbChunks)
+
+			return nil
+		},
+	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
+}
+
+// createCmd creates a new connector instance
+func createCmd() *cobra.Command {
+	var name string
+	var version string
+	var imageRef string
+	var configStr string
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "create <package-id>",
+		Short: "Create a new connector instance",
+		Long: `Create a new connector instance from a package.
+
+The package ID identifies the connector type (e.g., filesystem, github).
+The instance will be created but not started. Use 'conduit start' to run it.
+
+Examples:
+  conduit create filesystem --name "My Files"
+  conduit create github --name "GitHub Repos" --config "token=ghp_xxx"
+  conduit create filesystem --json   # JSON output for GUI`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			packageID := args[0]
+
+			// Build request
+			req := map[string]interface{}{
+				"package_id": packageID,
+			}
+			if name != "" {
+				req["display_name"] = name
+			} else {
+				req["display_name"] = packageID + "-instance"
+			}
+			if version != "" {
+				req["package_version"] = version
+			} else {
+				req["package_version"] = "1.0.0"
+			}
+			if imageRef != "" {
+				req["image_ref"] = imageRef
+			}
+			if configStr != "" {
+				// Parse config string (format: key1=value1,key2=value2)
+				config := make(map[string]string)
+				pairs := strings.Split(configStr, ",")
+				for _, pair := range pairs {
+					kv := strings.SplitN(pair, "=", 2)
+					if len(kv) == 2 {
+						config[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+					}
+				}
+				req["config"] = config
+			}
+
+			c := newClient(socketPath)
+			data, err := c.post("/api/v1/instances", req)
+			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"failed to create instance: %s"}`, err.Error())
+					return nil
+				}
+				return fmt.Errorf("failed to create instance: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				fmt.Println(string(data))
+				return nil
+			}
+
+			var resp map[string]interface{}
+			json.Unmarshal(data, &resp)
+
+			instanceID := resp["instance_id"].(string)
+			displayName := resp["display_name"].(string)
+
+			fmt.Printf("✓ Created instance: %s\n", displayName)
+			fmt.Printf("  ID: %s\n", instanceID)
+			fmt.Println()
+			fmt.Println("Run 'conduit start " + instanceID + "' to start the instance")
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&name, "name", "", "Display name for the instance")
+	cmd.Flags().StringVar(&version, "version", "", "Package version (default: 1.0.0)")
+	cmd.Flags().StringVar(&imageRef, "image", "", "Docker image reference")
+	cmd.Flags().StringVar(&configStr, "config", "", "Instance config (format: key1=value1,key2=value2)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+
+	return cmd
 }
 
 // clientCmd is the parent command for AI client operations
@@ -2129,6 +2430,7 @@ func kbAddCmd() *cobra.Command {
 	var patterns string
 	var excludes string
 	var syncMode string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:   "add <path>",
@@ -2149,15 +2451,27 @@ Examples:
 			// Resolve to absolute path
 			absPath, err := filepath.Abs(sourcePath)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"resolve path: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("resolve path: %w", err)
 			}
 
 			// Check path exists
 			info, err := os.Stat(absPath)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"path not accessible: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("path not accessible: %w", err)
 			}
 			if !info.IsDir() {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"path is not a directory: %s"}`, absPath)
+					return nil
+				}
 				return fmt.Errorf("path is not a directory: %s", absPath)
 			}
 
@@ -2183,7 +2497,17 @@ Examples:
 			c := newClient(socketPath)
 			data, err := c.post("/api/v1/kb/sources", req)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"add source: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("add source: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				fmt.Println(string(data))
+				return nil
 			}
 
 			var resp map[string]interface{}
@@ -2211,20 +2535,29 @@ Examples:
 	cmd.Flags().StringVar(&patterns, "patterns", "", "File patterns to index (comma-separated, e.g., '*.md,*.txt')")
 	cmd.Flags().StringVar(&excludes, "excludes", "", "Directories to exclude (comma-separated, e.g., 'node_modules,dist')")
 	cmd.Flags().StringVar(&syncMode, "sync", "manual", "Sync mode: manual or auto")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
 
 	return cmd
 }
 
 func kbListCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "list",
-		Short: "List knowledge base sources",
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:     "list",
+		Short:   "List knowledge base sources",
 		Aliases: []string{"ls"},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClient(socketPath)
 			data, err := c.get("/api/v1/kb/sources")
 			if err != nil {
 				return fmt.Errorf("failed to list KB sources: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				fmt.Println(string(data))
+				return nil
 			}
 
 			var resp map[string]interface{}
@@ -2249,10 +2582,14 @@ func kbListCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
 }
 
 func kbRemoveCmd() *cobra.Command {
 	var force bool
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:   "remove <name-or-id>",
@@ -2272,6 +2609,10 @@ Examples:
 			c := newClient(socketPath)
 			data, err := c.get("/api/v1/kb/sources")
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"failed to list sources: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("failed to list sources: %w", err)
 			}
 
@@ -2279,6 +2620,10 @@ Examples:
 				Sources []map[string]interface{} `json:"sources"`
 			}
 			if err := json.Unmarshal(data, &resp); err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"failed to parse sources: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("failed to parse sources: %w", err)
 			}
 			sources := resp.Sources
@@ -2296,6 +2641,10 @@ Examples:
 			}
 
 			if matchedSource == nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"source not found: %s"}`, nameOrID)
+					return nil
+				}
 				return fmt.Errorf("source not found: %s\nUse 'conduit kb list' to see available sources", nameOrID)
 			}
 
@@ -2306,7 +2655,8 @@ Examples:
 				docCount = int(dc)
 			}
 
-			if !force && docCount > 0 {
+			// JSON mode implies force (non-interactive)
+			if !jsonOutput && !force && docCount > 0 {
 				fmt.Printf("Source '%s' has %d indexed documents.\n", sourceName, docCount)
 				if !confirmAction("Remove source and all documents?") {
 					fmt.Println("Cancelled")
@@ -2317,6 +2667,10 @@ Examples:
 			// Delete the source and get deletion statistics
 			respBytes, err := c.deleteWithResponse("/api/v1/kb/sources/" + sourceID)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"remove source failed: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("remove source: %w", err)
 			}
 
@@ -2325,7 +2679,23 @@ Examples:
 				DocumentsDeleted int `json:"documents_deleted"`
 				VectorsDeleted   int `json:"vectors_deleted"`
 			}
-			if json.Unmarshal(respBytes, &deleteResult) == nil && deleteResult.VectorsDeleted > 0 {
+			json.Unmarshal(respBytes, &deleteResult)
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				result := map[string]interface{}{
+					"success":           true,
+					"source_id":         sourceID,
+					"source_name":       sourceName,
+					"documents_deleted": deleteResult.DocumentsDeleted,
+					"vectors_deleted":   deleteResult.VectorsDeleted,
+				}
+				jsonBytes, _ := json.Marshal(result)
+				fmt.Println(string(jsonBytes))
+				return nil
+			}
+
+			if deleteResult.VectorsDeleted > 0 {
 				fmt.Printf("✓ Removed source: %s (%d documents, %d vectors)\n",
 					sourceName, deleteResult.DocumentsDeleted, deleteResult.VectorsDeleted)
 			} else {
@@ -2336,12 +2706,13 @@ Examples:
 	}
 
 	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
 
 	return cmd
 }
 
 func kbSearchCmd() *cobra.Command {
-	var semantic, fts5, raw bool
+	var semantic, fts5, raw, jsonOutput bool
 	var contextChunks, limit int
 	var minScore, semanticWeight, mmrLambda float64
 	var disableMMR, disableRerank bool
@@ -2430,7 +2801,17 @@ Examples:
 
 			data, err := c.get(apiURL)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"search failed: %s"}`, err.Error())
+					return nil
+				}
 				return fmt.Errorf("search failed: %w", err)
+			}
+
+			// JSON output for GUI consumption
+			if jsonOutput {
+				fmt.Println(string(data))
+				return nil
 			}
 
 			var resp map[string]interface{}
@@ -2516,6 +2897,7 @@ Examples:
 	cmd.Flags().BoolVar(&semantic, "semantic", false, "Force semantic search (requires Qdrant + Ollama)")
 	cmd.Flags().BoolVar(&fts5, "fts5", false, "Force FTS5 keyword search")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Return raw chunks without processing")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
 	cmd.Flags().IntVar(&contextChunks, "context", 0, "Number of adjacent chunks to include")
 	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum results to return (default: 10)")
 

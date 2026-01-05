@@ -1,185 +1,322 @@
+/**
+ * IPC Handlers for Conduit Desktop
+ *
+ * PRINCIPLE: GUI is a thin wrapper over CLI
+ * All operations delegate to `conduit` CLI commands with --json flag.
+ * NO direct HTTP API calls to daemon.
+ */
+
 import { ipcMain, BrowserWindow } from 'electron'
-import { daemonClient, DaemonEvent } from './daemon-client'
+import { execFile } from 'child_process'
+import { promisify } from 'util'
+import * as path from 'path'
+import * as os from 'os'
+
+const execFileAsync = promisify(execFile)
+
+// Get the CLI installation path
+function getCLIInstallPath(): string {
+  const home = os.homedir()
+  return path.join(home, '.local', 'bin')
+}
+
+// Execute CLI command and parse JSON output
+async function execCLI(args: string[]): Promise<unknown> {
+  const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+  const { stdout } = await execFileAsync(conduitPath, args)
+  try {
+    return JSON.parse(stdout)
+  } catch {
+    // If not valid JSON, return as string
+    return stdout.trim()
+  }
+}
+
+// Polling state for event simulation (replaces SSE)
+let pollingInterval: NodeJS.Timeout | null = null
+let isConnected = false
 
 export function setupIpcHandlers(): void {
-  // Daemon status
+  // ═══════════════════════════════════════════════════════════════
+  // Daemon Status - DELEGATES TO CLI: conduit status --json
+  // ═══════════════════════════════════════════════════════════════
   ipcMain.handle('daemon:status', async () => {
     try {
-      return await daemonClient.get('/status')
+      return await execCLI(['status', '--json'])
     } catch (err) {
       return { error: (err as Error).message, connected: false }
     }
   })
 
+  // ═══════════════════════════════════════════════════════════════
+  // Daemon Stats - DELEGATES TO CLI: conduit stats --json
+  // ═══════════════════════════════════════════════════════════════
   ipcMain.handle('daemon:stats', async () => {
     try {
-      return await daemonClient.get('/stats')
+      return await execCLI(['stats', '--json'])
     } catch (err) {
       return { error: (err as Error).message }
     }
   })
 
-  // Instance management
+  // ═══════════════════════════════════════════════════════════════
+  // Instance Management - DELEGATES TO CLI
+  // ═══════════════════════════════════════════════════════════════
+
+  // conduit list --json
   ipcMain.handle('instances:list', async () => {
     try {
-      return await daemonClient.get('/instances')
+      return await execCLI(['list', '--json'])
     } catch (err) {
       return { error: (err as Error).message, instances: [] }
     }
   })
 
-  ipcMain.handle('instances:create', async (_, config) => {
-    return daemonClient.post('/instances', config)
+  // conduit create <package-id> --name <name> --json
+  ipcMain.handle('instances:create', async (_, config: { package_id: string; display_name?: string; package_version?: string; image_ref?: string; config?: Record<string, string> }) => {
+    try {
+      const args = ['create', config.package_id, '--json']
+      if (config.display_name) {
+        args.push('--name', config.display_name)
+      }
+      if (config.package_version) {
+        args.push('--version', config.package_version)
+      }
+      if (config.image_ref) {
+        args.push('--image', config.image_ref)
+      }
+      if (config.config) {
+        const configStr = Object.entries(config.config).map(([k, v]) => `${k}=${v}`).join(',')
+        args.push('--config', configStr)
+      }
+      return await execCLI(args)
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
+  // conduit start <id> --json
   ipcMain.handle('instances:start', async (_, id: string) => {
-    return daemonClient.post(`/instances/${id}/start`)
+    try {
+      return await execCLI(['start', id, '--json'])
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
+  // conduit stop <id> --json
   ipcMain.handle('instances:stop', async (_, id: string) => {
-    return daemonClient.post(`/instances/${id}/stop`)
+    try {
+      return await execCLI(['stop', id, '--json'])
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
+  // conduit remove <id> --json
   ipcMain.handle('instances:delete', async (_, id: string) => {
-    return daemonClient.delete(`/instances/${id}`)
+    try {
+      return await execCLI(['remove', id, '--json'])
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
-  // Knowledge Base
+  // ═══════════════════════════════════════════════════════════════
+  // Knowledge Base - DELEGATES TO CLI
+  // ═══════════════════════════════════════════════════════════════
+
+  // conduit kb list --json
   ipcMain.handle('kb:sources', async () => {
     try {
-      return await daemonClient.get('/kb/sources')
+      return await execCLI(['kb', 'list', '--json'])
     } catch (err) {
       return { error: (err as Error).message, sources: [] }
     }
   })
 
-  ipcMain.handle('kb:add-source', async (_, config) => {
-    return daemonClient.post('/kb/sources', config)
-  })
-
-  ipcMain.handle('kb:remove-source', async (_, id: string) => {
-    return daemonClient.delete(`/kb/sources/${id}`)
-  })
-
-  ipcMain.handle('kb:sync', async (_, id: string) => {
-    return daemonClient.post(`/kb/sources/${id}/sync`)
-  })
-
-  ipcMain.handle('kb:search', async (_, query: string, options?: object) => {
-    const params = new URLSearchParams({ q: query })
-    if (options) {
-      Object.entries(options).forEach(([key, value]) => {
-        if (value !== undefined) {
-          params.set(key, String(value))
-        }
-      })
-    }
-    return daemonClient.get(`/kb/search?${params.toString()}`)
-  })
-
-  ipcMain.handle('kb:kag-search', async (_, query: string, options?: object) => {
-    const params = new URLSearchParams({ q: query })
-    if (options) {
-      Object.entries(options).forEach(([key, value]) => {
-        if (value !== undefined) {
-          params.set(key, String(value))
-        }
-      })
-    }
+  // conduit kb add <path> --name <name> --json
+  ipcMain.handle('kb:add-source', async (_, config: { path: string; name?: string; patterns?: string[]; excludes?: string[] }) => {
     try {
-      return await daemonClient.get(`/kb/kag/search?${params.toString()}`)
+      const args = ['kb', 'add', config.path, '--json']
+      if (config.name) {
+        args.push('--name', config.name)
+      }
+      if (config.patterns && config.patterns.length > 0) {
+        args.push('--patterns', config.patterns.join(','))
+      }
+      if (config.excludes && config.excludes.length > 0) {
+        args.push('--excludes', config.excludes.join(','))
+      }
+      return await execCLI(args)
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
+  // conduit kb remove <id> --json
+  ipcMain.handle('kb:remove-source', async (_, id: string) => {
+    try {
+      return await execCLI(['kb', 'remove', id, '--json'])
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
+  // kb:sync is already handled via spawn in setup-ipc.ts with progress output
+  // This handler provides a simple non-progress version
+  ipcMain.handle('kb:sync', async (_, id: string) => {
+    try {
+      // Use longer timeout for sync (can take minutes)
+      const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+      const { stdout } = await execFileAsync(conduitPath, ['kb', 'sync', id], { timeout: 600000 })
+      return { success: true, output: stdout }
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
+  })
+
+  // conduit kb search <query> --json
+  ipcMain.handle('kb:search', async (_, query: string, options?: { mode?: string; raw?: boolean; limit?: number; min_score?: number; semantic_weight?: number }) => {
+    try {
+      const args = ['kb', 'search', query, '--json']
+      if (options?.mode === 'semantic') {
+        args.push('--semantic')
+      } else if (options?.mode === 'fts5') {
+        args.push('--fts5')
+      }
+      if (options?.raw) {
+        args.push('--raw')
+      }
+      if (options?.limit) {
+        args.push('--limit', String(options.limit))
+      }
+      if (options?.min_score !== undefined) {
+        args.push('--min-score', String(options.min_score))
+      }
+      if (options?.semantic_weight !== undefined) {
+        args.push('--semantic-weight', String(options.semantic_weight))
+      }
+      return await execCLI(args)
+    } catch (err) {
+      return { error: (err as Error).message, results: [], total_hits: 0 }
+    }
+  })
+
+  // conduit kb kag-query <query> --format json
+  ipcMain.handle('kb:kag-search', async (_, query: string, options?: { max_hops?: number }) => {
+    try {
+      const args = ['kb', 'kag-query', query, '--format', 'json']
+      if (options?.max_hops) {
+        args.push('--max-hops', String(options.max_hops))
+      }
+      return await execCLI(args)
     } catch (err) {
       return { error: (err as Error).message, entities: [], relations: [] }
     }
   })
 
-  // Instance permissions (Advanced Mode)
-  ipcMain.handle('instances:permissions', async (_, id: string) => {
-    try {
-      return await daemonClient.get(`/instances/${id}/permissions`)
-    } catch (err) {
-      // Return mock data when API not available
-      return { error: (err as Error).message }
-    }
+  // ═══════════════════════════════════════════════════════════════
+  // Instance Permissions (Advanced Mode)
+  // NOTE: These endpoints don't exist in CLI yet (v0.1.15)
+  // For now, return mock/empty data
+  // ═══════════════════════════════════════════════════════════════
+
+  ipcMain.handle('instances:permissions', async (_, _id: string) => {
+    // TODO: Add `conduit permissions <id> --json` in v0.1.15
+    return { error: 'Permissions not yet implemented in CLI', permissions: [] }
   })
 
-  ipcMain.handle('instances:set-permission', async (_, id: string, permId: string, granted: boolean) => {
-    try {
-      return await daemonClient.post(`/instances/${id}/permissions`, { permission: permId, granted })
-    } catch (err) {
-      return { error: (err as Error).message }
-    }
+  ipcMain.handle('instances:set-permission', async (_, _id: string, _permId: string, _granted: boolean) => {
+    // TODO: Add `conduit permissions <id> --set --json` in v0.1.15
+    return { error: 'Permissions not yet implemented in CLI' }
   })
 
-  ipcMain.handle('instances:audit', async (_, id: string) => {
-    try {
-      return await daemonClient.post(`/instances/${id}/audit`)
-    } catch (err) {
-      return { error: (err as Error).message }
-    }
+  ipcMain.handle('instances:audit', async (_, _id: string) => {
+    // TODO: Add `conduit audit <id> --json` in v0.1.15
+    return { error: 'Audit not yet implemented in CLI' }
   })
 
-  // Client bindings
+  // ═══════════════════════════════════════════════════════════════
+  // Client Bindings
+  // NOTE: Need to add --json to binding commands
+  // ═══════════════════════════════════════════════════════════════
+
+  // conduit client bindings --json (needs to be added)
   ipcMain.handle('bindings:list', async () => {
     try {
-      return await daemonClient.get('/bindings')
+      // Try CLI first, but bindings --json may not exist yet
+      return await execCLI(['client', 'bindings', '--json'])
     } catch (err) {
+      // Fallback to empty bindings
       return { error: (err as Error).message, bindings: [] }
     }
   })
 
-  ipcMain.handle('bindings:create', async (_, config) => {
-    return daemonClient.post('/bindings', config)
+  ipcMain.handle('bindings:create', async (_, _config: unknown) => {
+    // TODO: Add `conduit client bind --json` in v0.1.14
+    return { error: 'Binding creation via CLI not yet implemented' }
   })
 
-  ipcMain.handle('bindings:delete', async (_, id: string) => {
-    return daemonClient.delete(`/bindings/${id}`)
+  ipcMain.handle('bindings:delete', async (_, _id: string) => {
+    // TODO: Add `conduit client unbind --json` in v0.1.14
+    return { error: 'Binding deletion via CLI not yet implemented' }
   })
 
-  // SSE Events
+  // ═══════════════════════════════════════════════════════════════
+  // Events (Polling-based - replaces SSE)
+  // Instead of SSE, we poll status periodically
+  // ═══════════════════════════════════════════════════════════════
+
   ipcMain.handle('events:connect', () => {
-    daemonClient.connectSSE()
+    if (pollingInterval) {
+      return { connected: true }
+    }
+
+    // Poll daemon status every 3 seconds
+    pollingInterval = setInterval(async () => {
+      try {
+        const status = await execCLI(['status', '--json'])
+        isConnected = true
+        const windows = BrowserWindow.getAllWindows()
+        windows.forEach((window) => {
+          window.webContents.send('conduit:status', status)
+        })
+      } catch {
+        if (isConnected) {
+          isConnected = false
+          const windows = BrowserWindow.getAllWindows()
+          windows.forEach((window) => {
+            window.webContents.send('conduit:disconnected')
+          })
+        }
+      }
+    }, 3000)
+
+    // Initial check
+    execCLI(['status', '--json']).then(() => {
+      isConnected = true
+      const windows = BrowserWindow.getAllWindows()
+      windows.forEach((window) => {
+        window.webContents.send('conduit:connected')
+      })
+    }).catch(() => {
+      isConnected = false
+    })
+
     return { connected: true }
   })
 
   ipcMain.handle('events:disconnect', () => {
-    daemonClient.disconnectSSE()
+    if (pollingInterval) {
+      clearInterval(pollingInterval)
+      pollingInterval = null
+    }
+    isConnected = false
     return { connected: false }
   })
 
   ipcMain.handle('events:status', () => {
-    return { connected: daemonClient.getIsConnected() }
+    return { connected: isConnected }
   })
-
-  // Forward SSE events to renderer
-  daemonClient.on('event', (event: DaemonEvent) => {
-    const windows = BrowserWindow.getAllWindows()
-    windows.forEach((window) => {
-      window.webContents.send('conduit:event', event)
-    })
-  })
-
-  daemonClient.on('connected', () => {
-    const windows = BrowserWindow.getAllWindows()
-    windows.forEach((window) => {
-      window.webContents.send('conduit:connected')
-    })
-  })
-
-  daemonClient.on('disconnected', () => {
-    const windows = BrowserWindow.getAllWindows()
-    windows.forEach((window) => {
-      window.webContents.send('conduit:disconnected')
-    })
-  })
-
-  daemonClient.on('error', (err: Error) => {
-    const windows = BrowserWindow.getAllWindows()
-    windows.forEach((window) => {
-      window.webContents.send('conduit:error', err.message)
-    })
-  })
-
-  // Auto-connect to SSE on app start
-  daemonClient.connectSSE()
 }
