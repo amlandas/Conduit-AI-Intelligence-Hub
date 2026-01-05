@@ -6126,6 +6126,46 @@ automatically downloaded on first use, or you can pull them manually:
 	}
 }
 
+// ensureOllamaRunning starts Ollama server if not running and waits for it to be ready
+func ensureOllamaRunning(ctx context.Context) error {
+	// Check if already running
+	provider, err := kb.NewOllamaProvider(kb.OllamaProviderConfig{})
+	if err != nil {
+		return fmt.Errorf("create provider: %w", err)
+	}
+
+	if provider.IsAvailable(ctx) {
+		return nil // Already running
+	}
+
+	// Try to start Ollama
+	ollamaBin := findOllamaBinary()
+	if ollamaBin == "" {
+		return fmt.Errorf("Ollama binary not found. Install with: brew install ollama")
+	}
+
+	fmt.Println("Starting Ollama server...")
+
+	// Start ollama serve in background
+	serveCmd := exec.Command(ollamaBin, "serve")
+	serveCmd.Stdout = nil
+	serveCmd.Stderr = nil
+	if err := serveCmd.Start(); err != nil {
+		return fmt.Errorf("failed to start Ollama: %w", err)
+	}
+
+	// Wait for Ollama to become available (up to 30 seconds)
+	for i := 0; i < 30; i++ {
+		time.Sleep(time.Second)
+		if provider.IsAvailable(ctx) {
+			fmt.Println("✓ Ollama server started")
+			return nil
+		}
+	}
+
+	return fmt.Errorf("Ollama did not start in time. Try running: %s serve", ollamaBin)
+}
+
 // ollamaPullCmd pulls an Ollama model with progress streaming
 func ollamaPullCmd() *cobra.Command {
 	return &cobra.Command{
@@ -6134,6 +6174,7 @@ func ollamaPullCmd() *cobra.Command {
 		Long: `Pull (download) an Ollama model from the registry.
 
 Progress is streamed to stdout, making it suitable for GUI integration.
+If Ollama is not running, it will be started automatically.
 
 Examples:
   conduit ollama pull nomic-embed-text
@@ -6143,14 +6184,9 @@ Examples:
 			ctx := cmd.Context()
 			model := args[0]
 
-			// Check if Ollama is available
-			provider, err := kb.NewOllamaProvider(kb.OllamaProviderConfig{})
-			if err != nil {
-				return fmt.Errorf("create provider: %w", err)
-			}
-
-			if !provider.IsAvailable(ctx) {
-				return fmt.Errorf("Ollama is not running. Start with: ollama serve")
+			// Ensure Ollama is running (start it if needed)
+			if err := ensureOllamaRunning(ctx); err != nil {
+				return err
 			}
 
 			fmt.Printf("Pulling model: %s\n", model)
