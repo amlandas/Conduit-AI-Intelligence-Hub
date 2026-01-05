@@ -218,49 +218,75 @@ export function setupIpcHandlers(): void {
 
   // ═══════════════════════════════════════════════════════════════
   // Instance Permissions (Advanced Mode)
-  // NOTE: These endpoints don't exist in CLI yet (v0.1.15)
-  // For now, return mock/empty data
+  // DELEGATES TO CLI: conduit permissions <id> --json
   // ═══════════════════════════════════════════════════════════════
 
-  ipcMain.handle('instances:permissions', async (_, _id: string) => {
-    // TODO: Add `conduit permissions <id> --json` in v0.1.15
-    return { error: 'Permissions not yet implemented in CLI', permissions: [] }
+  ipcMain.handle('instances:permissions', async (_, id: string) => {
+    try {
+      return await execCLI(['permissions', id, '--json'])
+    } catch (err) {
+      return { error: (err as Error).message, permissions: [] }
+    }
   })
 
-  ipcMain.handle('instances:set-permission', async (_, _id: string, _permId: string, _granted: boolean) => {
-    // TODO: Add `conduit permissions <id> --set --json` in v0.1.15
-    return { error: 'Permissions not yet implemented in CLI' }
+  ipcMain.handle('instances:set-permission', async (_, id: string, permId: string, granted: boolean) => {
+    try {
+      return await execCLI(['permissions', id, '--set', `${permId}=${granted}`, '--json'])
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
-  ipcMain.handle('instances:audit', async (_, _id: string) => {
-    // TODO: Add `conduit audit <id> --json` in v0.1.15
-    return { error: 'Audit not yet implemented in CLI' }
+  // conduit audit <id> --json
+  ipcMain.handle('instances:audit', async (_, id: string) => {
+    try {
+      return await execCLI(['audit', id, '--json'])
+    } catch (err) {
+      return { error: (err as Error).message, audit_logs: [] }
+    }
   })
 
   // ═══════════════════════════════════════════════════════════════
   // Client Bindings
-  // NOTE: Need to add --json to binding commands
+  // DELEGATES TO CLI: conduit client bindings/bind/unbind --json
   // ═══════════════════════════════════════════════════════════════
 
-  // conduit client bindings --json (needs to be added)
+  // conduit client bindings --json
   ipcMain.handle('bindings:list', async () => {
     try {
-      // Try CLI first, but bindings --json may not exist yet
       return await execCLI(['client', 'bindings', '--json'])
     } catch (err) {
-      // Fallback to empty bindings
       return { error: (err as Error).message, bindings: [] }
     }
   })
 
-  ipcMain.handle('bindings:create', async (_, _config: unknown) => {
-    // TODO: Add `conduit client bind --json` in v0.1.14
-    return { error: 'Binding creation via CLI not yet implemented' }
+  // conduit client bind <instance-id> --client <client> --scope <scope> --json
+  ipcMain.handle('bindings:create', async (_, config: { instance_id: string; client_id?: string; scope?: string }) => {
+    try {
+      const args = ['client', 'bind', config.instance_id, '--json']
+      if (config.client_id) {
+        args.push('--client', config.client_id)
+      }
+      if (config.scope) {
+        args.push('--scope', config.scope)
+      }
+      return await execCLI(args)
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
-  ipcMain.handle('bindings:delete', async (_, _id: string) => {
-    // TODO: Add `conduit client unbind --json` in v0.1.14
-    return { error: 'Binding deletion via CLI not yet implemented' }
+  // conduit client unbind <instance-id> --client <client> --json
+  ipcMain.handle('bindings:delete', async (_, instanceId: string, clientId?: string) => {
+    try {
+      const args = ['client', 'unbind', instanceId, '--json']
+      if (clientId) {
+        args.push('--client', clientId)
+      }
+      return await execCLI(args)
+    } catch (err) {
+      return { error: (err as Error).message }
+    }
   })
 
   // ═══════════════════════════════════════════════════════════════

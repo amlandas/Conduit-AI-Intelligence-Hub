@@ -141,6 +141,8 @@ VS Code, Gemini CLI, and more.`,
 	rootCmd.AddCommand(removeCmd())
 	rootCmd.AddCommand(createCmd())
 	rootCmd.AddCommand(statsCmd())
+	rootCmd.AddCommand(permissionsCmd())
+	rootCmd.AddCommand(auditCmd())
 	rootCmd.AddCommand(logsCmd())
 	rootCmd.AddCommand(clientCmd())
 	rootCmd.AddCommand(kbCmd())
@@ -1941,6 +1943,127 @@ Examples:
 	return cmd
 }
 
+// permissionsCmd manages instance permissions (Advanced Mode)
+func permissionsCmd() *cobra.Command {
+	var setPermission string
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "permissions <instance-id>",
+		Short: "Get or set instance permissions (Advanced Mode)",
+		Long: `View or modify permissions for a connector instance.
+
+Permissions control what operations an instance can perform.
+This is an Advanced Mode feature for fine-grained access control.
+
+Examples:
+  conduit permissions abc123
+  conduit permissions abc123 --set "filesystem.read=true"
+  conduit permissions abc123 --json   # JSON output for GUI
+
+NOTE: This feature requires daemon API support (coming in future release).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instanceID := args[0]
+
+			// NOTE: Daemon API for permissions doesn't exist yet
+			// Return a structured response indicating feature is planned
+			if setPermission != "" {
+				// Setting permissions
+				if jsonOutput {
+					result := map[string]interface{}{
+						"success":      false,
+						"instance_id":  instanceID,
+						"error":        "Permission management API not yet implemented in daemon",
+						"feature_note": "This feature is planned for a future release",
+					}
+					jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+					fmt.Println(string(jsonBytes))
+					return nil
+				}
+				fmt.Printf("⚠️  Permission management is not yet implemented\n")
+				fmt.Printf("    Instance: %s\n", instanceID)
+				fmt.Printf("    This feature is planned for a future release.\n")
+				return nil
+			}
+
+			// Getting permissions
+			if jsonOutput {
+				result := map[string]interface{}{
+					"success":      false,
+					"instance_id":  instanceID,
+					"permissions":  []interface{}{},
+					"error":        "Permission management API not yet implemented in daemon",
+					"feature_note": "This feature is planned for a future release",
+				}
+				jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Println(string(jsonBytes))
+				return nil
+			}
+
+			fmt.Printf("⚠️  Permission management is not yet implemented\n")
+			fmt.Printf("    Instance: %s\n", instanceID)
+			fmt.Printf("    This feature is planned for a future release.\n")
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&setPermission, "set", "", "Set permission (format: permission.name=true/false)")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
+}
+
+// auditCmd shows instance access audit logs (Advanced Mode)
+func auditCmd() *cobra.Command {
+	var limit int
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
+		Use:   "audit <instance-id>",
+		Short: "Show instance audit logs (Advanced Mode)",
+		Long: `View audit logs for a connector instance.
+
+Audit logs track all access and operations performed by the instance.
+This is an Advanced Mode feature for security monitoring.
+
+Examples:
+  conduit audit abc123
+  conduit audit abc123 --limit 50
+  conduit audit abc123 --json   # JSON output for GUI
+
+NOTE: This feature requires daemon API support (coming in future release).`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			instanceID := args[0]
+
+			// NOTE: Daemon API for audit doesn't exist yet
+			// Return a structured response indicating feature is planned
+			if jsonOutput {
+				result := map[string]interface{}{
+					"success":      false,
+					"instance_id":  instanceID,
+					"audit_logs":   []interface{}{},
+					"error":        "Audit log API not yet implemented in daemon",
+					"feature_note": "This feature is planned for a future release",
+				}
+				jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Println(string(jsonBytes))
+				return nil
+			}
+
+			fmt.Printf("⚠️  Audit logging is not yet implemented\n")
+			fmt.Printf("    Instance: %s\n", instanceID)
+			fmt.Printf("    Limit: %d entries\n", limit)
+			fmt.Printf("    This feature is planned for a future release.\n")
+			return nil
+		},
+	}
+
+	cmd.Flags().IntVar(&limit, "limit", 100, "Maximum number of audit entries to show")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
+}
+
 // createCmd creates a new connector instance
 func createCmd() *cobra.Command {
 	var name string
@@ -2109,6 +2232,7 @@ func clientListCmd() *cobra.Command {
 func clientBindCmd() *cobra.Command {
 	var clientID string
 	var scope string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:   "bind <instance-id>",
@@ -2120,7 +2244,8 @@ allowing the AI client to access the connector.
 
 Examples:
   conduit client bind my-server --client claude-code
-  conduit client bind abc123 --client cursor --scope user`,
+  conduit client bind abc123 --client cursor --scope user
+  conduit client bind my-server --json   # JSON output for GUI`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			instanceID := args[0]
@@ -2140,6 +2265,11 @@ Examples:
 
 			data, err := c.post("/api/v1/bindings", req)
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"%s"}`, err.Error())
+					fmt.Println()
+					return nil
+				}
 				return fmt.Errorf("bind failed: %w", err)
 			}
 
@@ -2148,10 +2278,29 @@ Examples:
 
 			if errData, ok := resp["error"]; ok {
 				errMap := errData.(map[string]interface{})
-				return fmt.Errorf("%s", errMap["message"])
+				errMsg := fmt.Sprintf("%s", errMap["message"])
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"%s"}`, errMsg)
+					fmt.Println()
+					return nil
+				}
+				return fmt.Errorf("%s", errMsg)
 			}
 
 			bindingID := resp["binding_id"].(string)
+
+			if jsonOutput {
+				result := map[string]interface{}{
+					"success":     true,
+					"binding_id":  bindingID,
+					"instance_id": instanceID,
+					"client_id":   clientID,
+					"scope":       scope,
+				}
+				jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Println(string(jsonBytes))
+				return nil
+			}
 
 			fmt.Printf("✓ Bound instance %s to %s\n", instanceID, clientID)
 			fmt.Printf("  Binding ID: %s\n", bindingID)
@@ -2165,12 +2314,14 @@ Examples:
 
 	cmd.Flags().StringVarP(&clientID, "client", "c", "claude-code", "Client to bind to")
 	cmd.Flags().StringVarP(&scope, "scope", "s", "project", "Binding scope: project, user, workspace")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
 
 	return cmd
 }
 
 func clientUnbindCmd() *cobra.Command {
 	var clientID string
+	var jsonOutput bool
 
 	cmd := &cobra.Command{
 		Use:   "unbind <instance-id>",
@@ -2181,7 +2332,8 @@ This removes the MCP server configuration from the client's config file.
 
 Examples:
   conduit client unbind my-server --client claude-code
-  conduit client unbind abc123 --client cursor`,
+  conduit client unbind abc123 --client cursor
+  conduit client unbind my-server --json   # JSON output for GUI`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			instanceID := args[0]
@@ -2195,6 +2347,11 @@ Examples:
 			// Find the binding
 			data, err := c.get("/api/v1/bindings")
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"%s"}`, err.Error())
+					fmt.Println()
+					return nil
+				}
 				return fmt.Errorf("list bindings: %w", err)
 			}
 
@@ -2213,12 +2370,35 @@ Examples:
 			}
 
 			if bindingID == "" {
-				return fmt.Errorf("no binding found for instance %s and client %s", instanceID, clientID)
+				errMsg := fmt.Sprintf("no binding found for instance %s and client %s", instanceID, clientID)
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"%s"}`, errMsg)
+					fmt.Println()
+					return nil
+				}
+				return fmt.Errorf("%s", errMsg)
 			}
 
 			// Delete the binding
 			if err := c.delete("/api/v1/bindings/" + bindingID); err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"%s"}`, err.Error())
+					fmt.Println()
+					return nil
+				}
 				return fmt.Errorf("unbind failed: %w", err)
+			}
+
+			if jsonOutput {
+				result := map[string]interface{}{
+					"success":     true,
+					"binding_id":  bindingID,
+					"instance_id": instanceID,
+					"client_id":   clientID,
+				}
+				jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Println(string(jsonBytes))
+				return nil
 			}
 
 			fmt.Printf("✓ Unbound instance %s from %s\n", instanceID, clientID)
@@ -2230,19 +2410,33 @@ Examples:
 	}
 
 	cmd.Flags().StringVarP(&clientID, "client", "c", "claude-code", "Client to unbind from")
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
 
 	return cmd
 }
 
 func clientBindingsCmd() *cobra.Command {
-	return &cobra.Command{
+	var jsonOutput bool
+
+	cmd := &cobra.Command{
 		Use:   "bindings [instance-id]",
 		Short: "List bindings for an instance or all bindings",
+		Long: `List all client bindings or filter by instance.
+
+Examples:
+  conduit client bindings
+  conduit client bindings abc123
+  conduit client bindings --json   # JSON output for GUI`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			c := newClient(socketPath)
 
 			data, err := c.get("/api/v1/bindings")
 			if err != nil {
+				if jsonOutput {
+					fmt.Printf(`{"success":false,"error":"%s","bindings":[]}`, err.Error())
+					fmt.Println()
+					return nil
+				}
 				return fmt.Errorf("list bindings: %w", err)
 			}
 
@@ -2251,15 +2445,34 @@ func clientBindingsCmd() *cobra.Command {
 
 			bindings, _ := resp["bindings"].([]interface{})
 
-			if len(bindings) == 0 {
-				fmt.Println("No bindings configured")
-				return nil
-			}
-
 			// Filter by instance if provided
 			var filterInstance string
 			if len(args) > 0 {
 				filterInstance = args[0]
+			}
+
+			var filteredBindings []interface{}
+			for _, b := range bindings {
+				binding := b.(map[string]interface{})
+				instanceID, _ := binding["instance_id"].(string)
+				if filterInstance == "" || strings.HasPrefix(instanceID, filterInstance) {
+					filteredBindings = append(filteredBindings, binding)
+				}
+			}
+
+			if jsonOutput {
+				result := map[string]interface{}{
+					"success":  true,
+					"bindings": filteredBindings,
+				}
+				jsonBytes, _ := json.MarshalIndent(result, "", "  ")
+				fmt.Println(string(jsonBytes))
+				return nil
+			}
+
+			if len(filteredBindings) == 0 {
+				fmt.Println("No bindings configured")
+				return nil
 			}
 
 			fmt.Println("Client Bindings")
@@ -2267,16 +2480,11 @@ func clientBindingsCmd() *cobra.Command {
 			fmt.Printf("%-12s %-15s %-12s %-10s\n", "BINDING", "CLIENT", "INSTANCE", "SCOPE")
 			fmt.Println("───────────────────────────────────────────────────────")
 
-			for _, b := range bindings {
+			for _, b := range filteredBindings {
 				binding := b.(map[string]interface{})
-				instanceID := binding["instance_id"].(string)
-
-				if filterInstance != "" && !strings.HasPrefix(instanceID, filterInstance) {
-					continue
-				}
-
 				bindingID := binding["binding_id"].(string)
 				clientID := binding["client_id"].(string)
+				instanceID := binding["instance_id"].(string)
 				scope := binding["scope"].(string)
 
 				fmt.Printf("%-12s %-15s %-12s %-10s\n",
@@ -2290,6 +2498,9 @@ func clientBindingsCmd() *cobra.Command {
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
+	return cmd
 }
 
 // kbCmd is the parent command for knowledge base operations
