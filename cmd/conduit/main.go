@@ -3936,19 +3936,24 @@ After installation, enable semantic search with:
 }
 
 // detectContainerRuntimeCascading tries Podman first (with machine start on macOS), then Docker
+// Uses full binary paths to work correctly when called from Electron (no PATH)
 func detectContainerRuntimeCascading(ctx context.Context, mgr *kb.QdrantManager) (string, error) {
+	// Get full paths for binaries
+	podmanPath := findBinaryPath("podman")
+	dockerPath := findBinaryPath("docker")
+
 	// Try Podman first
-	if commandExists("podman") {
+	if podmanPath != "" {
 		if runtime.GOOS == "darwin" {
 			// Check if Podman machine is running
-			out, err := exec.CommandContext(ctx, "podman", "machine", "list", "--format", "{{.Running}}").Output()
+			out, err := exec.CommandContext(ctx, podmanPath, "machine", "list", "--format", "{{.Running}}").Output()
 			if err == nil && strings.Contains(string(out), "true") {
-				mgr.SetContainerRuntime("podman")
+				mgr.SetContainerRuntime(podmanPath)
 				return "podman", nil
 			}
 
 			// Machine exists but not running
-			out, _ = exec.CommandContext(ctx, "podman", "machine", "list", "--format", "{{.Name}}").Output()
+			out, _ = exec.CommandContext(ctx, podmanPath, "machine", "list", "--format", "{{.Name}}").Output()
 			if len(strings.TrimSpace(string(out))) > 0 {
 				fmt.Println("Podman machine exists but is not running.")
 				fmt.Print("Start Podman machine now? [Y/n]: ")
@@ -3958,14 +3963,14 @@ func detectContainerRuntimeCascading(ctx context.Context, mgr *kb.QdrantManager)
 
 				if input == "" || input == "y" || input == "yes" {
 					fmt.Println("Starting Podman machine...")
-					startCmd := exec.CommandContext(ctx, "podman", "machine", "start")
+					startCmd := exec.CommandContext(ctx, podmanPath, "machine", "start")
 					startCmd.Stdout = os.Stdout
 					startCmd.Stderr = os.Stderr
 					if err := startCmd.Run(); err != nil {
 						fmt.Printf("⚠ Failed to start Podman machine: %v\n", err)
 						fmt.Println("Trying Docker as fallback...")
 					} else {
-						mgr.SetContainerRuntime("podman")
+						mgr.SetContainerRuntime(podmanPath)
 						return "podman", nil
 					}
 				}
@@ -3979,20 +3984,20 @@ func detectContainerRuntimeCascading(ctx context.Context, mgr *kb.QdrantManager)
 
 				if input == "" || input == "y" || input == "yes" {
 					fmt.Println("Initializing Podman machine...")
-					initCmd := exec.CommandContext(ctx, "podman", "machine", "init")
+					initCmd := exec.CommandContext(ctx, podmanPath, "machine", "init")
 					initCmd.Stdout = os.Stdout
 					initCmd.Stderr = os.Stderr
 					if err := initCmd.Run(); err != nil {
 						fmt.Printf("⚠ Failed to initialize Podman machine: %v\n", err)
 					} else {
 						fmt.Println("Starting Podman machine...")
-						startCmd := exec.CommandContext(ctx, "podman", "machine", "start")
+						startCmd := exec.CommandContext(ctx, podmanPath, "machine", "start")
 						startCmd.Stdout = os.Stdout
 						startCmd.Stderr = os.Stderr
 						if err := startCmd.Run(); err != nil {
 							fmt.Printf("⚠ Failed to start Podman machine: %v\n", err)
 						} else {
-							mgr.SetContainerRuntime("podman")
+							mgr.SetContainerRuntime(podmanPath)
 							return "podman", nil
 						}
 					}
@@ -4001,19 +4006,19 @@ func detectContainerRuntimeCascading(ctx context.Context, mgr *kb.QdrantManager)
 			}
 		} else {
 			// Linux: Podman works natively
-			testCmd := exec.CommandContext(ctx, "podman", "ps")
+			testCmd := exec.CommandContext(ctx, podmanPath, "ps")
 			if testCmd.Run() == nil {
-				mgr.SetContainerRuntime("podman")
+				mgr.SetContainerRuntime(podmanPath)
 				return "podman", nil
 			}
 		}
 	}
 
 	// Fallback to Docker
-	if commandExists("docker") {
-		testCmd := exec.CommandContext(ctx, "docker", "ps")
+	if dockerPath != "" {
+		testCmd := exec.CommandContext(ctx, dockerPath, "ps")
 		if testCmd.Run() == nil {
-			mgr.SetContainerRuntime("docker")
+			mgr.SetContainerRuntime(dockerPath)
 			return "docker", nil
 		}
 		fmt.Println("Docker is installed but not running.")
@@ -4022,10 +4027,9 @@ func detectContainerRuntimeCascading(ctx context.Context, mgr *kb.QdrantManager)
 	return "", fmt.Errorf("neither Podman nor Docker is available and working")
 }
 
-// commandExists checks if a command is available in PATH
+// commandExists checks if a command is available in PATH or known locations
 func commandExists(cmd string) bool {
-	_, err := exec.LookPath(cmd)
-	return err == nil
+	return findBinaryPath(cmd) != ""
 }
 
 // qdrantStartCmd starts an existing Qdrant container
@@ -4431,22 +4435,27 @@ After installation, enable KAG with:
 				return fmt.Errorf("create data directory: %w", err)
 			}
 
-			// Detect container runtime
-			runtime := preferRuntime
-			if runtime == "" {
-				if commandExists("podman") {
-					runtime = "podman"
-				} else if commandExists("docker") {
-					runtime = "docker"
+			// Detect container runtime - use full path to work from Electron
+			var runtimePath string
+			if preferRuntime != "" {
+				runtimePath = findBinaryPath(preferRuntime)
+				if runtimePath == "" {
+					return fmt.Errorf("specified runtime %s not found", preferRuntime)
+				}
+			} else {
+				if podmanPath := findBinaryPath("podman"); podmanPath != "" {
+					runtimePath = podmanPath
+				} else if dockerPath := findBinaryPath("docker"); dockerPath != "" {
+					runtimePath = dockerPath
 				} else {
 					return fmt.Errorf("no container runtime available.\n\nInstall Podman or Docker first:\n  brew install podman && podman machine init && podman machine start")
 				}
 			}
-			fmt.Printf("Using %s as container runtime\n", runtime)
+			fmt.Printf("Using %s as container runtime\n", filepath.Base(runtimePath))
 
 			// Pull FalkorDB image
 			fmt.Println("Pulling FalkorDB image...")
-			pullCmd := exec.CommandContext(ctx, runtime, "pull", "falkordb/falkordb:latest")
+			pullCmd := exec.CommandContext(ctx, runtimePath, "pull", "falkordb/falkordb:latest")
 			pullCmd.Stdout = os.Stdout
 			pullCmd.Stderr = os.Stderr
 			if err := pullCmd.Run(); err != nil {
@@ -4454,8 +4463,8 @@ After installation, enable KAG with:
 			}
 
 			// Stop and remove existing container if any
-			exec.CommandContext(ctx, runtime, "stop", "conduit-falkordb").Run()
-			exec.CommandContext(ctx, runtime, "rm", "conduit-falkordb").Run()
+			exec.CommandContext(ctx, runtimePath, "stop", "conduit-falkordb").Run()
+			exec.CommandContext(ctx, runtimePath, "rm", "conduit-falkordb").Run()
 
 			// Create and start container
 			fmt.Println("Starting FalkorDB container...")
@@ -4467,7 +4476,7 @@ After installation, enable KAG with:
 				"--restart", "unless-stopped",
 				"falkordb/falkordb:latest",
 			}
-			runCmd := exec.CommandContext(ctx, runtime, runArgs...)
+			runCmd := exec.CommandContext(ctx, runtimePath, runArgs...)
 			if output, err := runCmd.CombinedOutput(); err != nil {
 				return fmt.Errorf("start container: %w\n%s", err, string(output))
 			}
@@ -4476,7 +4485,7 @@ After installation, enable KAG with:
 			fmt.Println("Waiting for FalkorDB to be ready...")
 			for i := 0; i < 30; i++ {
 				time.Sleep(time.Second)
-				checkCmd := exec.CommandContext(ctx, runtime, "exec", "conduit-falkordb", "redis-cli", "PING")
+				checkCmd := exec.CommandContext(ctx, runtimePath, "exec", "conduit-falkordb", "redis-cli", "PING")
 				if output, err := checkCmd.Output(); err == nil && strings.TrimSpace(string(output)) == "PONG" {
 					fmt.Println()
 					fmt.Println("✓ FalkorDB installed and running")
@@ -4503,12 +4512,15 @@ func falkordbStartCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			runtime := "podman"
-			if !commandExists("podman") {
-				runtime = "docker"
+			runtimePath := findBinaryPath("podman")
+			if runtimePath == "" {
+				runtimePath = findBinaryPath("docker")
+			}
+			if runtimePath == "" {
+				return fmt.Errorf("no container runtime available")
 			}
 
-			startCmd := exec.CommandContext(ctx, runtime, "start", "conduit-falkordb")
+			startCmd := exec.CommandContext(ctx, runtimePath, "start", "conduit-falkordb")
 			if err := startCmd.Run(); err != nil {
 				return fmt.Errorf("start container: %w\n\nContainer may not exist. Run: conduit falkordb install", err)
 			}
@@ -4526,12 +4538,15 @@ func falkordbStopCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			runtime := "podman"
-			if !commandExists("podman") {
-				runtime = "docker"
+			runtimePath := findBinaryPath("podman")
+			if runtimePath == "" {
+				runtimePath = findBinaryPath("docker")
+			}
+			if runtimePath == "" {
+				return fmt.Errorf("no container runtime available")
 			}
 
-			stopCmd := exec.CommandContext(ctx, runtime, "stop", "conduit-falkordb")
+			stopCmd := exec.CommandContext(ctx, runtimePath, "stop", "conduit-falkordb")
 			if err := stopCmd.Run(); err != nil {
 				return fmt.Errorf("stop container: %w", err)
 			}
@@ -4551,13 +4566,19 @@ func falkordbStatusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
-			runtime := "podman"
-			if !commandExists("podman") {
-				runtime = "docker"
+			runtimePath := findBinaryPath("podman")
+			if runtimePath == "" {
+				runtimePath = findBinaryPath("docker")
+			}
+			if runtimePath == "" {
+				fmt.Println("FalkorDB Status")
+				fmt.Println("═══════════════════════════════════════")
+				fmt.Println("Container:    ✗ no container runtime available")
+				return nil
 			}
 
 			// Check container status
-			inspectCmd := exec.CommandContext(ctx, runtime, "inspect", "--format", "{{.State.Status}}", "conduit-falkordb")
+			inspectCmd := exec.CommandContext(ctx, runtimePath, "inspect", "--format", "{{.State.Status}}", "conduit-falkordb")
 			output, err := inspectCmd.Output()
 			if err != nil {
 				fmt.Println("FalkorDB Status")
@@ -4576,14 +4597,14 @@ func falkordbStatusCmd() *cobra.Command {
 				fmt.Println("Container:    ✓ running")
 
 				// Check if FalkorDB responds
-				pingCmd := exec.CommandContext(ctx, runtime, "exec", "conduit-falkordb", "redis-cli", "PING")
+				pingCmd := exec.CommandContext(ctx, runtimePath, "exec", "conduit-falkordb", "redis-cli", "PING")
 				if pingOutput, err := pingCmd.Output(); err == nil && strings.TrimSpace(string(pingOutput)) == "PONG" {
 					fmt.Println("API:          ✓ responding")
 
 					// Get graph stats if verbose
 					if verbose {
 						// Get list of graphs
-						graphCmd := exec.CommandContext(ctx, runtime, "exec", "conduit-falkordb", "redis-cli", "GRAPH.LIST")
+						graphCmd := exec.CommandContext(ctx, runtimePath, "exec", "conduit-falkordb", "redis-cli", "GRAPH.LIST")
 						if graphOutput, err := graphCmd.Output(); err == nil {
 							graphs := strings.TrimSpace(string(graphOutput))
 							if graphs != "" {
