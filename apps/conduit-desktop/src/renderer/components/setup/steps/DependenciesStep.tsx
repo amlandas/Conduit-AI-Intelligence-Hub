@@ -256,7 +256,7 @@ export function DependenciesStep(): JSX.Element {
 
           {/* Optional dependencies */}
           <div className="space-y-3">
-            <h3 className="text-sm font-medium text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+            <h3 className="text-sm font-medium text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
               Optional (enables auto-install)
             </h3>
             {OPTIONAL_DEPENDENCIES.map((dep) => {
@@ -292,7 +292,7 @@ export function DependenciesStep(): JSX.Element {
                 </div>
                 <button
                   onClick={() => setLocateError(null)}
-                  className="text-macos-text-tertiary hover:text-macos-text-primary"
+                  className="text-macos-text-tertiary dark:text-macos-text-dark-tertiary hover:text-macos-text-primary"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -344,7 +344,7 @@ export function DependenciesStep(): JSX.Element {
             'flex items-center gap-2 px-6 py-2 rounded-lg font-medium transition-colors',
             requiredMet
               ? 'bg-macos-blue text-white hover:bg-macos-blue/90'
-              : 'bg-macos-bg-tertiary text-macos-text-tertiary cursor-not-allowed'
+              : 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-tertiary dark:text-macos-text-dark-tertiary cursor-not-allowed'
           )}
         >
           Continue
@@ -425,7 +425,7 @@ function DependencyRow({
       {dependency.installed ? (
         <CheckCircle className="w-5 h-5 text-macos-green flex-shrink-0" />
       ) : isOptional ? (
-        <AlertCircle className="w-5 h-5 text-macos-text-tertiary flex-shrink-0" />
+        <AlertCircle className="w-5 h-5 text-macos-text-tertiary dark:text-macos-text-dark-tertiary flex-shrink-0" />
       ) : (
         <XCircle className="w-5 h-5 text-macos-orange flex-shrink-0" />
       )}
@@ -436,10 +436,10 @@ function DependencyRow({
           {dependency.name}
         </p>
         {dependency.installed && dependency.version && (
-          <p className="text-xs text-macos-text-tertiary">{dependency.version}</p>
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">{dependency.version}</p>
         )}
         {dependency.installed && dependency.binaryPath && (
-          <p className="text-xs text-macos-text-tertiary truncate" title={dependency.binaryPath}>
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary truncate" title={dependency.binaryPath}>
             {dependency.binaryPath}
           </p>
         )}
@@ -456,7 +456,7 @@ function DependencyRow({
               className={cn(
                 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
                 isAnyOperationActive
-                  ? 'bg-macos-bg-tertiary text-macos-text-tertiary cursor-not-allowed'
+                  ? 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-tertiary dark:text-macos-text-dark-tertiary cursor-not-allowed'
                   : 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-primary dark:text-macos-text-dark-primary hover:bg-macos-bg-secondary dark:hover:bg-macos-bg-dark-secondary'
               )}
               title="Locate the binary manually if auto-detection fails"
@@ -483,7 +483,7 @@ function DependencyRow({
               className={cn(
                 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
                 isAnyOperationActive
-                  ? 'bg-macos-bg-tertiary text-macos-text-tertiary cursor-not-allowed'
+                  ? 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-tertiary dark:text-macos-text-dark-tertiary cursor-not-allowed'
                   : 'bg-macos-blue text-white hover:bg-macos-blue/90'
               )}
               title="Automatically download and install"
@@ -501,7 +501,7 @@ function DependencyRow({
               className={cn(
                 'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
                 isAnyOperationActive
-                  ? 'bg-macos-bg-tertiary text-macos-text-tertiary cursor-not-allowed'
+                  ? 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-tertiary dark:text-macos-text-dark-tertiary cursor-not-allowed'
                   : 'bg-macos-blue text-white hover:bg-macos-blue/90'
               )}
             >
@@ -526,7 +526,7 @@ function DependencyRow({
             className={cn(
               'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-colors',
               isAnyOperationActive
-                ? 'bg-macos-bg-tertiary text-macos-text-tertiary cursor-not-allowed'
+                ? 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-tertiary dark:text-macos-text-dark-tertiary cursor-not-allowed'
                 : 'bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-macos-text-primary dark:text-macos-text-dark-primary hover:bg-macos-bg-secondary dark:hover:bg-macos-bg-dark-secondary'
             )}
             title="Open download page in browser"

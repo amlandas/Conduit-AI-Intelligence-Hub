@@ -31,15 +31,31 @@ export default function App(): JSX.Element {
   const { updateInstance, addInstance, removeInstance, refresh: refreshInstances } = useInstancesStore()
   const { addSource, removeSource, updateSource, setSyncing, refresh: refreshKB } = useKBStore()
 
-  // Apply theme
+  // Apply theme with system preference detection and live updates
   useEffect(() => {
     const root = document.documentElement
-    if (theme === 'system') {
-      const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-      root.classList.toggle('dark', isDark)
-    } else {
-      root.classList.toggle('dark', theme === 'dark')
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+
+    const applyTheme = (): void => {
+      if (theme === 'system') {
+        root.classList.toggle('dark', mediaQuery.matches)
+      } else {
+        root.classList.toggle('dark', theme === 'dark')
+      }
     }
+
+    // Apply immediately
+    applyTheme()
+
+    // Listen for system theme changes when using 'system' theme
+    const handleChange = (): void => {
+      if (theme === 'system') {
+        applyTheme()
+      }
+    }
+
+    mediaQuery.addEventListener('change', handleChange)
+    return () => mediaQuery.removeEventListener('change', handleChange)
   }, [theme])
 
   // Listen for menu navigation

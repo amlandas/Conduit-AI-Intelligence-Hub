@@ -113,7 +113,7 @@ export function CompleteStep(): JSX.Element {
           >
             <BookOpen className="w-4 h-4" />
             Documentation
-            <ExternalLink className="w-3 h-3 text-macos-text-tertiary" />
+            <ExternalLink className="w-3 h-3 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
           </button>
           <button
             onClick={handleOpenTerminal}
@@ -126,7 +126,7 @@ export function CompleteStep(): JSX.Element {
       </div>
 
       {/* Footer note */}
-      <p className="text-xs text-center text-macos-text-tertiary">
+      <p className="text-xs text-center text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
         You can re-run setup anytime from Settings → Run Setup Wizard
       </p>
     </div>

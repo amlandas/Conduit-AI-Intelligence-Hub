@@ -128,7 +128,7 @@ export function UpdateBanner({ className }: UpdateBannerProps): JSX.Element | nu
             <span className="text-sm text-macos-text-secondary">
               Downloading update v{status.version}...
             </span>
-            <span className="text-xs text-macos-text-tertiary">
+            <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
               {Math.round(status.progress)}%
             </span>
           </div>
@@ -256,7 +256,7 @@ export function CheckUpdatesButton({ className }: CheckUpdatesButtonProps): JSX.
         {checking ? 'Checking...' : 'Check for Updates'}
       </button>
       {lastCheck && (
-        <span className="text-xs text-macos-text-tertiary">
+        <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
           Last checked: {lastCheck}
         </span>
       )}

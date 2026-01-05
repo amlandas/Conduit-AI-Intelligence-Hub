@@ -99,10 +99,10 @@ export function OllamaModels(): JSX.Element {
         </h3>
         {loading ? (
           <div className="flex items-center justify-center py-4">
-            <Loader2 className="w-5 h-5 animate-spin text-macos-text-tertiary" />
+            <Loader2 className="w-5 h-5 animate-spin text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
           </div>
         ) : models.length === 0 ? (
-          <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary py-2">
+          <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary py-2">
             No models installed. Pull a model below to get started.
           </p>
         ) : (
@@ -115,7 +115,7 @@ export function OllamaModels(): JSX.Element {
                 <Cpu className="w-4 h-4 text-macos-purple flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium truncate">{model.name}</p>
-                  <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+                  <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
                     {model.size}
                   </p>
                 </div>
@@ -149,7 +149,7 @@ export function OllamaModels(): JSX.Element {
                 <Cpu className="w-4 h-4 text-macos-blue flex-shrink-0" />
                 <div className="flex-1 min-w-0">
                   <p className="text-sm font-medium">{model.name}</p>
-                  <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+                  <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
                     {model.purpose} · {model.size}
                   </p>
                 </div>

@@ -107,7 +107,7 @@ function AuditIssueItem({ issue }: { issue: AuditIssue }): JSX.Element {
       <div className="flex-1 min-w-0">
         <p className="text-sm">{issue.message}</p>
         {issue.permission && (
-          <p className="text-xs text-macos-text-tertiary mt-0.5">
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary mt-0.5">
             Permission: {issue.permission}
           </p>
         )}
@@ -329,7 +329,7 @@ export function ConnectorPermissions({
                 Audit {auditResult.passed ? 'Passed' : 'Warnings'}
               </span>
             </div>
-            <span className="text-xs text-macos-text-tertiary">
+            <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
               {new Date(auditResult.timestamp).toLocaleTimeString()}
             </span>
           </div>
@@ -361,9 +361,9 @@ export function ConnectorPermissions({
               >
                 <div className="flex items-center gap-2">
                   {isExpanded ? (
-                    <ChevronDown className="w-4 h-4 text-macos-text-tertiary" />
+                    <ChevronDown className="w-4 h-4 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
                   ) : (
-                    <ChevronRight className="w-4 h-4 text-macos-text-tertiary" />
+                    <ChevronRight className="w-4 h-4 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
                   )}
                   <categoryInfo.icon className="w-4 h-4 text-macos-text-secondary" />
                   <span className="font-medium text-sm">{categoryInfo.label}</span>
@@ -390,7 +390,7 @@ export function ConnectorPermissions({
 
       {/* Footer */}
       <div className="px-4 py-3 bg-macos-bg-secondary/30 dark:bg-macos-bg-dark-tertiary/30 border-t border-macos-separator dark:border-macos-separator-dark">
-        <p className="text-xs text-macos-text-tertiary">
+        <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
           Permissions follow the principle of least privilege. Only grant what's necessary.
         </p>
       </div>

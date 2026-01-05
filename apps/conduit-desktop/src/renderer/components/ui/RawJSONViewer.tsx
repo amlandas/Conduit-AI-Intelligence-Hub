@@ -35,9 +35,9 @@ export function RawJSONViewer({
       >
         <div className="flex items-center gap-2">
           {expanded ? (
-            <ChevronDown className="w-4 h-4 text-macos-text-tertiary" />
+            <ChevronDown className="w-4 h-4 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
           ) : (
-            <ChevronRight className="w-4 h-4 text-macos-text-tertiary" />
+            <ChevronRight className="w-4 h-4 text-macos-text-tertiary dark:text-macos-text-dark-tertiary" />
           )}
           <Code className="w-4 h-4 text-macos-purple" />
           <span className="text-sm font-medium">{title}</span>

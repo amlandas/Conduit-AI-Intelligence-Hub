@@ -187,7 +187,7 @@ export function ServicesStep(): JSX.Element {
           {/* Info about FalkorDB */}
           {!falkordbRunning && (
             <div className="p-3 rounded-lg bg-macos-bg-tertiary/50 dark:bg-macos-bg-dark-tertiary/50">
-              <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+              <p className="text-sm text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
                 <strong>Note:</strong> FalkorDB is optional. It enables Knowledge Graph (KAG) features
                 for advanced entity extraction. You can start it later from the dashboard.
               </p>
@@ -280,10 +280,10 @@ function ServiceRow({ service, isStarting, onStart }: ServiceRowProps): JSX.Elem
           )}
         </div>
         {service.running && service.port && (
-          <p className="text-xs text-macos-text-tertiary">Port {service.port}</p>
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">Port {service.port}</p>
         )}
         {service.container && (
-          <p className="text-xs text-macos-text-tertiary">Container: {service.container}</p>
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">Container: {service.container}</p>
         )}
         {service.error && <p className="text-xs text-macos-red">{service.error}</p>}
       </div>

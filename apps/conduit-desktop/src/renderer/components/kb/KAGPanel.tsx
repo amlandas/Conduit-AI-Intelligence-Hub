@@ -75,7 +75,7 @@ function EntityNode({ entity }: { entity: Entity }): JSX.Element {
       <Circle className={cn('w-3 h-3 flex-shrink-0', color.replace('bg-', 'text-'))} fill="currentColor" />
       <div className="flex-1 min-w-0">
         <p className="text-sm font-medium truncate">{entity.name}</p>
-        <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+        <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary">
           {entity.type} · {(entity.confidence * 100).toFixed(0)}%
         </p>
       </div>
@@ -360,7 +360,7 @@ export function KAGPanel({ className, showSettings = false }: KAGPanelProps): JS
           <div className="text-center py-6 text-macos-text-secondary dark:text-macos-text-dark-secondary">
             <Network className="w-10 h-10 mx-auto mb-2 opacity-50" />
             <p className="text-sm">Search for entities and explore relationships</p>
-            <p className="text-xs text-macos-text-tertiary mt-1">
+            <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary mt-1">
               Try searching for concepts, people, or technologies
             </p>
           </div>

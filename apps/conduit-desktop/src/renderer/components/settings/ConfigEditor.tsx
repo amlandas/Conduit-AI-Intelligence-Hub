@@ -276,7 +276,7 @@ export function ConfigEditor({ className }: ConfigEditorProps): JSX.Element {
       </div>
 
       {/* Footer */}
-      <div className="px-4 py-2 border-t border-macos-separator dark:border-macos-separator-dark bg-macos-bg-secondary/30 dark:bg-macos-bg-dark-tertiary/30 text-xs text-macos-text-tertiary">
+      <div className="px-4 py-2 border-t border-macos-separator dark:border-macos-separator-dark bg-macos-bg-secondary/30 dark:bg-macos-bg-dark-tertiary/30 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
         <div className="flex items-center justify-between">
           <span>YAML Configuration</span>
           <span>~/.conduit/conduit.yaml</span>

@@ -119,7 +119,7 @@ function StepIndicator({
         >
           {step.title}
         </p>
-        <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary truncate">
+        <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary truncate">
           {step.description}
         </p>
       </div>

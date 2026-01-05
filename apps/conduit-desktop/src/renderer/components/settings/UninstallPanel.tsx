@@ -127,7 +127,7 @@ function TierOption({
           <p className="mt-0.5 text-sm text-macos-text-secondary dark:text-macos-text-dark-secondary">
             {description}
           </p>
-          <ul className="mt-2 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary space-y-0.5">
+          <ul className="mt-2 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary space-y-0.5">
             {details.map((detail, i) => (
               <li key={i} className="flex items-center gap-1">
                 <span className={cn(detail.startsWith('+') ? 'text-macos-red' : '')}>
@@ -218,7 +218,7 @@ function ConfirmationModal({
                   <span>
                     Ollama ({info.ollamaSize})
                     {info.ollamaModels.length > 0 && (
-                      <span className="text-macos-text-tertiary">
+                      <span className="text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                         {' '}
                         - {info.ollamaModels.slice(0, 3).join(', ')}
                         {info.ollamaModels.length > 3 && ` +${info.ollamaModels.length - 3} more`}
@@ -461,7 +461,7 @@ export function UninstallPanel(): JSX.Element {
               />
               <span className="text-macos-text-secondary">CLI Binaries</span>
               {info.conduitVersion && (
-                <span className="text-xs text-macos-text-tertiary">{info.conduitVersion}</span>
+                <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">{info.conduitVersion}</span>
               )}
             </div>
 
@@ -478,7 +478,7 @@ export function UninstallPanel(): JSX.Element {
                 )}
               />
               <span className="text-macos-text-secondary">Daemon Service</span>
-              <span className="text-xs text-macos-text-tertiary">
+              <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                 {info.daemonRunning ? 'Running' : info.hasDaemonService ? 'Stopped' : 'Not installed'}
               </span>
             </div>
@@ -493,7 +493,7 @@ export function UninstallPanel(): JSX.Element {
               />
               <span className="text-macos-text-secondary">Data Directory</span>
               {info.dataDirSize && (
-                <span className="text-xs text-macos-text-tertiary">{info.dataDirSize}</span>
+                <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">{info.dataDirSize}</span>
               )}
               {info.hasDataDir && (
                 <button
@@ -520,7 +520,7 @@ export function UninstallPanel(): JSX.Element {
               />
               <span className="text-macos-text-secondary">Qdrant</span>
               {info.hasQdrantContainer && (
-                <span className="text-xs text-macos-text-tertiary">
+                <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                   {info.qdrantVectorCount.toLocaleString()} vectors
                 </span>
               )}
@@ -539,7 +539,7 @@ export function UninstallPanel(): JSX.Element {
                 )}
               />
               <span className="text-macos-text-secondary">FalkorDB</span>
-              <span className="text-xs text-macos-text-tertiary">
+              <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                 {info.hasFalkorDBContainer
                   ? info.falkordbContainerRunning
                     ? 'Running'
@@ -562,7 +562,7 @@ export function UninstallPanel(): JSX.Element {
               />
               <span className="text-macos-text-secondary">Ollama</span>
               {info.hasOllama && info.ollamaSize && (
-                <span className="text-xs text-macos-text-tertiary">
+                <span className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                   {info.ollamaModels.length} models ({info.ollamaSize})
                 </span>
               )}
@@ -647,7 +647,7 @@ export function UninstallPanel(): JSX.Element {
       )}
 
       {/* Notice about Docker/Podman */}
-      <div className="flex items-start gap-2 text-xs text-macos-text-tertiary">
+      <div className="flex items-start gap-2 text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
         <FileCode className="w-4 h-4 shrink-0 mt-0.5" />
         <p>
           Docker and Podman are system tools and will never be removed. Only Conduit-specific

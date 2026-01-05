@@ -212,7 +212,7 @@ export function DaemonControls({ className }: DaemonControlsProps): JSX.Element 
               </button>
             ))}
           </div>
-          <p className="text-xs text-macos-text-tertiary">
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
             {logLevel === 'debug' && 'Verbose output for debugging. May impact performance.'}
             {logLevel === 'info' && 'Standard logging. Shows normal operation details.'}
             {logLevel === 'warn' && 'Only warnings and errors. Recommended for production.'}
@@ -228,19 +228,19 @@ export function DaemonControls({ className }: DaemonControlsProps): JSX.Element 
             </h4>
             <div className="grid grid-cols-2 gap-3 text-sm">
               <div className="p-3 rounded-lg bg-macos-bg-secondary/50 dark:bg-macos-bg-dark-tertiary/50">
-                <p className="text-macos-text-tertiary text-xs">Uptime</p>
+                <p className="text-macos-text-tertiary dark:text-macos-text-dark-tertiary text-xs">Uptime</p>
                 <p className="font-mono">{status.uptime || '—'}</p>
               </div>
               <div className="p-3 rounded-lg bg-macos-bg-secondary/50 dark:bg-macos-bg-dark-tertiary/50">
-                <p className="text-macos-text-tertiary text-xs">Version</p>
+                <p className="text-macos-text-tertiary dark:text-macos-text-dark-tertiary text-xs">Version</p>
                 <p className="font-mono">{status.version || '0.1.0'}</p>
               </div>
               <div className="p-3 rounded-lg bg-macos-bg-secondary/50 dark:bg-macos-bg-dark-tertiary/50">
-                <p className="text-macos-text-tertiary text-xs">PID</p>
+                <p className="text-macos-text-tertiary dark:text-macos-text-dark-tertiary text-xs">PID</p>
                 <p className="font-mono">{status.pid || '—'}</p>
               </div>
               <div className="p-3 rounded-lg bg-macos-bg-secondary/50 dark:bg-macos-bg-dark-tertiary/50">
-                <p className="text-macos-text-tertiary text-xs">Socket</p>
+                <p className="text-macos-text-tertiary dark:text-macos-text-dark-tertiary text-xs">Socket</p>
                 <p className="font-mono truncate">~/.conduit/conduit.sock</p>
               </div>
             </div>

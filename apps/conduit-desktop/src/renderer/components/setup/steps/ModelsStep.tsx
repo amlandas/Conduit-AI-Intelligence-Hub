@@ -239,7 +239,7 @@ export function ModelsStep(): JSX.Element {
                         <p className="font-medium text-macos-text-primary dark:text-macos-text-dark-primary">
                           {model.displayName}
                         </p>
-                        <span className="px-2 py-0.5 rounded-full bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-xs text-macos-text-tertiary">
+                        <span className="px-2 py-0.5 rounded-full bg-macos-bg-tertiary dark:bg-macos-bg-dark-tertiary text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
                           {model.size}
                         </span>
                         {model.installed && (
@@ -259,7 +259,7 @@ export function ModelsStep(): JSX.Element {
                               style={{ width: `${model.progress}%` }}
                             />
                           </div>
-                          <p className="text-xs text-macos-text-tertiary mt-1">
+                          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary mt-1">
                             {model.progress}% downloaded
                           </p>
                         </div>
@@ -316,7 +316,7 @@ export function ModelsStep(): JSX.Element {
           )}
 
           {/* Note about model sizes */}
-          <p className="text-xs text-macos-text-tertiary text-center">
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary text-center">
             Models are stored locally by Ollama. Total download size: ~9 GB
           </p>
         </>
