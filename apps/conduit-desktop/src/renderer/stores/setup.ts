@@ -16,6 +16,9 @@ export interface DependencyStatus {
   required: boolean
   installUrl?: string
   brewFormula?: string
+  binaryPath?: string       // Path where the binary was found
+  customPath?: string       // User-specified custom path (if any)
+  supportsAutoInstall?: boolean  // Whether auto-installation is supported
 }
 
 export interface SetupState {
