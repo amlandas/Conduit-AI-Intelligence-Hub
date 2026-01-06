@@ -1169,17 +1169,28 @@ func statusCmd() *cobra.Command {
 			if deps, ok := status["dependencies"].(map[string]interface{}); ok {
 				// Container Runtime
 				if container, ok := deps["container_runtime"].(map[string]interface{}); ok {
-					available := container["available"].(bool)
+					available, _ := container["available"].(bool)
 					if available {
-						runtime := container["runtime"].(string)
-						containerName := ""
-						if cn, ok := container["container"].(string); ok {
-							containerName = cn
+						runtimeName := "unknown"
+						if name, ok := container["name"].(string); ok {
+							runtimeName = name
 						}
-						fmt.Printf("   Container Runtime: ✓ %s (managed)\n", strings.Title(runtime))
-						if containerName != "" {
-							fmt.Printf("                      Container: %s\n", containerName)
+						version := ""
+						if v, ok := container["version"].(string); ok {
+							version = v
 						}
+						managedBy := ""
+						if m, ok := container["managed_by"].(string); ok {
+							managedBy = m
+						}
+						fmt.Printf("   Container Runtime: ✓ %s", strings.Title(runtimeName))
+						if version != "" {
+							fmt.Printf(" v%s", version)
+						}
+						if managedBy != "" {
+							fmt.Printf(" (%s)", managedBy)
+						}
+						fmt.Println()
 					} else {
 						fmt.Println("   Container Runtime: ○ Not available")
 					}
@@ -1187,11 +1198,14 @@ func statusCmd() *cobra.Command {
 
 				// Qdrant (Vector DB)
 				if qdrant, ok := deps["qdrant"].(map[string]interface{}); ok {
-					available := qdrant["available"].(bool)
-					qdrantStatus := qdrant["status"].(string)
+					available, _ := qdrant["available"].(bool)
+					qdrantStatus := "unknown"
+					if s, ok := qdrant["status"].(string); ok {
+						qdrantStatus = s
+					}
 					if available {
 						vectors := int64(0)
-						if v, ok := qdrant["vectors"].(float64); ok {
+						if v, ok := qdrant["vectors_count"].(float64); ok {
 							vectors = int64(v)
 						}
 						fmt.Printf("   Vector Database:   ✓ Qdrant (%s, %d vectors)\n", qdrantStatus, vectors)
@@ -1200,22 +1214,50 @@ func statusCmd() *cobra.Command {
 					}
 				}
 
-				// Semantic Search
-				if semantic, ok := deps["semantic_search"].(map[string]interface{}); ok {
-					enabled := semantic["enabled"].(bool)
-					model := semantic["embedding_model"].(string)
-					if enabled {
-						fmt.Printf("   Semantic Search:   ✓ Enabled (%s)\n", model)
+				// Ollama (AI Provider for embeddings)
+				if ollama, ok := deps["ollama"].(map[string]interface{}); ok {
+					available, _ := ollama["available"].(bool)
+					if available {
+						version := ""
+						if v, ok := ollama["version"].(string); ok {
+							version = v
+						}
+						fmt.Printf("   AI Provider:       ✓ Ollama")
+						if version != "" {
+							fmt.Printf(" v%s", version)
+						}
+						fmt.Println()
 					} else {
-						fmt.Println("   Semantic Search:   ○ Disabled")
+						fmt.Println("   AI Provider:       ○ Ollama not running")
 					}
 				}
 
-				// FTS5
-				if fts5, ok := deps["full_text_search"].(map[string]interface{}); ok {
-					available := fts5["available"].(bool)
+				// SQLite/FTS5
+				if sqlite, ok := deps["sqlite"].(map[string]interface{}); ok {
+					available, _ := sqlite["available"].(bool)
 					if available {
-						fmt.Println("   Full-Text Search:  ✓ SQLite FTS5")
+						fts5Enabled, _ := sqlite["fts5_enabled"].(bool)
+						version := ""
+						if v, ok := sqlite["version"].(string); ok {
+							version = v
+						}
+						if fts5Enabled {
+							fmt.Printf("   Full-Text Search:  ✓ SQLite FTS5")
+							if version != "" {
+								fmt.Printf(" (v%s)", version)
+							}
+							fmt.Println()
+						}
+					}
+				}
+
+				// FalkorDB (Graph Database)
+				if falkor, ok := deps["falkordb"].(map[string]interface{}); ok {
+					available, _ := falkor["available"].(bool)
+					if available {
+						fmt.Println("   Graph Database:    ✓ FalkorDB")
+					} else {
+						fmt.Println("   Graph Database:    ○ FalkorDB not running")
 					}
 				}
 			}
@@ -3539,9 +3581,9 @@ Checks:
 			daemonVectorCount := int64(0)
 			if daemonStatus != nil {
 				if deps, ok := daemonStatus["dependencies"].(map[string]interface{}); ok {
-					if semantic, ok := deps["semantic_search"].(map[string]interface{}); ok {
-						if enabled, ok := semantic["enabled"].(bool); ok {
-							daemonSemanticEnabled = enabled
+					if ollama, ok := deps["ollama"].(map[string]interface{}); ok {
+						if available, ok := ollama["available"].(bool); ok {
+							daemonSemanticEnabled = available
 						}
 					}
 					if qdrant, ok := deps["qdrant"].(map[string]interface{}); ok {
@@ -5745,13 +5787,13 @@ func qdrantStatusCmd() *cobra.Command {
 				var status map[string]interface{}
 				if json.Unmarshal(data, &status) == nil {
 					if deps, ok := status["dependencies"].(map[string]interface{}); ok {
-						if semantic, ok := deps["semantic_search"].(map[string]interface{}); ok {
-							if enabled, ok := semantic["enabled"].(bool); ok {
-								if enabled {
-									fmt.Println("Daemon Status:     ✓ semantic search enabled")
+						if ollama, ok := deps["ollama"].(map[string]interface{}); ok {
+							if available, ok := ollama["available"].(bool); ok {
+								if available {
+									fmt.Println("Daemon Status:     ✓ Ollama available")
 								} else {
-									fmt.Println("Daemon Status:     ○ semantic search not enabled")
-									fmt.Println("  Enable with: conduit qdrant attach")
+									fmt.Println("Daemon Status:     ○ Ollama not available")
+									fmt.Println("  Start with: ollama serve")
 								}
 							}
 						}

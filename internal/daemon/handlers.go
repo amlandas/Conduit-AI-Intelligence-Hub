@@ -3,8 +3,13 @@ package daemon
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/http"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -84,13 +89,38 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	// Build dependencies status
 	dependencies := d.getDependencyStatus(ctx)
 
+	// CLI section - info about the CLI binary
+	cliInfo := map[string]interface{}{
+		"version":    Version,
+		"build_time": BuildTime,
+	}
+	// Find CLI path
+	if cliPath := findBinaryPath("conduit"); cliPath != "" {
+		cliInfo["path"] = cliPath
+	}
+
+	// Get socket path
+	homeDir, _ := os.UserHomeDir()
+	socketPath := filepath.Join(homeDir, ".conduit", "conduit.sock")
+
+	// Daemon section - enhanced with pid and socket
+	daemonInfo := map[string]interface{}{
+		"ready":      d.Ready(),
+		"version":    Version,
+		"build_time": BuildTime,
+		"uptime":     time.Since(d.startTime).String(),
+		"pid":        os.Getpid(),
+		"socket":     socketPath,
+	}
+
+	// KAG section
+	kagInfo := d.getKAGStats()
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"daemon": map[string]interface{}{
-			"version":    Version,
-			"build_time": BuildTime,
-			"uptime":     time.Since(d.startTime).String(),
-			"ready":      d.Ready(),
-		},
+		"cli":          cliInfo,
+		"daemon":       daemonInfo,
+		"dependencies": dependencies,
+		"kag":          kagInfo,
 		"instances": map[string]interface{}{
 			"total":     len(instances),
 			"by_status": statusCounts,
@@ -98,8 +128,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 		"bindings": map[string]interface{}{
 			"total": len(bindings),
 		},
-		"dependencies": dependencies,
-		"timestamp":    time.Now().Format(time.RFC3339),
+		"timestamp": time.Now().Format(time.RFC3339),
 	})
 }
 
@@ -107,27 +136,24 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) getDependencyStatus(ctx context.Context) map[string]interface{} {
 	deps := make(map[string]interface{})
 
-	// Container Runtime status
-	containerInfo := map[string]interface{}{
-		"available": false,
-		"runtime":   "none",
-		"version":   "",
-	}
-	if d.kbQdrant != nil && d.kbQdrant.IsAvailable() {
-		runtime := d.kbQdrant.GetContainerRuntime()
-		containerInfo["available"] = true
-		containerInfo["runtime"] = runtime
-		containerInfo["managed_by"] = "conduit"
-		containerInfo["container"] = d.kbQdrant.GetContainerName()
-	}
-	deps["container_runtime"] = containerInfo
+	// Container Runtime status - use helper function
+	containerRuntime := getContainerRuntimeInfo()
+	deps["container_runtime"] = containerRuntime
 
-	// Qdrant (Vector DB) status
+	// Get runtime path for container inspections
+	runtimePath := ""
+	if path, ok := containerRuntime["path"].(string); ok {
+		runtimePath = path
+	}
+
+	// Qdrant (Vector DB) status - enhanced with container info
 	qdrantInfo := map[string]interface{}{
 		"available":  false,
-		"status":     "unknown",
+		"host":       "localhost",
+		"http_port":  6333,
+		"grpc_port":  6334,
+		"managed_by": "conduit",
 		"collection": "conduit_kb",
-		"vectors":    int64(0),
 	}
 	if d.kbQdrant != nil {
 		health := d.kbQdrant.CheckHealth(ctx)
@@ -135,12 +161,19 @@ func (d *Daemon) getDependencyStatus(ctx context.Context) map[string]interface{}
 		httpPort, grpcPort := d.kbQdrant.GetPorts()
 		qdrantInfo["http_port"] = httpPort
 		qdrantInfo["grpc_port"] = grpcPort
+
+		// Add container details
+		containerName := d.kbQdrant.GetContainerName()
+		if containerInfo := getContainerInfo(runtimePath, containerName); containerInfo != nil {
+			qdrantInfo["container"] = containerInfo
+		}
+
 		if health.ContainerRunning {
 			qdrantInfo["status"] = health.CollectionStatus
 			if qdrantInfo["status"] == "" {
-				qdrantInfo["status"] = "running"
+				qdrantInfo["status"] = "green"
 			}
-			qdrantInfo["vectors"] = health.TotalPoints
+			qdrantInfo["vectors_count"] = health.TotalPoints
 			qdrantInfo["indexed_vectors"] = health.IndexedVectors
 			if health.NeedsRecovery {
 				qdrantInfo["status"] = "needs_recovery"
@@ -154,20 +187,44 @@ func (d *Daemon) getDependencyStatus(ctx context.Context) map[string]interface{}
 	}
 	deps["qdrant"] = qdrantInfo
 
-	// Semantic Search status
-	semanticInfo := map[string]interface{}{
-		"enabled":         d.kbSemantic != nil,
-		"embedding_model": "nomic-embed-text",
-		"embedding_host":  "http://localhost:11434",
-	}
-	deps["semantic_search"] = semanticInfo
+	// Ollama status - use helper function for detailed info
+	deps["ollama"] = getOllamaInfo()
 
-	// FTS5 status (always available)
-	fts5Info := map[string]interface{}{
-		"available": true,
-		"engine":    "SQLite FTS5",
+	// SQLite/FTS5 status - use helper function
+	deps["sqlite"] = d.getSQLiteInfo()
+
+	// FalkorDB status - TCP check first (like conduit doctor does)
+	falkorInfo := map[string]interface{}{
+		"available":  false,
+		"host":       "localhost",
+		"port":       6379,
+		"managed_by": "conduit",
+		"graph_name": "conduit_kag",
 	}
-	deps["full_text_search"] = fts5Info
+
+	// Primary check: TCP connection (same as conduit doctor)
+	conn, err := net.DialTimeout("tcp", "localhost:6379", 2*time.Second)
+	if err == nil {
+		conn.Close()
+		falkorInfo["available"] = true
+	}
+
+	// Supplementary: Add container details if available
+	if containerInfo := getContainerInfo(runtimePath, "conduit-falkordb"); containerInfo != nil {
+		falkorInfo["container"] = containerInfo
+	}
+
+	// Get entity/relationship counts from SQLite (they're stored there, not in FalkorDB directly)
+	if d.store != nil && d.store.DB() != nil {
+		db := d.store.DB()
+		var entityCount, relationCount int
+		db.QueryRow("SELECT COUNT(*) FROM kb_entities").Scan(&entityCount)
+		db.QueryRow("SELECT COUNT(*) FROM kb_relations").Scan(&relationCount)
+		falkorInfo["entities_count"] = entityCount
+		falkorInfo["relationships_count"] = relationCount
+	}
+
+	deps["falkordb"] = falkorInfo
 
 	return deps
 }
@@ -1090,3 +1147,327 @@ var (
 	Version   = "dev"
 	BuildTime = "unknown"
 )
+
+// ════════════════════════════════════════════════════════════════════════════
+// Helper functions for status detection
+// ════════════════════════════════════════════════════════════════════════════
+
+// knownBinaryPaths maps binary names to common installation locations
+var knownBinaryPaths = map[string][]string{
+	"conduit": {
+		"/usr/local/bin/conduit",
+		"/opt/homebrew/bin/conduit",
+	},
+	"ollama": {
+		"/opt/homebrew/bin/ollama",
+		"/usr/local/bin/ollama",
+		"/usr/bin/ollama",
+		"/snap/bin/ollama",
+	},
+	"podman": {
+		"/opt/homebrew/bin/podman",
+		"/usr/local/bin/podman",
+		"/usr/bin/podman",
+	},
+	"docker": {
+		"/opt/homebrew/bin/docker",
+		"/usr/local/bin/docker",
+		"/usr/bin/docker",
+		"/Applications/Docker.app/Contents/Resources/bin/docker",
+	},
+}
+
+// findBinaryPath locates a binary by checking PATH and known locations
+func findBinaryPath(name string) string {
+	// First check PATH
+	if path, err := exec.LookPath(name); err == nil {
+		return path
+	}
+
+	// Check known locations
+	if paths, ok := knownBinaryPaths[name]; ok {
+		for _, path := range paths {
+			if _, err := os.Stat(path); err == nil {
+				return path
+			}
+		}
+	}
+
+	// Check ~/.local/bin for user installations
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		localBinPath := filepath.Join(homeDir, ".local", "bin", name)
+		if _, err := os.Stat(localBinPath); err == nil {
+			return localBinPath
+		}
+	}
+
+	return ""
+}
+
+// getManagedBy determines who manages a binary based on its path
+func getManagedBy(path string) string {
+	if path == "" {
+		return "unknown"
+	}
+	if strings.Contains(path, "homebrew") || strings.Contains(path, "/opt/homebrew") {
+		return "homebrew"
+	}
+	if strings.Contains(path, "/usr/bin") || strings.Contains(path, "/bin") {
+		return "system"
+	}
+	if strings.Contains(path, "snap") {
+		return "snap"
+	}
+	if strings.Contains(path, "Docker.app") {
+		return "docker-desktop"
+	}
+	return "manual"
+}
+
+// getContainerRuntimeInfo detects container runtime (podman/docker)
+func getContainerRuntimeInfo() map[string]interface{} {
+	for _, runtime := range []string{"podman", "docker"} {
+		path := findBinaryPath(runtime)
+		if path == "" {
+			continue
+		}
+
+		info := map[string]interface{}{
+			"name":       runtime,
+			"available":  true,
+			"path":       path,
+			"managed_by": getManagedBy(path),
+		}
+
+		// Get version
+		cmd := exec.Command(path, "--version")
+		if output, err := cmd.Output(); err == nil {
+			version := parseVersionFromOutput(string(output))
+			if version != "" {
+				info["version"] = version
+			}
+		}
+
+		return info
+	}
+
+	return map[string]interface{}{
+		"name":      "none",
+		"available": false,
+	}
+}
+
+// getOllamaInfo returns detailed Ollama information
+func getOllamaInfo() map[string]interface{} {
+	host := "http://localhost:11434"
+	info := map[string]interface{}{
+		"available": false,
+		"host":      host,
+	}
+
+	// Find binary path
+	path := findBinaryPath("ollama")
+	if path != "" {
+		info["path"] = path
+		info["managed_by"] = getManagedBy(path)
+	}
+
+	// Check if running and get version via API
+	client := &http.Client{Timeout: 2 * time.Second}
+	resp, err := client.Get(host + "/api/version")
+	if err != nil {
+		return info
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return info
+	}
+
+	info["available"] = true
+
+	// Parse version
+	var versionResp struct {
+		Version string `json:"version"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&versionResp) == nil && versionResp.Version != "" {
+		info["version"] = versionResp.Version
+	}
+
+	// Get installed models
+	models := getOllamaModels()
+	if len(models) > 0 {
+		info["models_installed"] = models
+	}
+
+	// Add required models from config (hardcoded for now)
+	info["models_required"] = map[string]string{
+		"embedding":  "nomic-embed-text",
+		"extraction": "mistral:7b-instruct-q4_K_M",
+	}
+
+	return info
+}
+
+// getOllamaModels retrieves list of installed Ollama models
+func getOllamaModels() []string {
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Get("http://localhost:11434/api/tags")
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil
+	}
+
+	var tagsResp struct {
+		Models []struct {
+			Name string `json:"name"`
+		} `json:"models"`
+	}
+
+	if json.NewDecoder(resp.Body).Decode(&tagsResp) != nil {
+		return nil
+	}
+
+	models := make([]string, 0, len(tagsResp.Models))
+	for _, m := range tagsResp.Models {
+		models = append(models, m.Name)
+	}
+	return models
+}
+
+// getContainerInfo gets container details (name, image, status)
+func getContainerInfo(runtimePath, containerName string) map[string]interface{} {
+	if runtimePath == "" {
+		return nil
+	}
+
+	info := map[string]interface{}{
+		"name":   containerName,
+		"status": "not_found",
+	}
+
+	// Get container status
+	cmd := exec.Command(runtimePath, "inspect", "--format", "{{.State.Status}}", containerName)
+	if output, err := cmd.Output(); err == nil {
+		info["status"] = strings.TrimSpace(string(output))
+	}
+
+	// Get container image
+	cmd = exec.Command(runtimePath, "inspect", "--format", "{{.Config.Image}}", containerName)
+	if output, err := cmd.Output(); err == nil {
+		info["image"] = strings.TrimSpace(string(output))
+	}
+
+	return info
+}
+
+// getSQLiteInfo returns SQLite database information
+func (d *Daemon) getSQLiteInfo() map[string]interface{} {
+	info := map[string]interface{}{
+		"available":    true,
+		"fts5_enabled": true, // Always true since we build with FTS5 tag
+	}
+
+	// Get SQLite version
+	if d.store != nil && d.store.DB() != nil {
+		var version string
+		if err := d.store.DB().QueryRow("SELECT sqlite_version()").Scan(&version); err == nil {
+			info["version"] = version
+		}
+
+		// Get database path
+		homeDir, _ := os.UserHomeDir()
+		info["database_path"] = filepath.Join(homeDir, ".conduit", "conduit.db")
+
+		// Get document and chunk counts
+		var docCount, chunkCount int
+		d.store.DB().QueryRow("SELECT COUNT(*) FROM kb_documents").Scan(&docCount)
+		d.store.DB().QueryRow("SELECT COUNT(*) FROM kb_chunks").Scan(&chunkCount)
+		info["documents_count"] = docCount
+		info["chunks_count"] = chunkCount
+	}
+
+	return info
+}
+
+// getKAGStats returns KAG extraction statistics
+func (d *Daemon) getKAGStats() map[string]interface{} {
+	stats := map[string]interface{}{
+		"enabled": false,
+	}
+
+	if d.store == nil || d.store.DB() == nil {
+		return stats
+	}
+
+	db := d.store.DB()
+
+	// Check if KAG tables exist
+	var tableExists int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kb_extraction_status'").Scan(&tableExists); err != nil || tableExists == 0 {
+		return stats
+	}
+
+	stats["enabled"] = true
+	stats["provider"] = "ollama"
+	stats["model"] = "mistral:7b-instruct-q4_K_M"
+
+	// Get extraction stats
+	var processed, pending, errors, entities, relations int
+
+	db.QueryRow("SELECT COUNT(*) FROM kb_extraction_status WHERE status='completed'").Scan(&processed)
+	db.QueryRow(`SELECT COUNT(*) FROM kb_chunks c
+		LEFT JOIN kb_extraction_status s ON c.chunk_id = s.chunk_id
+		WHERE s.status IS NULL`).Scan(&pending)
+	db.QueryRow("SELECT COUNT(*) FROM kb_extraction_status WHERE status='error'").Scan(&errors)
+
+	// Check if entity/relation tables exist
+	var entityTableExists int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kb_entities'").Scan(&entityTableExists); err == nil && entityTableExists > 0 {
+		db.QueryRow("SELECT COUNT(*) FROM kb_entities").Scan(&entities)
+	}
+
+	var relationTableExists int
+	if err := db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='kb_relations'").Scan(&relationTableExists); err == nil && relationTableExists > 0 {
+		db.QueryRow("SELECT COUNT(*) FROM kb_relations").Scan(&relations)
+	}
+
+	stats["stats"] = map[string]int{
+		"chunks_processed":       processed,
+		"chunks_pending":         pending,
+		"chunks_error":           errors,
+		"entities_extracted":     entities,
+		"relationships_extracted": relations,
+	}
+
+	return stats
+}
+
+// parseVersionFromOutput extracts version number from command output
+func parseVersionFromOutput(output string) string {
+	// Handle various version output formats
+	// "podman version 5.0.0" -> "5.0.0"
+	// "Docker version 24.0.7, build afdd53b" -> "24.0.7"
+	output = strings.TrimSpace(output)
+	parts := strings.Fields(output)
+
+	for i, part := range parts {
+		if part == "version" && i+1 < len(parts) {
+			version := strings.TrimSuffix(parts[i+1], ",")
+			return version
+		}
+	}
+
+	// Fallback: look for semver-like pattern
+	for _, part := range parts {
+		if len(part) > 0 && (part[0] >= '0' && part[0] <= '9') {
+			return strings.TrimSuffix(part, ",")
+		}
+	}
+
+	return ""
+}
