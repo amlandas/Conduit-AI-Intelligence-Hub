@@ -219,6 +219,11 @@ npm run package:mac:dmg
 
 - **Dashboard**: Real-time status of daemon, Ollama, Qdrant, FalkorDB, and container runtime
 - **Knowledge Base**: Search, manage sources, view sync progress
+  - **RAG Tuning Panel** (Advanced Mode): Adjust search parameters in real-time
+    - Min Score, Semantic Weight, MMR Lambda, Max Results
+    - Search Mode selection (Hybrid/Semantic/FTS5)
+    - All settings passed directly to CLI for consistent behavior
+  - **KAG Search**: Entity and relationship exploration with proper error handling
 - **Connectors**: Start/stop instances, manage bindings
 - **Settings**: Theme, mode selection (Default/Advanced/Developer)
 - **Auto-Updates**: Automatic update checks from GitHub Releases
