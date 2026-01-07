@@ -42,6 +42,11 @@ type UpdateSourceRequest struct {
 	Status   string   `json:"status,omitempty"`
 }
 
+// SyncOptions configures sync behavior.
+type SyncOptions struct {
+	RebuildVectors bool // Force regeneration of vector embeddings for all documents
+}
+
 // SyncResult contains the result of a sync operation.
 type SyncResult struct {
 	Added           int           `json:"added"`

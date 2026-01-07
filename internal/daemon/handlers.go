@@ -697,12 +697,19 @@ func (d *Daemon) handleSyncKBSource(w http.ResponseWriter, r *http.Request) {
 	sourceID := chi.URLParam(r, "sourceID")
 	startTime := time.Now()
 
+	// Parse rebuild_vectors parameter
+	rebuildVectors := r.URL.Query().Get("rebuild_vectors") == "true"
+
 	// Emit sync started event
 	d.EmitEvent(EventKBSyncStarted, KBSourceData{
 		SourceID: sourceID,
 	})
 
-	result, err := d.kbSource.Sync(r.Context(), sourceID)
+	// Create sync options
+	opts := &kb.SyncOptions{
+		RebuildVectors: rebuildVectors,
+	}
+	result, err := d.kbSource.SyncWithOptions(r.Context(), sourceID, opts)
 	if err != nil {
 		d.logger.Error().Err(err).Msg("failed to sync KB source")
 		// Emit sync failed event

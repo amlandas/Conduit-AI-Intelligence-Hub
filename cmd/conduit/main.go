@@ -3165,7 +3165,9 @@ Examples:
 }
 
 func kbSyncCmd() *cobra.Command {
-	return &cobra.Command{
+	var rebuildVectors bool
+
+	cmd := &cobra.Command{
 		Use:   "sync [source-id]",
 		Short: "Sync knowledge base sources",
 		Long: `Synchronize knowledge base sources to index new and updated documents.
@@ -3173,9 +3175,15 @@ func kbSyncCmd() *cobra.Command {
 If a source ID is provided, only that source is synced.
 If no source ID is provided, all sources are synced.
 
+Exit Codes:
+  0  Full success (FTS + semantic indexing)
+  1  Error (sync failed)
+  2  Partial success (FTS only, semantic indexing failed)
+
 Examples:
   conduit kb sync                    # Sync all sources
-  conduit kb sync abc123-def456      # Sync specific source`,
+  conduit kb sync abc123-def456      # Sync specific source
+  conduit kb sync --rebuild-vectors  # Force rebuild vector index`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Use a longer timeout for sync (10 minutes) - large file embedding can be slow
 			c := newClientWithTimeout(socketPath, 10*time.Minute)
@@ -3184,8 +3192,19 @@ Examples:
 				// Sync specific source
 				sourceID := args[0]
 
-				fmt.Printf("Syncing source: %s\n", sourceID)
-				data, err := c.post("/api/v1/kb/sources/"+sourceID+"/sync", nil)
+				if rebuildVectors {
+					fmt.Printf("Rebuilding vectors for source: %s\n", sourceID)
+				} else {
+					fmt.Printf("Syncing source: %s\n", sourceID)
+				}
+
+				// Build sync URL with optional rebuild-vectors param
+				syncURL := "/api/v1/kb/sources/" + sourceID + "/sync"
+				if rebuildVectors {
+					syncURL += "?rebuild_vectors=true"
+				}
+
+				data, err := c.post(syncURL, nil)
 				if err != nil {
 					return fmt.Errorf("sync failed: %w", err)
 				}
@@ -3208,20 +3227,28 @@ Examples:
 				fmt.Printf("  Deleted: %d documents\n", deleted)
 
 				// Show semantic search status
+				semanticErrors := 0
 				if semanticEnabled, ok := result["semantic_enabled"].(bool); ok {
 					if semanticEnabled {
-						semanticErrors := 0
 						if se, ok := result["semantic_errors"].(float64); ok {
 							semanticErrors = int(se)
 						}
 						if semanticErrors > 0 {
-							fmt.Printf("  Vectors: %d documents failed (FTS5 fallback used)\n", semanticErrors)
+							fmt.Printf("  Vectors: ⚠️  %d documents failed (FTS5 fallback used)\n", semanticErrors)
 						} else {
 							fmt.Printf("  Vectors: ✓ indexed\n")
 						}
 					} else {
 						fmt.Printf("  Vectors: disabled (Qdrant/Ollama unavailable)\n")
 					}
+				}
+
+				// Exit with code 2 for partial success (semantic errors)
+				if semanticErrors > 0 {
+					fmt.Println()
+					fmt.Println("   To diagnose: conduit doctor")
+					fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
+					os.Exit(2)
 				}
 
 				if errors, ok := result["errors"].([]interface{}); ok && len(errors) > 0 {
@@ -3233,7 +3260,11 @@ Examples:
 				}
 			} else {
 				// Sync all sources
-				fmt.Println("Syncing all sources...")
+				if rebuildVectors {
+					fmt.Println("Rebuilding vector index for all sources...")
+				} else {
+					fmt.Println("Syncing all sources...")
+				}
 
 				// Get list of sources
 				data, err := c.get("/api/v1/kb/sources")
@@ -3253,6 +3284,8 @@ Examples:
 				totalAdded := 0
 				totalUpdated := 0
 				totalDeleted := 0
+				totalSemanticErrors := 0
+				semanticEnabled := false
 
 				for _, src := range sources {
 					source := src.(map[string]interface{})
@@ -3261,7 +3294,13 @@ Examples:
 
 					fmt.Printf("  Syncing: %s... ", sourceName)
 
-					syncData, err := c.post("/api/v1/kb/sources/"+sourceID+"/sync", nil)
+					// Build sync URL with optional rebuild-vectors param
+					syncURL := "/api/v1/kb/sources/" + sourceID + "/sync"
+					if rebuildVectors {
+						syncURL += "?rebuild_vectors=true"
+					}
+
+					syncData, err := c.post(syncURL, nil)
 					if err != nil {
 						fmt.Printf("ERROR: %v\n", err)
 						continue
@@ -3293,13 +3332,17 @@ Examples:
 					if v, ok := result["semantic_errors"].(float64); ok {
 						semanticErrors = int(v)
 					}
+					if v, ok := result["semantic_enabled"].(bool); ok && v {
+						semanticEnabled = true
+					}
 
 					totalAdded += added
 					totalUpdated += updated
 					totalDeleted += deleted
+					totalSemanticErrors += semanticErrors
 
 					if semanticErrors > 0 {
-						fmt.Printf("done (+%d/~%d/-%d) ⚠️  %d vector indexing errors\n", added, updated, deleted, semanticErrors)
+						fmt.Printf("done (+%d/~%d/-%d) ⚠️  %d vector errors\n", added, updated, deleted, semanticErrors)
 					} else {
 						fmt.Printf("done (+%d/~%d/-%d)\n", added, updated, deleted)
 					}
@@ -3308,11 +3351,28 @@ Examples:
 				fmt.Println()
 				fmt.Printf("✓ Sync complete: %d added, %d updated, %d deleted\n",
 					totalAdded, totalUpdated, totalDeleted)
+
+				// Show semantic search summary with actionable guidance
+				if totalSemanticErrors > 0 {
+					fmt.Println()
+					fmt.Printf("⚠️  Semantic indexing failed for %d documents (FTS5 fallback used)\n", totalSemanticErrors)
+					fmt.Println("   Search will use keyword matching only for affected documents.")
+					fmt.Println()
+					fmt.Println("   To diagnose: conduit doctor")
+					fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
+					// Return exit code 2 for partial success
+					os.Exit(2)
+				} else if semanticEnabled && (totalAdded > 0 || totalUpdated > 0) {
+					fmt.Println("   Vectors: ✓ all documents indexed")
+				}
 			}
 
 			return nil
 		},
 	}
+
+	cmd.Flags().BoolVar(&rebuildVectors, "rebuild-vectors", false, "Force rebuild of vector index for all documents")
+	return cmd
 }
 
 func kbMigrateCmd() *cobra.Command {

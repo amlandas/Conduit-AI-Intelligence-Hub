@@ -314,9 +314,19 @@ func (sm *SourceManager) Get(ctx context.Context, sourceID string) (*Source, err
 	return &src, nil
 }
 
-// Sync synchronizes a source folder.
+// Sync synchronizes a source folder with default options.
 func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult, error) {
+	return sm.SyncWithOptions(ctx, sourceID, nil)
+}
+
+// SyncWithOptions synchronizes a source folder with configurable options.
+func (sm *SourceManager) SyncWithOptions(ctx context.Context, sourceID string, opts *SyncOptions) (*SyncResult, error) {
 	start := time.Now()
+
+	// Handle nil options
+	if opts == nil {
+		opts = &SyncOptions{}
+	}
 
 	source, err := sm.Get(ctx, sourceID)
 	if err != nil {
@@ -329,6 +339,13 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 
 	result := &SyncResult{
 		SemanticEnabled: semanticEnabled,
+	}
+
+	// Log if rebuild vectors is requested
+	if opts.RebuildVectors {
+		sm.logger.Info().
+			Str("source_id", sourceID).
+			Msg("rebuild vectors requested - will re-index all documents")
 	}
 
 	// Get existing documents for this source
@@ -407,9 +424,10 @@ func (sm *SourceManager) Sync(ctx context.Context, sourceID string) (*SyncResult
 		hash := sm.hashContent(content)
 
 		// Check if document needs update
+		// Skip hash check if RebuildVectors is requested (force re-indexing)
 		existingHash, exists := existingDocs[path]
-		if exists && existingHash == hash {
-			// No change
+		if exists && existingHash == hash && !opts.RebuildVectors {
+			// No change and not forcing rebuild
 			return nil
 		}
 		// Create document

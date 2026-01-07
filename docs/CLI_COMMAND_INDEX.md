@@ -361,7 +361,28 @@ conduit kb sync [source-id] [options]
 **Options**:
 | Option | Description |
 |--------|-------------|
-| `--force` | Re-index all documents |
+| `--rebuild-vectors` | Force regeneration of vector embeddings for all documents |
+
+**Exit Codes**:
+| Code | Description |
+|------|-------------|
+| 0 | Full success (FTS + semantic indexing) |
+| 1 | Error (sync failed) |
+| 2 | Partial success (FTS only, semantic indexing failed) |
+
+**Examples**:
+```bash
+# Sync all sources
+conduit kb sync
+
+# Sync specific source
+conduit kb sync abc123-def456
+
+# Force rebuild vectors (useful after Qdrant issues)
+conduit kb sync --rebuild-vectors
+```
+
+**Note**: If you see exit code 2 with "semantic indexing failed" warnings, run `conduit doctor` to diagnose the issue, then retry with `conduit kb sync --rebuild-vectors`.
 
 ### `conduit kb search <query>`
 
@@ -772,7 +793,7 @@ conduit permissions revoke <instance-id> [options]
 |------|-------------|
 | 0 | Success |
 | 1 | General error |
-| 2 | Invalid arguments |
+| 2 | Partial success (command-specific, e.g., `kb sync` with semantic failures) |
 | 3 | Daemon not running |
 | 4 | Instance not found |
 | 5 | Permission denied |
