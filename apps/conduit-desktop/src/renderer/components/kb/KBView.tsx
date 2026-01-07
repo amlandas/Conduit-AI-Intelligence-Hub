@@ -8,8 +8,9 @@
 import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { useKBStore, useSettingsStore } from '@/stores'
+import type { RAGSearchOptions } from '@/stores/kb'
 import { AddSourceModal } from './AddSourceModal'
-import { RAGTuningPanel } from './RAGTuningPanel'
+import { RAGTuningPanel, type RAGSettings } from './RAGTuningPanel'
 import { KAGPanel } from './KAGPanel'
 import {
   FolderOpen,
@@ -34,7 +35,7 @@ export function KBView(): JSX.Element {
     searchQuery,
     refresh,
     search,
-    addSource,
+    // Note: addSource removed - we now use refresh() after CLI add to get authoritative state
     // Global sync state - persists across tab switches
     ragSyncing,
     ragProgress,
@@ -56,6 +57,8 @@ export function KBView(): JSX.Element {
   const [query, setQuery] = useState(searchQuery)
   const [addModalOpen, setAddModalOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // RAG tuning settings - passed to CLI search for advanced mode
+  const [ragSettings, setRagSettings] = useState<RAGSettings | null>(null)
 
   // Subscribe to progress events and check MCP config on mount
   useEffect(() => {
@@ -80,7 +83,16 @@ export function KBView(): JSX.Element {
 
   const handleSearch = (e: React.FormEvent): void => {
     e.preventDefault()
-    search(query)
+    // Convert RAG panel settings to search options for CLI
+    const options: RAGSearchOptions | undefined = ragSettings ? {
+      minScore: ragSettings.minScore,
+      semanticWeight: ragSettings.semanticWeight,
+      mmrLambda: ragSettings.mmrLambda,
+      maxResults: ragSettings.maxResults,
+      reranking: ragSettings.reranking,
+      searchMode: ragSettings.searchMode
+    } : undefined
+    search(query, options)
   }
 
   // RAG Sync - delegate to CLI: conduit kb sync
@@ -147,13 +159,13 @@ export function KBView(): JSX.Element {
 
   const handleAddSource = async (name: string, path: string): Promise<void> => {
     const result = await window.conduit.addKBSource({ name, path })
-    if (result && typeof result === 'object' && 'id' in result) {
-      addSource({
-        id: (result as { id: string }).id,
-        name,
-        path
-      })
+    // Check if CLI returned an error
+    if (result && typeof result === 'object' && 'error' in result) {
+      throw new Error((result as { error: string }).error)
     }
+    // CLI succeeded - refresh to get authoritative state from CLI
+    // Don't update local state directly; let refresh() sync with server
+    await refresh()
   }
 
   return (
@@ -434,7 +446,11 @@ export function KBView(): JSX.Element {
 
       {/* Advanced Mode: RAG Tuning Panel */}
       {isFeatureVisible('showRAGTuning') && (
-        <RAGTuningPanel className="mt-6" />
+        <RAGTuningPanel
+          className="mt-6"
+          settings={ragSettings || undefined}
+          onChange={setRagSettings}
+        />
       )}
 
       {/* Advanced Mode: KAG Panel */}

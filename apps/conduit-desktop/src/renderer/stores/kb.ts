@@ -19,6 +19,16 @@ export interface SearchResult {
   source_id: string
 }
 
+// RAG search options - passed to CLI for advanced tuning
+export interface RAGSearchOptions {
+  minScore?: number           // --min-score: Minimum similarity threshold (0.0-1.0)
+  semanticWeight?: number     // --semantic-weight: Semantic vs lexical weight (0.0-1.0)
+  mmrLambda?: number          // --mmr-lambda: Relevance vs diversity (0.0-1.0)
+  maxResults?: number         // --limit: Maximum results to return
+  reranking?: boolean         // --no-rerank: Disable semantic reranking (false = disabled)
+  searchMode?: 'hybrid' | 'semantic' | 'fts5'  // --semantic or --fts5 flags
+}
+
 // Sync operation result - persists across tab switches
 export interface SyncResult {
   success: boolean
@@ -66,7 +76,7 @@ interface KBStore {
   setMcpConfigured: (configured: boolean) => void
 
   refresh: () => Promise<void>
-  search: (query: string) => Promise<void>
+  search: (query: string, options?: RAGSearchOptions) => Promise<void>
 }
 
 export const useKBStore = create<KBStore>((set, get) => ({
@@ -144,7 +154,7 @@ export const useKBStore = create<KBStore>((set, get) => ({
     }
   },
 
-  search: async (query: string) => {
+  search: async (query: string, options?: RAGSearchOptions) => {
     if (!query.trim()) {
       get().setSearchResults([])
       return
@@ -152,7 +162,8 @@ export const useKBStore = create<KBStore>((set, get) => ({
     get().setLoading(true)
     get().setSearchQuery(query)
     try {
-      const result = await window.conduit.searchKB(query)
+      // Pass RAG options to CLI via IPC
+      const result = await window.conduit.searchKB(query, options)
       if (result && typeof result === 'object' && 'results' in result) {
         get().setSearchResults((result as { results: SearchResult[] }).results || [])
       }

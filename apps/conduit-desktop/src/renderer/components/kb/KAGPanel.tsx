@@ -7,7 +7,8 @@ import {
   Circle,
   ArrowRight,
   RotateCcw,
-  Settings2
+  Settings2,
+  AlertTriangle
 } from 'lucide-react'
 
 interface Entity {
@@ -104,6 +105,7 @@ export function KAGPanel({ className, showSettings = false }: KAGPanelProps): JS
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(false)
   const [result, setResult] = useState<KAGSearchResult | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const [settings, setSettings] = useState<KAGSettings>(DEFAULT_KAG_SETTINGS)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [activeTab, setActiveTab] = useState<'entities' | 'relations'>('entities')
@@ -113,33 +115,36 @@ export function KAGPanel({ className, showSettings = false }: KAGPanelProps): JS
     if (!query.trim()) return
 
     setLoading(true)
+    setError(null)
+    setResult(null)
     try {
-      // Call KAG search API via IPC
-      const response = await window.conduit.searchKAG?.(query, {
+      // Call KAG search API via IPC - delegates to CLI: conduit kb kag-query
+      const response = await window.conduit.searchKAG(query, {
         maxHops: settings.maxGraphHops,
         maxEntities: settings.maxEntitiesReturned,
         minConfidence: settings.confidenceThreshold
       })
       if (response) {
-        setResult(response as KAGSearchResult)
+        // Check if CLI returned an error response
+        if (typeof response === 'object' && 'error' in response) {
+          setError((response as { error: string }).error)
+        } else {
+          setResult(response as KAGSearchResult)
+        }
+      } else {
+        setError('No response from KAG search')
       }
     } catch (err) {
       console.error('KAG search failed:', err)
-      // Show mock data for UI development
-      setResult({
-        query,
-        entities: [
-          { id: '1', name: 'Claude', type: 'TECHNOLOGY', confidence: 0.95 },
-          { id: '2', name: 'Anthropic', type: 'ORGANIZATION', confidence: 0.92 },
-          { id: '3', name: 'LLM', type: 'CONCEPT', confidence: 0.88 },
-          { id: '4', name: 'Constitutional AI', type: 'CONCEPT', confidence: 0.85 }
-        ],
-        relations: [
-          { id: 'r1', source: '1', target: '2', type: 'CREATED_BY', confidence: 0.9 },
-          { id: 'r2', source: '1', target: '3', type: 'IS_A', confidence: 0.95 },
-          { id: 'r3', source: '2', target: '4', type: 'DEVELOPED', confidence: 0.88 }
-        ]
-      })
+      const errorMessage = (err as Error).message || 'KAG search failed'
+      // Provide user-friendly error messages for common failures
+      if (errorMessage.includes('FalkorDB') || errorMessage.includes('connection')) {
+        setError('Knowledge graph is unavailable. Please ensure FalkorDB is running.')
+      } else if (errorMessage.includes('timeout')) {
+        setError('Search timed out. Try a simpler query or check service status.')
+      } else {
+        setError(errorMessage)
+      }
     } finally {
       setLoading(false)
     }
@@ -271,6 +276,25 @@ export function KAGPanel({ className, showSettings = false }: KAGPanelProps): JS
         </form>
       </div>
 
+      {/* Error Display */}
+      {error && (
+        <div className="mx-4 mb-4 p-3 rounded-lg bg-macos-red/10 border border-macos-red/20">
+          <div className="flex items-start gap-2">
+            <AlertTriangle className="w-4 h-4 text-macos-red flex-shrink-0 mt-0.5" />
+            <div className="flex-1">
+              <p className="text-sm font-medium text-macos-red">Search Failed</p>
+              <p className="text-xs text-macos-red/80 mt-0.5">{error}</p>
+            </div>
+            <button
+              onClick={() => setError(null)}
+              className="text-macos-red/60 hover:text-macos-red text-xs"
+            >
+              Dismiss
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Results */}
       {result && (
         <div className="border-t border-macos-separator dark:border-macos-separator-dark">
@@ -355,7 +379,7 @@ export function KAGPanel({ className, showSettings = false }: KAGPanelProps): JS
       )}
 
       {/* Empty State */}
-      {!result && !loading && (
+      {!result && !loading && !error && (
         <div className="px-4 pb-4">
           <div className="text-center py-6 text-macos-text-secondary dark:text-macos-text-dark-secondary">
             <Network className="w-10 h-10 mx-auto mb-2 opacity-50" />
