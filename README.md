@@ -1,5 +1,8 @@
 # Conduit - AI Intelligence Hub
 
+[![Latest Release](https://img.shields.io/github/v/release/amlandas/Conduit-AI-Intelligence-Hub)](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 Conduit is a local-first, security-first AI intelligence hub that connects AI clients (CLI tools, IDEs, desktop apps) to external tools via MCP (Model Context Protocol) servers. It provides document-to-knowledge transformation, sandboxed connector execution, and unified configuration management.
 
 ## Desktop App Installation (macOS)
@@ -219,6 +222,7 @@ npm run package:mac:dmg
 - **Connectors**: Start/stop instances, manage bindings
 - **Settings**: Theme, mode selection (Default/Advanced/Developer)
 - **Auto-Updates**: Automatic update checks from GitHub Releases
+- **Version Management**: Automatically restarts daemon when CLI version mismatch detected (v0.1.40+)
 
 ### Mode System
 
