@@ -42,6 +42,7 @@ The Conduit MCP Server exposes the Knowledge Base to AI tools via the Model Cont
 | Keyword Search (FTS5) | Always | SQLite full-text search with BM25 ranking |
 | Semantic Search | Optional | Vector similarity via Qdrant + Ollama embeddings |
 | Hybrid Search | When both available | Combines FTS5 + semantic with RRF fusion |
+| KAG Query | Optional | Knowledge graph entity and relationship search |
 | Source Filtering | Always | Filter results by knowledge base source |
 | Document Retrieval | Always | Full document content access |
 
@@ -340,6 +341,81 @@ Get knowledge base statistics, optionally filtered by source.
 - Chunk count
 - Total size
 - Search capabilities (FTS5, semantic availability)
+
+---
+
+### kag_query
+
+Query the knowledge graph for entities and their relationships. Use for multi-hop reasoning, aggregation queries, or finding connections between concepts.
+
+**Input Schema**:
+```json
+{
+  "type": "object",
+  "properties": {
+    "query": {
+      "type": "string",
+      "description": "The search query for finding entities. Can be an entity name, concept, or natural language question."
+    },
+    "entities": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Optional entity hints to guide the search (e.g., ['Kubernetes', 'Docker'])."
+    },
+    "include_relations": {
+      "type": "boolean",
+      "description": "Whether to include relationships between entities (default: true).",
+      "default": true
+    },
+    "max_hops": {
+      "type": "integer",
+      "description": "Maximum relationship hops to traverse (default: 2, max: 3).",
+      "default": 2,
+      "minimum": 1,
+      "maximum": 3
+    },
+    "limit": {
+      "type": "integer",
+      "description": "Maximum entities to return (default: 20, max: 100).",
+      "default": 20,
+      "minimum": 1,
+      "maximum": 100
+    },
+    "source_id": {
+      "type": "string",
+      "description": "Filter to entities from a specific knowledge base source."
+    }
+  },
+  "required": ["query"]
+}
+```
+
+**Output**: Knowledge graph results including:
+- Matched entities with types and descriptions
+- Relationships between entities (if `include_relations` is true)
+- Source document references
+
+**Example**:
+```json
+{
+  "name": "kag_query",
+  "arguments": {
+    "query": "authentication",
+    "entities": ["OAuth", "JWT"],
+    "max_hops": 2,
+    "limit": 10
+  }
+}
+```
+
+**Best For**:
+- Multi-hop reasoning: "How is X related to Y?"
+- Aggregation queries: "List all security protocols in the KB"
+- Entity disambiguation: Finding specific concepts across documents
+
+**Prerequisites**:
+- KAG must be enabled in configuration
+- Documents must be synced with `conduit kb kag-sync` to extract entities
 
 ---
 
