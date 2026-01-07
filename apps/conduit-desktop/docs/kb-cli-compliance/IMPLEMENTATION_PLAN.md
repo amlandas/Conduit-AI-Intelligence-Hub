@@ -1,9 +1,10 @@
 # KB CLI Compliance Fixes - Implementation Plan
 
 **Created**: 2026-01-06
+**Completed**: 2026-01-06
 **Branch**: `feature/kb-cli-compliance-fixes`
-**PR**: TBD
-**Status**: In Progress
+**PR**: https://github.com/amlandas/Conduit-AI-Intelligence-Hub/pull/40
+**Status**: COMPLETE
 
 ---
 
@@ -170,7 +171,7 @@ const response = await window.conduit.searchKAG(query, options)
 ## Testing Checklist
 
 After each fix:
-- [ ] TypeScript compiles without errors
+- [x] TypeScript compiles without errors
 - [ ] GUI runs without console errors
 - [ ] Feature works as expected
 
@@ -179,6 +180,13 @@ After all fixes:
 - [ ] KAG search shows real errors on failure
 - [ ] Add source refreshes from CLI
 - [ ] Build completes successfully
+
+## Commits Made
+
+1. `a221a3a` - docs(kb): add implementation plan for CLI compliance fixes
+2. `22b7c9a` - fix(kb): show real errors instead of mock data in KAGPanel (Fix 1 + 4)
+3. `62f3312` - fix(kb): refresh from CLI after adding source instead of local state (Fix 3)
+4. `f003725` - feat(kb): wire RAG tuning settings to CLI search (Fix 2)
 
 ---
 
