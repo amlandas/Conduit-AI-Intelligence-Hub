@@ -12,7 +12,9 @@ export function CompleteStep(): JSX.Element {
   const { completeSetup, cliVersion, modelsInstalled, daemonRunning, qdrantRunning } = useSetupStore()
 
   const handleLaunch = () => {
+    console.log('[CompleteStep] Launch Conduit clicked, calling completeSetup()')
     completeSetup()
+    console.log('[CompleteStep] completeSetup() called, App should re-render')
     // The App component will detect setupCompleted and show the main UI
   }
 

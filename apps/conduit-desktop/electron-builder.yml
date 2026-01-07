@@ -14,6 +14,8 @@ directories:
 files:
   - dist/**/*
   - "!node_modules/**/*"
+  # Include native modules required for embedded terminal
+  - node_modules/node-pty/**/*
 
 # Extra resources (copied to app resources folder)
 # Includes bundled CLI binaries for first-run installation
@@ -83,6 +85,7 @@ asar: true
 asarUnpack:
   - "**/*.node"
   - "**/node_modules/sharp/**"
+  - "**/node_modules/node-pty/**"
 
 # Compression
 compression: maximum

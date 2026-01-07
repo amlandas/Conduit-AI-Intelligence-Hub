@@ -1,5 +1,9 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import type { ServiceStatus } from '../shared/types'
+
+// Re-export for consumers
+export type { ServiceStatus } from '../shared/types'
 
 export interface UpdateStatus {
   checking: boolean
@@ -35,13 +39,7 @@ export interface DependencyStatus {
   customPath?: string       // User-specified custom path (if any)
 }
 
-export interface ServiceStatus {
-  name: string
-  running: boolean
-  port?: number
-  container?: string
-  error?: string
-}
+// ServiceStatus is imported from shared/types
 
 export interface UninstallInfo {
   hasDaemonService: boolean
@@ -99,6 +97,8 @@ export interface ConduitAPI {
   // Daemon
   getDaemonStatus: () => Promise<unknown>
   getDaemonStats: () => Promise<unknown>
+  getBundledVersion: () => Promise<string | null>
+  restartDaemon: () => Promise<{ success: boolean; error?: string }>
 
   // Instances
   listInstances: () => Promise<unknown>
@@ -160,10 +160,24 @@ export interface ConduitAPI {
   onOllamaPullProgress: (callback: (data: { model: string; progress: number }) => void) => () => void
   autoInstallDependency: (options: { name: string }) => Promise<{ success: boolean; error?: string }>
   onInstallProgress: (callback: (data: { name: string; stage: string; percent: number; message: string }) => void) => () => void
+  // Container runtime installation
+  installContainerRuntime: (options: { runtime: 'podman' | 'docker' }) => Promise<{ success: boolean; error?: string }>
+  initPodmanMachine: () => Promise<{ success: boolean; error?: string }>
+  checkPodmanMachine: () => Promise<{ exists: boolean; running: boolean; name?: string }>
+  onContainerInstallProgress: (callback: (data: { runtime: string; stage: string; percent: number; message: string }) => void) => () => void
 
   // MCP configuration
   configureMCP: (options?: { client?: string }) => Promise<{ success: boolean; configured: boolean; configPath?: string; error?: string }>
   checkMCPConfig: (options?: { client?: string }) => Promise<{ configured: boolean; configPath?: string }>
+
+  // Embedded terminal
+  spawnTerminal: (options?: { command?: string; cwd?: string }) => Promise<{ success: boolean; error?: string }>
+  sendTerminalInput: (data: string) => void
+  resizeTerminal: (cols: number, rows: number) => void
+  killTerminal: () => Promise<{ success: boolean; error?: string }>
+  isTerminalActive: () => Promise<boolean>
+  onTerminalData: (callback: (data: string) => void) => () => void
+  onTerminalExit: (callback: (exitCode: number) => void) => () => void
 
   // Shell operations
   openExternal: (url: string) => Promise<void>
@@ -192,6 +206,8 @@ const conduitAPI: ConduitAPI = {
   // Daemon
   getDaemonStatus: () => ipcRenderer.invoke('daemon:status'),
   getDaemonStats: () => ipcRenderer.invoke('daemon:stats'),
+  getBundledVersion: () => ipcRenderer.invoke('daemon:get-bundled-version'),
+  restartDaemon: () => ipcRenderer.invoke('daemon:restart'),
 
   // Instances
   listInstances: () => ipcRenderer.invoke('instances:list'),
@@ -274,10 +290,36 @@ const conduitAPI: ConduitAPI = {
     ipcRenderer.on('install:progress', handler)
     return () => ipcRenderer.removeListener('install:progress', handler)
   },
+  // Container runtime installation
+  installContainerRuntime: (options) => ipcRenderer.invoke('setup:install-container-runtime', options),
+  initPodmanMachine: () => ipcRenderer.invoke('setup:init-podman-machine'),
+  checkPodmanMachine: () => ipcRenderer.invoke('setup:check-podman-machine'),
+  onContainerInstallProgress: (callback) => {
+    const handler = (_: unknown, data: { runtime: string; stage: string; percent: number; message: string }): void => callback(data)
+    ipcRenderer.on('container:install-progress', handler)
+    return () => ipcRenderer.removeListener('container:install-progress', handler)
+  },
 
   // MCP configuration
   configureMCP: (options) => ipcRenderer.invoke('mcp:configure', options),
   checkMCPConfig: (options) => ipcRenderer.invoke('mcp:check', options),
+
+  // Embedded terminal
+  spawnTerminal: (options) => ipcRenderer.invoke('terminal:spawn', options),
+  sendTerminalInput: (data) => ipcRenderer.send('terminal:input', data),
+  resizeTerminal: (cols, rows) => ipcRenderer.send('terminal:resize', { cols, rows }),
+  killTerminal: () => ipcRenderer.invoke('terminal:kill'),
+  isTerminalActive: () => ipcRenderer.invoke('terminal:is-active'),
+  onTerminalData: (callback) => {
+    const handler = (_: unknown, data: string): void => callback(data)
+    ipcRenderer.on('terminal:data', handler)
+    return () => ipcRenderer.removeListener('terminal:data', handler)
+  },
+  onTerminalExit: (callback) => {
+    const handler = (_: unknown, exitCode: number): void => callback(exitCode)
+    ipcRenderer.on('terminal:exit', handler)
+    return () => ipcRenderer.removeListener('terminal:exit', handler)
+  },
 
   // Shell operations
   openExternal: (url) => ipcRenderer.invoke('shell:open-external', url),

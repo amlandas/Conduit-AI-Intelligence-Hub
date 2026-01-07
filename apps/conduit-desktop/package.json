@@ -1,6 +1,6 @@
 {
   "name": "conduit-desktop",
-  "version": "0.1.18",
+  "version": "0.1.40",
   "description": "Conduit Desktop - AI Intelligence Hub for macOS",
   "author": "Simpleflo",
   "license": "MIT",
@@ -31,7 +31,10 @@
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
     "electron-updater": "^6.6.2",
+    "node-pty": "^1.0.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

@@ -4,6 +4,7 @@
  * PRINCIPLE: GUI is a thin wrapper over CLI
  * Service status comes from CLI commands, cards are clickable to start services.
  */
+import { useEffect, useRef, useCallback } from 'react'
 import { cn } from '@/lib/utils'
 import { useDaemonStore, useInstancesStore, useKBStore, useSettingsStore } from '@/stores'
 import { OllamaModels } from './OllamaModels'
@@ -83,12 +84,38 @@ function StatusCard({ title, icon: Icon, status, detail, className, onClick, loa
 }
 
 export function DashboardView(): JSX.Element {
-  const { status, stats, refresh, startService, startingService } = useDaemonStore()
+  const { getStatus, getStats, refresh, startService, startingService, isManualRefresh, cliResponse, services } = useDaemonStore()
   const { instances } = useInstancesStore()
   const { sources } = useKBStore()
   const { isFeatureVisible } = useSettingsStore()
 
+  // Derive status and stats from raw CLI response (stateless pattern)
+  const status = getStatus()
+  const stats = getStats()
+
   const runningCount = instances.filter((i) => i.status === 'RUNNING').length
+
+  // Use ref to always have latest refresh function without causing effect re-runs
+  const refreshRef = useRef(refresh)
+  refreshRef.current = refresh
+
+  // Manual refresh handler
+  const handleManualRefresh = useCallback(() => {
+    refreshRef.current(true)
+  }, [])
+
+  // Auto-refresh on mount and every 3 seconds
+  useEffect(() => {
+    // Initial refresh on mount
+    refreshRef.current()
+
+    // Auto-refresh every 3 seconds
+    const interval = setInterval(() => {
+      refreshRef.current()
+    }, 3000)
+
+    return () => clearInterval(interval)
+  }, []) // Empty dependency - runs once on mount
 
   // Service start handlers - delegate to CLI via store
   const handleStartDaemon = (): void => {
@@ -111,13 +138,19 @@ export function DashboardView(): JSX.Element {
     <div className="space-y-6 animate-fade-in">
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-semibold">Dashboard</h1>
-        <button
-          onClick={() => refresh()}
-          className="btn btn-secondary"
-        >
-          <RefreshCw className="w-4 h-4 mr-1.5" />
-          Refresh
-        </button>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={handleManualRefresh}
+            className="btn btn-secondary"
+            disabled={isManualRefresh}
+          >
+            <RefreshCw className={cn("w-4 h-4 mr-1.5", isManualRefresh && "animate-spin")} />
+            {isManualRefresh ? 'Refreshing...' : 'Refresh'}
+          </button>
+          <span className="text-xs text-macos-text-secondary dark:text-macos-text-dark-secondary">
+            auto refresh 3 secs
+          </span>
+        </div>
       </div>
 
       {/* Infrastructure Status */}
@@ -217,8 +250,8 @@ export function DashboardView(): JSX.Element {
           <h2 className="text-lg font-medium mb-3">Raw API Response</h2>
           <div className="space-y-3">
             <RawJSONViewer
-              data={{ status, stats }}
-              title="Daemon Status & Stats"
+              data={{ cliResponse, services, derived: { status, stats } }}
+              title="CLI Status Response (Raw)"
             />
             <RawJSONViewer
               data={{ instances, totalRunning: runningCount }}

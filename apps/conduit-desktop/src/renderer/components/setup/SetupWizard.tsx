@@ -1,25 +1,23 @@
+/**
+ * SetupWizard Component
+ *
+ * Simplified setup wizard that runs the CLI install script in an embedded terminal.
+ * Steps: Welcome → Terminal Installation → Complete
+ */
 import { useCallback } from 'react'
 import { useSetupStore, SetupStep } from '@/stores'
 import { cn } from '@/lib/utils'
 import {
   CheckCircle,
   Circle,
-  Loader2,
   Rocket,
   Terminal,
-  Package,
-  Server,
-  Cpu,
-  AlertCircle,
   ExternalLink
 } from 'lucide-react'
 
 // Step components
 import { WelcomeStep } from './steps/WelcomeStep'
-import { CLIInstallStep } from './steps/CLIInstallStep'
-import { DependenciesStep } from './steps/DependenciesStep'
-import { ServicesStep } from './steps/ServicesStep'
-import { ModelsStep } from './steps/ModelsStep'
+import { TerminalInstallStep } from './steps/TerminalInstallStep'
 import { CompleteStep } from './steps/CompleteStep'
 
 interface StepConfig {
@@ -29,6 +27,7 @@ interface StepConfig {
   icon: typeof Rocket
 }
 
+// Simplified to 3 steps
 const steps: StepConfig[] = [
   {
     id: 'welcome',
@@ -37,28 +36,10 @@ const steps: StepConfig[] = [
     icon: Rocket,
   },
   {
-    id: 'cli-install',
-    title: 'CLI Tools',
-    description: 'Install command-line tools',
+    id: 'terminal-install',
+    title: 'Install',
+    description: 'Run installation script',
     icon: Terminal,
-  },
-  {
-    id: 'dependencies',
-    title: 'Dependencies',
-    description: 'Check required software',
-    icon: Package,
-  },
-  {
-    id: 'services',
-    title: 'Services',
-    description: 'Start background services',
-    icon: Server,
-  },
-  {
-    id: 'models',
-    title: 'AI Models',
-    description: 'Download AI models',
-    icon: Cpu,
   },
   {
     id: 'complete',
@@ -119,7 +100,7 @@ function StepIndicator({
         >
           {step.title}
         </p>
-        <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary dark:text-macos-text-dark-tertiary truncate">
+        <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary truncate">
           {step.description}
         </p>
       </div>
@@ -131,22 +112,14 @@ export function SetupWizard(): JSX.Element {
   const {
     currentStep,
     setupCompleted,
-    currentOperation,
-    operationError,
   } = useSetupStore()
 
   const renderStep = useCallback(() => {
     switch (currentStep) {
       case 'welcome':
         return <WelcomeStep />
-      case 'cli-install':
-        return <CLIInstallStep />
-      case 'dependencies':
-        return <DependenciesStep />
-      case 'services':
-        return <ServicesStep />
-      case 'models':
-        return <ModelsStep />
+      case 'terminal-install':
+        return <TerminalInstallStep />
       case 'complete':
         return <CompleteStep />
       default:
@@ -183,28 +156,11 @@ export function SetupWizard(): JSX.Element {
           ))}
         </nav>
 
-        {/* Current operation indicator */}
-        {currentOperation && (
-          <div className="mt-6 px-3">
-            <div className="flex items-center gap-2 text-sm text-macos-text-secondary">
-              <Loader2 className="w-4 h-4 animate-spin text-macos-blue" />
-              <span className="truncate">{currentOperation}</span>
-            </div>
-          </div>
-        )}
-
-        {/* Error indicator */}
-        {operationError && (
-          <div className="mt-6 px-3">
-            <div className="flex items-start gap-2 text-sm text-macos-red">
-              <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-              <span>{operationError}</span>
-            </div>
-          </div>
-        )}
-
-        {/* Help link */}
-        <div className="absolute bottom-4 left-4 right-4">
+        {/* Help link and version */}
+        <div className="absolute bottom-4 left-4 right-4 space-y-2">
+          <p className="text-xs text-macos-text-tertiary dark:text-macos-text-dark-tertiary">
+            v{__APP_VERSION__}
+          </p>
           <a
             href="https://conduit.simpleflo.dev/docs/installation"
             target="_blank"
@@ -223,7 +179,7 @@ export function SetupWizard(): JSX.Element {
         <div className="h-8 drag-region" />
 
         {/* Step content */}
-        <div className="p-8 max-w-2xl mx-auto">
+        <div className="p-8 h-[calc(100%-2rem)]">
           {renderStep()}
         </div>
       </main>

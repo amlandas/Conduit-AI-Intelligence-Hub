@@ -19,7 +19,18 @@ const PACKAGE_JSON = path.resolve(__dirname, '../package.json');
 
 // Get package.json for version info
 const pkg = JSON.parse(fs.readFileSync(PACKAGE_JSON, 'utf-8'));
-const bundledCLIVersion = pkg.conduit?.bundledCLIVersion || '0.1.0';
+
+// Get actual CLI version from git (like Makefile does)
+let cliVersion;
+try {
+  cliVersion = execFileSync('git', ['describe', '--tags', '--always', '--dirty'], {
+    cwd: ROOT_DIR,
+    encoding: 'utf-8',
+  }).trim();
+} catch {
+  cliVersion = pkg.conduit?.bundledCLIVersion || '0.1.0';
+}
+const buildTime = new Date().toISOString();
 
 // Detect architecture
 const arch = process.arch === 'arm64' ? 'arm64' : 'amd64';
@@ -31,7 +42,8 @@ console.log('  Conduit CLI Bundler');
 console.log('='.repeat(60));
 console.log(`  Platform: ${platform}`);
 console.log(`  Architecture: ${arch}`);
-console.log(`  CLI Version: ${bundledCLIVersion}`);
+console.log(`  CLI Version: ${cliVersion}`);
+console.log(`  Build Time: ${buildTime}`);
 console.log(`  Output: ${RESOURCES_DIR}`);
 console.log('='.repeat(60));
 console.log('');
@@ -50,13 +62,17 @@ const buildEnv = {
   GOARCH: arch,
 };
 
+// ldflags for version injection (matching Makefile format)
+const ldflags = `-s -w -X main.Version=${cliVersion} -X main.BuildTime=${buildTime}`;
+
 // Build conduit CLI using execFileSync (safer than execSync)
 console.log('Building conduit CLI...');
 try {
   execFileSync('go', [
     'build',
     '-tags', 'fts5',
-    '-ldflags', `-s -w -X main.version=${bundledCLIVersion}`,
+    '-trimpath',
+    '-ldflags', ldflags,
     '-o', path.join(RESOURCES_DIR, 'conduit'),
     './cmd/conduit'
   ], {
@@ -76,7 +92,8 @@ try {
   execFileSync('go', [
     'build',
     '-tags', 'fts5',
-    '-ldflags', `-s -w -X main.version=${bundledCLIVersion}`,
+    '-trimpath',
+    '-ldflags', ldflags,
     '-o', path.join(RESOURCES_DIR, 'conduit-daemon'),
     './cmd/conduit-daemon'
   ], {
@@ -96,10 +113,10 @@ fs.chmodSync(path.join(RESOURCES_DIR, 'conduit-daemon'), 0o755);
 
 // Create version manifest
 const manifest = {
-  version: bundledCLIVersion,
+  version: cliVersion,
   platform: platform,
   arch: arch,
-  buildDate: new Date().toISOString(),
+  buildDate: buildTime,
   binaries: ['conduit', 'conduit-daemon'],
 };
 

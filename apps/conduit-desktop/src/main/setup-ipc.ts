@@ -1,22 +1,26 @@
 /**
- * Setup Wizard IPC Handlers
+ * Setup & Dashboard IPC Handlers
  *
- * PRINCIPLE: GUI is a thin wrapper over CLI
- * All operations delegate to `conduit` CLI commands - NO logic reimplementation.
- *
- * Handles CLI installation, dependency detection, service management,
- * and AI model download during first-run setup.
+ * SIMPLIFIED: The setup wizard now embeds a terminal that runs the CLI install script.
+ * This file only contains:
+ * - CLI detection for App.tsx launch (setup:check-cli)
+ * - KB sync operations (used by dashboard)
+ * - MCP configuration (used by dashboard)
+ * - Shell utilities
  */
 
 import { ipcMain, app, shell, BrowserWindow } from 'electron'
-import { execFile, spawn, ChildProcess } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import * as fs from 'fs'
 import * as path from 'path'
 import * as os from 'os'
+import type { ServiceStatus } from '../shared/types'
 
 const execFileAsync = promisify(execFile)
 const fsPromises = fs.promises
+
+// ServiceStatus is imported from shared/types
 
 interface CLIStatus {
   installed: boolean
@@ -24,28 +28,6 @@ interface CLIStatus {
   path: string | null
   bundledVersion: string | null
   needsUpdate: boolean
-}
-
-interface DependencyStatus {
-  name: string
-  installed: boolean
-  version?: string
-  required: boolean
-  installUrl?: string
-  brewFormula?: string
-  binaryPath?: string       // Path where the binary was found
-  customPath?: string       // User-specified custom path (if any)
-}
-
-// NOTE: Custom paths are now managed via CLI: `conduit config set/unset deps.<name>.path`
-// The old custom-paths.json file is deprecated.
-
-interface ServiceStatus {
-  name: string
-  running: boolean
-  port?: number
-  container?: string
-  error?: string
 }
 
 // Get path to bundled binaries
@@ -63,6 +45,26 @@ function getCLIInstallPath(): string {
   return path.join(home, '.local', 'bin')
 }
 
+// Build enhanced PATH that includes common installation directories
+// Electron apps launched from Dock/Finder don't inherit shell PATH from .zshrc/.bashrc
+function getEnhancedEnv(): NodeJS.ProcessEnv {
+  const home = os.homedir()
+  const additionalPaths = [
+    '/opt/homebrew/bin',           // Homebrew on Apple Silicon
+    '/usr/local/bin',              // Homebrew on Intel, manual installs
+    path.join(home, '.local', 'bin'), // User-local installs (common for install scripts)
+    '/usr/bin',
+    '/bin',
+    '/usr/sbin',
+    '/sbin',
+  ]
+  return {
+    ...process.env,
+    PATH: `${additionalPaths.join(':')}:${process.env.PATH || ''}`,
+    HOME: home,
+  }
+}
+
 // Read bundled manifest
 async function getBundledManifest(): Promise<{ version: string } | null> {
   try {
@@ -74,49 +76,100 @@ async function getBundledManifest(): Promise<{ version: string } | null> {
   }
 }
 
+// Helper: Compare semver versions (returns 1 if a > b, -1 if a < b, 0 if equal)
+function compareVersions(a: string, b: string): number {
+  const partsA = a.split('.').map(Number)
+  const partsB = b.split('.').map(Number)
+
+  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
+    const partA = partsA[i] || 0
+    const partB = partsB[i] || 0
+    if (partA > partB) return 1
+    if (partA < partB) return -1
+  }
+  return 0
+}
+
 export function setupSetupIpcHandlers(): void {
-  // Check CLI installation status
+  // ════════════════════════════════════════════════════════════════════════════
+  // CLI Detection (Used by App.tsx to determine if setup wizard is needed)
+  // ════════════════════════════════════════════════════════════════════════════
+
   ipcMain.handle('setup:check-cli', async (): Promise<CLIStatus> => {
     const manifest = await getBundledManifest()
     const bundledVersion = manifest?.version || null
+    const enhancedEnv = getEnhancedEnv()
 
+    // Helper to get version from a CLI path
+    const getVersionFromPath = async (cliPath: string): Promise<string | null> => {
+      try {
+        // CLI uses --version flag, not 'version' subcommand
+        // Output format: "conduit version <version> (built <date>)"
+        const { stdout } = await execFileAsync(cliPath, ['--version'], { env: enhancedEnv })
+        // Parse version from "conduit version 0.1.0 (built ...)" or "conduit version d079a9c (built ...)"
+        const match = stdout.match(/conduit version ([^\s(]+)/)
+        return match ? match[1].replace(/^v/, '') : stdout.trim()
+      } catch (err) {
+        console.error(`[setup-ipc] Failed to get version from ${cliPath}:`, err)
+        return null
+      }
+    }
+
+    // First, check common installation paths directly
+    // This is more reliable than `which` since Electron doesn't inherit shell PATH
+    const commonPaths = [
+      '/usr/local/bin/conduit',
+      path.join(os.homedir(), '.local', 'bin', 'conduit'),
+      '/opt/homebrew/bin/conduit',
+    ]
+
+    for (const cliPath of commonPaths) {
+      try {
+        await fsPromises.access(cliPath, fs.constants.X_OK)
+        // File exists and is executable
+        const version = await getVersionFromPath(cliPath)
+        const needsUpdate = bundledVersion && version
+          ? compareVersions(bundledVersion, version) > 0
+          : false
+
+        console.log(`[setup-ipc] Found conduit at ${cliPath}, version: ${version}`)
+        return {
+          installed: true,
+          version,
+          path: cliPath,
+          bundledVersion,
+          needsUpdate,
+        }
+      } catch {
+        // Path doesn't exist or isn't executable, try next
+      }
+    }
+
+    // Fallback: try `which` with enhanced PATH
     try {
-      // Try to find conduit in PATH
-      const { stdout } = await execFileAsync('which', ['conduit'])
+      const { stdout } = await execFileAsync('which', ['conduit'], { env: enhancedEnv })
       const cliPath = stdout.trim()
 
       if (cliPath) {
-        // Get version
-        try {
-          const { stdout: versionOut } = await execFileAsync('conduit', ['version'])
-          const version = versionOut.trim().replace(/^v/, '')
+        const version = await getVersionFromPath(cliPath)
+        const needsUpdate = bundledVersion && version
+          ? compareVersions(bundledVersion, version) > 0
+          : false
 
-          // Check if update needed
-          const needsUpdate = bundledVersion
-            ? compareVersions(bundledVersion, version) > 0
-            : false
-
-          return {
-            installed: true,
-            version,
-            path: cliPath,
-            bundledVersion,
-            needsUpdate,
-          }
-        } catch {
-          return {
-            installed: true,
-            version: null,
-            path: cliPath,
-            bundledVersion,
-            needsUpdate: false,
-          }
+        console.log(`[setup-ipc] Found conduit via which at ${cliPath}, version: ${version}`)
+        return {
+          installed: true,
+          version,
+          path: cliPath,
+          bundledVersion,
+          needsUpdate,
         }
       }
     } catch {
-      // conduit not found in PATH
+      // conduit not found via which either
     }
 
+    console.log('[setup-ipc] Conduit CLI not found')
     return {
       installed: false,
       version: null,
@@ -126,594 +179,166 @@ export function setupSetupIpcHandlers(): void {
     }
   })
 
-  // Install CLI from bundled binaries
-  ipcMain.handle('setup:install-cli', async (): Promise<{ success: boolean; version?: string; path?: string; error?: string }> => {
-    try {
-      const bundledPath = getBundledBinPath()
-      const installPath = getCLIInstallPath()
+  // ════════════════════════════════════════════════════════════════════════════
+  // Shell Operations
+  // ════════════════════════════════════════════════════════════════════════════
 
-      // Ensure install directory exists
-      await fsPromises.mkdir(installPath, { recursive: true })
+  ipcMain.handle('shell:open-external', async (_, url: string): Promise<void> => {
+    await shell.openExternal(url)
+  })
 
-      // Copy binaries
-      const binaries = ['conduit', 'conduit-daemon']
-      for (const binary of binaries) {
-        const src = path.join(bundledPath, binary)
-        const dest = path.join(installPath, binary)
-
-        // Check if source exists
-        await fsPromises.access(src)
-
-        // Copy file
-        await fsPromises.copyFile(src, dest)
-
-        // Make executable
-        await fsPromises.chmod(dest, 0o755)
-      }
-
-      // Get installed version
-      const manifest = await getBundledManifest()
-
-      // Check if install path is in PATH
-      const pathEnv = process.env.PATH || ''
-      if (!pathEnv.includes(installPath)) {
-        // Suggest adding to PATH
-        console.log(`Note: ${installPath} should be added to PATH`)
-      }
-
-      return {
-        success: true,
-        version: manifest?.version,
-        path: installPath,
-      }
-    } catch (err) {
-      return {
-        success: false,
-        error: (err as Error).message,
-      }
+  ipcMain.handle('shell:open-terminal', async (): Promise<void> => {
+    // macOS: open Terminal app
+    if (process.platform === 'darwin') {
+      spawn('open', ['-a', 'Terminal'])
     }
   })
 
-  // Check dependencies - DELEGATES TO CLI: conduit deps status --json
-  ipcMain.handle('setup:check-dependencies', async (): Promise<DependencyStatus[]> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    const results: DependencyStatus[] = []
+  // ════════════════════════════════════════════════════════════════════════════
+  // Service Status Detection (Used by Dashboard)
+  // ════════════════════════════════════════════════════════════════════════════
 
-    try {
-      const { stdout } = await execFileAsync(conduitPath, ['deps', 'status', '--json'])
-      const deps = JSON.parse(stdout) as Record<string, { installed: boolean; path?: string; version?: string; required: boolean }>
-
-      // Map CLI output to GUI format
-      if (deps.homebrew) {
-        results.push({
-          name: 'Homebrew',
-          installed: deps.homebrew.installed,
-          version: deps.homebrew.version?.replace('Homebrew ', ''),
-          required: false,
-          binaryPath: deps.homebrew.path,
-          installUrl: 'https://brew.sh',
-        })
-      }
-
-      if (deps.ollama) {
-        results.push({
-          name: 'Ollama',
-          installed: deps.ollama.installed,
-          version: deps.ollama.version,
-          required: true,
-          binaryPath: deps.ollama.path,
-          installUrl: 'https://ollama.com/download',
-          brewFormula: 'ollama',
-        })
-      }
-
-      // Container runtime: prefer Podman, fall back to Docker
-      if (deps.podman?.installed) {
-        results.push({
-          name: 'Docker or Podman',
-          installed: true,
-          version: `Podman ${deps.podman.version?.split(' ').pop() || ''}`,
-          required: true,
-          binaryPath: deps.podman.path,
-        })
-      } else if (deps.docker?.installed) {
-        results.push({
-          name: 'Docker or Podman',
-          installed: true,
-          version: deps.docker.version,
-          required: true,
-          binaryPath: deps.docker.path,
-        })
-      } else {
-        results.push({
-          name: 'Docker or Podman',
-          installed: false,
-          required: true,
-          installUrl: 'https://podman.io/getting-started/installation',
-          brewFormula: 'podman',
-        })
-      }
-    } catch (err) {
-      // CLI not available or failed - return empty/error state
-      console.error('Failed to check dependencies via CLI:', err)
-      results.push(
-        { name: 'Homebrew', installed: false, required: false, installUrl: 'https://brew.sh' },
-        { name: 'Ollama', installed: false, required: true, installUrl: 'https://ollama.com/download', brewFormula: 'ollama' },
-        { name: 'Docker or Podman', installed: false, required: true, installUrl: 'https://podman.io/getting-started/installation', brewFormula: 'podman' }
-      )
-    }
-
-    return results
-  })
-
-  // Install dependency via Homebrew - DELEGATES TO CLI: conduit deps install
-  ipcMain.handle('setup:install-dependency', async (_, { name, brewFormula }: { name: string; brewFormula: string }): Promise<{ success: boolean; error?: string }> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    try {
-      // CLI handles platform detection and installation method
-      await execFileAsync(conduitPath, ['deps', 'install', brewFormula])
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: `Failed to install ${name}: ${(err as Error).message}` }
-    }
-  })
-
-  // Validate a user-specified binary path - DELEGATES TO CLI: conduit deps validate
-  ipcMain.handle('setup:validate-binary-path', async (_, { binaryPath }: { name: string; binaryPath: string }): Promise<{ valid: boolean; version?: string; error?: string }> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    try {
-      const { stdout } = await execFileAsync(conduitPath, ['deps', 'validate', binaryPath, '--json'])
-      const result = JSON.parse(stdout) as { valid: boolean; version?: string; error?: string }
-      return result
-    } catch (err) {
-      return { valid: false, error: `Validation failed: ${(err as Error).message}` }
-    }
-  })
-
-  // Save a custom binary path - DELEGATES TO CLI: conduit config set
-  ipcMain.handle('setup:save-custom-path', async (_, { name, binaryPath }: { name: string; binaryPath: string }): Promise<{ success: boolean; error?: string }> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    try {
-      // Map dependency display names to internal names
-      const nameMap: Record<string, string> = {
-        'Homebrew': 'brew',
-        'Ollama': 'ollama',
-        'Docker or Podman': 'podman',
-      }
-      const internalName = nameMap[name] || name.toLowerCase()
-
-      // Use CLI to persist custom path
-      await execFileAsync(conduitPath, ['config', 'set', `deps.${internalName}.path`, binaryPath])
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: (err as Error).message }
-    }
-  })
-
-  // Clear a custom binary path - DELEGATES TO CLI: conduit config unset
-  ipcMain.handle('setup:clear-custom-path', async (_, { name }: { name: string }): Promise<{ success: boolean; error?: string }> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    try {
-      const nameMap: Record<string, string> = {
-        'Homebrew': 'brew',
-        'Ollama': 'ollama',
-        'Docker or Podman': 'podman',
-      }
-      const internalName = nameMap[name] || name.toLowerCase()
-
-      // Use CLI to remove custom path
-      await execFileAsync(conduitPath, ['config', 'unset', `deps.${internalName}.path`])
-      return { success: true }
-    } catch (err) {
-      return { success: false, error: (err as Error).message }
-    }
-  })
-
-  // Open file dialog to browse for a binary
-  ipcMain.handle('setup:browse-for-binary', async (_, { name }: { name: string }): Promise<{ path?: string; cancelled: boolean }> => {
-    const { dialog } = await import('electron')
-    const result = await dialog.showOpenDialog({
-      title: `Locate ${name}`,
-      properties: ['openFile'],
-      message: `Select the ${name} executable`,
-    })
-
-    if (result.canceled || result.filePaths.length === 0) {
-      return { cancelled: true }
-    }
-
-    return { path: result.filePaths[0], cancelled: false }
-  })
-
-  // Check services status - delegate to CLI commands
   ipcMain.handle('setup:check-services', async (): Promise<ServiceStatus[]> => {
-    const results: ServiceStatus[] = []
+    const services: ServiceStatus[] = []
     const conduitPath = path.join(getCLIInstallPath(), 'conduit')
 
-    // Check Conduit Daemon via CLI: conduit service status
     try {
-      const { stdout } = await execFileAsync(conduitPath, ['service', 'status'])
-      // CLI outputs "✓ Conduit daemon is running" when running
-      const isRunning = stdout.includes('daemon is running')
-      results.push({
-        name: 'Conduit Daemon',
-        running: isRunning,
-        port: undefined,
+      // Get status from CLI - enhanced schema with detailed info
+      const { stdout } = await execFileAsync(conduitPath, ['status', '--json'], {
+        env: getEnhancedEnv(),
+        timeout: 10000
       })
-    } catch {
-      results.push({
-        name: 'Conduit Daemon',
-        running: false,
-      })
-    }
-
-    // Check Ollama via CLI: conduit ollama status
-    try {
-      const { stdout } = await execFileAsync(conduitPath, ['ollama', 'status'])
-      // CLI outputs "✓ Ollama is running" when running
-      const isRunning = stdout.includes('✓ Ollama is running') || stdout.includes('is running')
-      results.push({
-        name: 'Ollama',
-        running: isRunning,
-        port: isRunning ? 11434 : undefined,
-      })
-    } catch {
-      results.push({
-        name: 'Ollama',
-        running: false,
-      })
-    }
-
-    // Check Qdrant via CLI: conduit qdrant status
-    try {
-      const { stdout } = await execFileAsync(conduitPath, ['qdrant', 'status'])
-      // CLI outputs "API Status:        ✓ reachable" when running
-      const isRunning = stdout.includes('✓ reachable') || stdout.includes('✓ running')
-      results.push({
-        name: 'Qdrant',
-        running: isRunning,
-        port: isRunning ? 6333 : undefined,
-        container: isRunning ? 'qdrant' : undefined,
-      })
-    } catch {
-      results.push({
-        name: 'Qdrant',
-        running: false,
-      })
-    }
-
-    // Check FalkorDB via CLI: conduit falkordb status
-    try {
-      const { stdout } = await execFileAsync(conduitPath, ['falkordb', 'status'])
-      // CLI outputs "✗ not installed" when not running
-      const isRunning = !stdout.includes('✗ not installed') && !stdout.includes('not running')
-      results.push({
-        name: 'FalkorDB',
-        running: isRunning,
-        port: isRunning ? 6379 : undefined,
-        container: isRunning ? 'falkordb' : undefined,
-      })
-    } catch {
-      results.push({
-        name: 'FalkorDB',
-        running: false,
-      })
-    }
-
-    return results
-  })
-
-  // Start a specific service
-  // NOTE: Uses timeout to prevent hanging on CLI commands
-  ipcMain.handle('setup:start-service', async (_, { name }: { name: string }): Promise<{ success: boolean; error?: string }> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    const CLI_TIMEOUT = 60000 // 60 seconds timeout for service start commands
-
-    try {
-      switch (name) {
-        case 'Conduit Daemon': {
-          // Delegate to CLI: conduit service start
-          await execFileAsync(conduitPath, ['service', 'start'], { timeout: CLI_TIMEOUT })
-          return { success: true }
-        }
-        case 'Ollama': {
-          // Ollama is started via system services or direct command
-          // Try brew services first (macOS), then systemctl (Linux), then direct
-          if (process.platform === 'darwin') {
-            try {
-              // Try brew services start first
-              await execFileAsync('/opt/homebrew/bin/brew', ['services', 'start', 'ollama'], { timeout: CLI_TIMEOUT })
-              return { success: true }
-            } catch {
-              // Try /usr/local/bin/brew for Intel Macs
-              try {
-                await execFileAsync('/usr/local/bin/brew', ['services', 'start', 'ollama'], { timeout: CLI_TIMEOUT })
-                return { success: true }
-              } catch {
-                // Fall back to direct ollama serve
-                try {
-                  const child = spawn('ollama', ['serve'], { detached: true, stdio: 'ignore' })
-                  child.unref()
-                  // Wait a bit for Ollama to start
-                  await new Promise(resolve => setTimeout(resolve, 2000))
-                  return { success: true }
-                } catch {
-                  return { success: false, error: 'Failed to start Ollama. Please start it manually with: ollama serve' }
-                }
-              }
-            }
-          } else {
-            // Linux
-            try {
-              await execFileAsync('sudo', ['systemctl', 'start', 'ollama'], { timeout: CLI_TIMEOUT })
-              return { success: true }
-            } catch {
-              // Try direct start
-              try {
-                const child = spawn('ollama', ['serve'], { detached: true, stdio: 'ignore' })
-                child.unref()
-                await new Promise(resolve => setTimeout(resolve, 2000))
-                return { success: true }
-              } catch {
-                return { success: false, error: 'Failed to start Ollama. Please start it manually with: ollama serve' }
-              }
-            }
-          }
-        }
-        case 'Qdrant': {
-          // Delegate to CLI: conduit qdrant install
-          await execFileAsync(conduitPath, ['qdrant', 'install'], { timeout: CLI_TIMEOUT })
-          return { success: true }
-        }
-        case 'FalkorDB': {
-          // Delegate to CLI: conduit falkordb install
-          await execFileAsync(conduitPath, ['falkordb', 'install'], { timeout: CLI_TIMEOUT })
-          return { success: true }
-        }
-        case 'Container Runtime':
-        case 'Podman': {
-          // Start Podman machine on macOS
-          // Note: CLI doesn't have a dedicated command for this yet
-          // This directly starts podman machine as infrastructure management
-          if (process.platform === 'darwin') {
-            try {
-              // Try to start podman machine
-              await execFileAsync('podman', ['machine', 'start'], { timeout: CLI_TIMEOUT })
-              return { success: true }
-            } catch (podmanErr) {
-              // If podman machine fails, maybe Docker is available?
-              return {
-                success: false,
-                error: 'Could not start Podman machine. If using Docker, please start Docker Desktop manually.'
-              }
-            }
-          } else {
-            // On Linux, podman should just work if installed
-            return { success: true }
-          }
-        }
-        default:
-          return { success: false, error: `Unknown service: ${name}` }
+      const cliStatus = JSON.parse(stdout) as {
+        cli?: { version?: string; build_time?: string; path?: string };
+        daemon?: {
+          ready?: boolean;
+          version?: string;
+          build_time?: string;
+          uptime?: string;
+          pid?: number;
+          socket?: string;
+        };
+        dependencies?: {
+          container_runtime?: {
+            name?: string;  // 'podman' or 'docker'
+            available?: boolean;
+            path?: string;
+            version?: string;
+            managed_by?: string;
+          };
+          qdrant?: {
+            available?: boolean;
+            host?: string;
+            http_port?: number;
+            grpc_port?: number;
+            managed_by?: string;
+            collection?: string;
+            status?: string;
+            vectors_count?: number;
+            indexed_vectors?: number;
+            container?: { name?: string; image?: string; status?: string };
+          };
+          ollama?: {
+            available?: boolean;
+            host?: string;
+            path?: string;
+            managed_by?: string;
+            version?: string;
+            models_installed?: string[];
+            models_required?: { embedding?: string; extraction?: string };
+          };
+          sqlite?: {
+            available?: boolean;
+            version?: string;
+            fts5_enabled?: boolean;
+            database_path?: string;
+            documents_count?: number;
+            chunks_count?: number;
+          };
+          falkordb?: {
+            available?: boolean;
+            host?: string;
+            port?: number;
+            managed_by?: string;
+            graph_name?: string;
+            container?: { name?: string; image?: string; status?: string };
+            entities_count?: number;
+            relationships_count?: number;
+          };
+        };
+        kag?: {
+          enabled?: boolean;
+          provider?: string;
+          model?: string;
+          stats?: {
+            chunks_processed?: number;
+            chunks_pending?: number;
+            chunks_error?: number;
+            entities_extracted?: number;
+            relationships_extracted?: number;
+          };
+        };
       }
+
+      // 1. Daemon status
+      services.push({
+        name: 'Conduit Daemon',
+        running: cliStatus.daemon?.ready ?? false,
+      })
+
+      // 2. Container Runtime
+      const containerRuntime = cliStatus.dependencies?.container_runtime
+      if (containerRuntime) {
+        services.push({
+          name: 'Container Runtime',
+          running: containerRuntime.available ?? false,
+          container: containerRuntime.name, // Now directly 'podman' or 'docker'
+        })
+      }
+
+      // 3. Qdrant
+      const qdrant = cliStatus.dependencies?.qdrant
+      services.push({
+        name: 'Qdrant',
+        running: qdrant?.available ?? false,
+        port: qdrant?.http_port ?? 6333,
+      })
+
+      // 4. Ollama - from CLI (GUI is a thin wrapper over CLI)
+      const ollama = cliStatus.dependencies?.ollama
+      services.push({
+        name: 'Ollama',
+        running: ollama?.available ?? false,
+        port: 11434,
+      })
+
+      // 5. FalkorDB - from CLI (GUI is a thin wrapper over CLI)
+      const falkordb = cliStatus.dependencies?.falkordb
+      services.push({
+        name: 'FalkorDB',
+        running: falkordb?.available ?? false,
+        port: falkordb?.port ?? 6379,
+      })
+
     } catch (err) {
-      const errorMessage = (err as Error).message
-      // Provide more helpful error messages
-      if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('timed out')) {
-        return { success: false, error: `Starting ${name} timed out. The service may still be starting in the background.` }
-      }
-      return { success: false, error: errorMessage }
+      console.error('[setup-ipc] Failed to get CLI status:', err)
+      // If CLI fails, daemon is likely not running
+      services.push({ name: 'Conduit Daemon', running: false })
+      services.push({ name: 'Ollama', running: false, port: 11434 })
+      services.push({ name: 'FalkorDB', running: false, port: 6379 })
     }
+
+    console.log('[setup-ipc] Service status:', services)
+    return services
   })
 
-  // Start all services
-  // NOTE: Uses same timeout as individual service start
-  ipcMain.handle('setup:start-all-services', async (): Promise<{ success: boolean; error?: string }> => {
-    const errors: string[] = []
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    const CLI_TIMEOUT = 60000 // 60 seconds timeout for service start commands
-
-    // Start services in sequence - delegate to CLI commands
-    const startService = async (name: string): Promise<{ success: boolean; error?: string }> => {
-      try {
-        switch (name) {
-          case 'Conduit Daemon': {
-            // Delegate to CLI: conduit service start
-            await execFileAsync(conduitPath, ['service', 'start'], { timeout: CLI_TIMEOUT })
-            return { success: true }
-          }
-          case 'Qdrant': {
-            // Delegate to CLI: conduit qdrant install
-            await execFileAsync(conduitPath, ['qdrant', 'install'], { timeout: CLI_TIMEOUT })
-            return { success: true }
-          }
-          case 'FalkorDB': {
-            // Delegate to CLI: conduit falkordb install
-            await execFileAsync(conduitPath, ['falkordb', 'install'], { timeout: CLI_TIMEOUT })
-            return { success: true }
-          }
-          default:
-            return { success: false, error: `Unknown service: ${name}` }
-        }
-      } catch (err) {
-        const errorMessage = (err as Error).message
-        if (errorMessage.includes('ETIMEDOUT') || errorMessage.includes('timed out')) {
-          return { success: false, error: `Starting ${name} timed out. The service may still be starting in the background.` }
-        }
-        return { success: false, error: errorMessage }
-      }
-    }
-
-    const services = ['Conduit Daemon', 'Qdrant', 'FalkorDB']
-    for (const service of services) {
-      const result = await startService(service)
-      if (!result.success) {
-        errors.push(`${service}: ${result.error}`)
-      }
-    }
-
-    if (errors.length > 0) {
-      return { success: false, error: errors.join('; ') }
-    }
-    return { success: true }
+  ipcMain.handle('setup:start-service', async (): Promise<{ success: boolean; error?: string }> => {
+    return { success: false, error: 'Services are managed by CLI install script' }
   })
 
-  // Check installed Ollama models - delegate to CLI
-  ipcMain.handle('setup:check-models', async (): Promise<string[]> => {
-    try {
-      const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-      const { stdout } = await execFileAsync(conduitPath, ['ollama', 'models'])
-      // CLI outputs "Available models:" followed by model list lines
-      // Parse lines after "Available models:" to extract model names
-      const lines = stdout.trim().split('\n')
-      const models: string[] = []
-      let inModelList = false
-      for (const line of lines) {
-        if (line.includes('Available models:')) {
-          inModelList = true
-          continue
-        }
-        if (line.includes('Required models status:')) {
-          break // Stop at the required models section
-        }
-        if (inModelList && line.trim().startsWith('NAME')) {
-          continue // Skip header line
-        }
-        if (inModelList && line.trim()) {
-          // Model name is first column (e.g., "  nomic-embed-text:latest")
-          const modelName = line.trim().split(/\s+/)[0]
-          if (modelName && !modelName.startsWith('✓') && !modelName.startsWith('✗')) {
-            models.push(modelName)
-          }
-        }
-      }
-      return models
-    } catch {
-      return []
-    }
-  })
-
-  // Pull an Ollama model with progress - delegate to CLI
-  ipcMain.handle('setup:pull-model', async (event, { model }: { model: string }): Promise<{ success: boolean; error?: string }> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-
-    return new Promise((resolve) => {
-      const windows = BrowserWindow.getAllWindows()
-      let child: ChildProcess
-
-      try {
-        // Delegate to CLI: conduit ollama pull <model>
-        child = spawn(conduitPath, ['ollama', 'pull', model])
-
-        let lastProgress = 0
-        const parseProgress = (output: string): void => {
-          // Parse progress from output (e.g., "pulling manifest... 100%")
-          const match = output.match(/(\d+)%/)
-          if (match) {
-            const progress = parseInt(match[1], 10)
-            if (progress !== lastProgress) {
-              lastProgress = progress
-              windows.forEach((window) => {
-                window.webContents.send('ollama:pull-progress', { model, progress })
-              })
-            }
-          }
-        }
-
-        child.stdout?.on('data', (data: Buffer) => {
-          parseProgress(data.toString())
-        })
-
-        child.stderr?.on('data', (data: Buffer) => {
-          // Ollama uses stderr for progress too
-          parseProgress(data.toString())
-        })
-
-        child.on('close', (code) => {
-          if (code === 0) {
-            windows.forEach((window) => {
-              window.webContents.send('ollama:pull-progress', { model, progress: 100 })
-            })
-            resolve({ success: true })
-          } else {
-            resolve({ success: false, error: `conduit ollama pull exited with code ${code}` })
-          }
-        })
-
-        child.on('error', (err) => {
-          resolve({ success: false, error: err.message })
-        })
-      } catch (err) {
-        resolve({ success: false, error: (err as Error).message })
-      }
-    })
-  })
-
-  // Auto-install dependency (one-click installation) - DELEGATES TO CLI: conduit deps install
-  // CLI handles platform detection, installation methods, and progress reporting
-  ipcMain.handle('setup:auto-install-dependency', async (_, { name }: { name: string }): Promise<{ success: boolean; error?: string }> => {
-    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
-    const windows = BrowserWindow.getAllWindows()
-
-    const sendProgress = (stage: string, percent: number, message: string): void => {
-      windows.forEach((window) => {
-        window.webContents.send('install:progress', { name, stage, percent, message })
-      })
-    }
-
-    // Map display name to CLI dependency name
-    const depNameMap: Record<string, string> = {
-      'Ollama': 'ollama',
-      'Podman': 'podman',
-      'Docker or Podman': 'podman',
-      'Homebrew': 'homebrew',
-    }
-    const depName = depNameMap[name]
-
-    if (!depName) {
-      return { success: false, error: `Auto-installation not supported for ${name}. Please install manually.` }
-    }
-
-    sendProgress('installing', 10, `Installing ${name}...`)
-
-    return new Promise((resolve) => {
-      const child = spawn(conduitPath, ['deps', 'install', depName], {
-        env: { ...process.env }
-      })
-
-      let errorOutput = ''
-
-      // Parse CLI progress output: PROGRESS:<percent>:<message>
-      child.stdout?.on('data', (data: Buffer) => {
-        const lines = data.toString().split('\n')
-        for (const line of lines) {
-          const match = line.match(/^PROGRESS:(\d+):(.+)$/)
-          if (match) {
-            const percent = parseInt(match[1], 10)
-            const message = match[2]
-            const stage = percent < 30 ? 'downloading' : percent < 80 ? 'installing' : percent < 100 ? 'verifying' : 'complete'
-            sendProgress(stage, percent, message)
-          }
-        }
-      })
-
-      child.stderr?.on('data', (data: Buffer) => {
-        errorOutput += data.toString()
-      })
-
-      child.on('close', (code) => {
-        if (code === 0) {
-          sendProgress('complete', 100, `${name} installed successfully!`)
-          resolve({ success: true })
-        } else {
-          resolve({ success: false, error: `Installation failed: ${errorOutput || `exit code ${code}`}` })
-        }
-      })
-
-      child.on('error', (err) => {
-        resolve({ success: false, error: `Failed to run CLI: ${err.message}` })
-      })
-    })
-  })
+  // ════════════════════════════════════════════════════════════════════════════
+  // KB Sync Operations (Used by Dashboard)
+  // ════════════════════════════════════════════════════════════════════════════
 
   // KB Sync with progress - DELEGATES TO CLI: conduit kb sync
   ipcMain.handle('kb:sync-with-progress', async (_, sourceId?: string): Promise<{ success: boolean; processed: number; errors: number; errorTypes: string[]; error?: string }> => {
@@ -739,32 +364,40 @@ export function setupSetupIpcHandlers(): void {
       const errorTypes: string[] = []
       let lastOutput = ''
 
-      // Parse CLI output for progress
       child.stdout?.on('data', (data: Buffer) => {
         const output = data.toString()
         lastOutput += output
 
-        // Parse progress from CLI output
-        // Example: "Syncing... 50% (100/200 chunks)"
-        const progressMatch = output.match(/(\d+)%/)
-        if (progressMatch) {
-          const percent = parseInt(progressMatch[1], 10)
-          sendProgress(percent, `Syncing... ${percent}%`, { processed, errors })
+        if (output.includes('Syncing source:') || output.includes('Syncing all sources')) {
+          sendProgress(10, 'Syncing...', { processed, errors })
         }
 
-        // Parse processed count
-        const processedMatch = output.match(/Processed:\s*(\d+)/)
-        if (processedMatch) {
-          processed = parseInt(processedMatch[1], 10)
+        const addedMatch = output.match(/Added:\s*(\d+)/)
+        const updatedMatch = output.match(/Updated:\s*(\d+)/)
+        const deletedMatch = output.match(/Deleted:\s*(\d+)/)
+
+        if (addedMatch || updatedMatch || deletedMatch) {
+          const added = addedMatch ? parseInt(addedMatch[1], 10) : 0
+          const updated = updatedMatch ? parseInt(updatedMatch[1], 10) : 0
+          const deleted = deletedMatch ? parseInt(deletedMatch[1], 10) : 0
+          processed = added + updated + deleted
+          sendProgress(80, `Processed ${processed} documents`, { processed, errors })
         }
 
-        // Parse error count
+        if (output.includes('Sync complete')) {
+          sendProgress(95, 'Sync complete', { processed, errors })
+        }
+
+        const semanticErrorMatch = output.match(/Vectors:\s*(\d+)\s*documents?\s*failed/)
+        if (semanticErrorMatch) {
+          errors = parseInt(semanticErrorMatch[1], 10)
+        }
+
         const errorsMatch = output.match(/Errors?:\s*(\d+)/)
         if (errorsMatch) {
           errors = parseInt(errorsMatch[1], 10)
         }
 
-        // Parse error types
         const errorTypeMatch = output.match(/Error:\s*(.+)/g)
         if (errorTypeMatch) {
           errorTypeMatch.forEach((e) => {
@@ -790,7 +423,6 @@ export function setupSetupIpcHandlers(): void {
             console.log('MCP KB server auto-configured for Claude Code')
           } catch (mcpErr) {
             console.warn('Failed to auto-configure MCP:', mcpErr)
-            // Don't fail the sync if MCP configuration fails
           }
 
           resolve({ success: true, processed, errors, errorTypes })
@@ -829,37 +461,39 @@ export function setupSetupIpcHandlers(): void {
       const errorTypes: string[] = []
       let lastOutput = ''
 
-      // Parse CLI output for progress
       child.stdout?.on('data', (data: Buffer) => {
         const output = data.toString()
         lastOutput += output
 
-        // Parse progress from CLI output
-        const progressMatch = output.match(/(\d+)%/)
+        const startMatch = output.match(/Extracting entities from (\d+) chunks/)
+        if (startMatch) {
+          sendProgress(5, `Starting extraction...`, { extracted, errors })
+        }
+
+        const progressMatch = output.match(/\[(\d+)\/(\d+)\]\s*Processing chunk/)
         if (progressMatch) {
-          const percent = parseInt(progressMatch[1], 10)
-          sendProgress(percent, `Extracting... ${percent}%`, { extracted, errors })
+          const current = parseInt(progressMatch[1], 10)
+          const total = parseInt(progressMatch[2], 10)
+          const percent = Math.round((current / total) * 90) + 5
+          sendProgress(percent, `Processing ${current}/${total} chunks...`, { extracted: current, errors })
         }
 
-        // Parse extracted count
-        const extractedMatch = output.match(/Extracted:\s*(\d+)/)
-        if (extractedMatch) {
-          extracted = parseInt(extractedMatch[1], 10)
+        const processedMatch = output.match(/Processed:\s*(\d+)\s*chunks/)
+        if (processedMatch) {
+          extracted = parseInt(processedMatch[1], 10)
+          sendProgress(95, `Processed ${extracted} chunks`, { extracted, errors })
         }
 
-        // Parse entities/relations count
-        const entitiesMatch = output.match(/Entities:\s*(\d+)/)
-        if (entitiesMatch) {
-          extracted += parseInt(entitiesMatch[1], 10)
-        }
-
-        // Parse error count
-        const errorsMatch = output.match(/Errors?:\s*(\d+)/)
+        const errorsMatch = output.match(/Errors?:\s*(\d+)\s*chunks?\s*failed/)
         if (errorsMatch) {
           errors = parseInt(errorsMatch[1], 10)
         }
 
-        // Parse error types
+        const generalErrorsMatch = output.match(/(\d+)\s+errors?/)
+        if (generalErrorsMatch && !output.includes('chunks failed')) {
+          errors = parseInt(generalErrorsMatch[1], 10)
+        }
+
         const errorTypeMatch = output.match(/Error:\s*(.+)/g)
         if (errorTypeMatch) {
           errorTypeMatch.forEach((e) => {
@@ -890,6 +524,10 @@ export function setupSetupIpcHandlers(): void {
     })
   })
 
+  // ════════════════════════════════════════════════════════════════════════════
+  // MCP Configuration (Used by Dashboard)
+  // ════════════════════════════════════════════════════════════════════════════
+
   // MCP Auto-configure - DELEGATES TO CLI: conduit mcp configure
   ipcMain.handle('mcp:configure', async (_, options?: { client?: string }): Promise<{ success: boolean; configured: boolean; configPath?: string; error?: string }> => {
     const conduitPath = path.join(getCLIInstallPath(), 'conduit')
@@ -897,12 +535,11 @@ export function setupSetupIpcHandlers(): void {
 
     try {
       const args = ['mcp', 'configure', '--client', clientId]
-      const { stdout, stderr } = await execFileAsync(conduitPath, args)
+      const { stdout } = await execFileAsync(conduitPath, args)
 
       const alreadyConfigured = stdout.includes('already configured')
       const configured = stdout.includes('configured')
 
-      // Extract config path from output
       const pathMatch = stdout.match(/Config:\s*(.+)/)
       const configPath = pathMatch ? pathMatch[1].trim() : undefined
 
@@ -920,8 +557,60 @@ export function setupSetupIpcHandlers(): void {
     }
   })
 
+  // ════════════════════════════════════════════════════════════════════════════
+  // Daemon Version Check (Used by Dashboard for auto-restart on version mismatch)
+  // ════════════════════════════════════════════════════════════════════════════
+
+  ipcMain.handle('daemon:get-bundled-version', async (): Promise<string | null> => {
+    const manifest = await getBundledManifest()
+    return manifest?.version || null
+  })
+
+  ipcMain.handle('daemon:restart', async (): Promise<{ success: boolean; error?: string }> => {
+    const conduitPath = path.join(getCLIInstallPath(), 'conduit')
+    const daemonPath = path.join(getCLIInstallPath(), 'conduit-daemon')
+
+    try {
+      // Stop existing daemon gracefully
+      try {
+        await execFileAsync('pkill', ['-f', 'conduit-daemon'], { env: getEnhancedEnv() })
+      } catch {
+        // Daemon may not be running, that's OK
+      }
+
+      // Wait for daemon to stop
+      await new Promise(resolve => setTimeout(resolve, 2000))
+
+      // Start new daemon - it will detach itself
+      spawn(daemonPath, [], {
+        detached: true,
+        stdio: 'ignore',
+        env: getEnhancedEnv()
+      }).unref()
+
+      // Wait for daemon to start
+      await new Promise(resolve => setTimeout(resolve, 3000))
+
+      // Verify daemon is running
+      const { stdout } = await execFileAsync(conduitPath, ['status', '--json'], {
+        env: getEnhancedEnv(),
+        timeout: 10000
+      })
+      const status = JSON.parse(stdout)
+
+      if (status.daemon?.ready) {
+        console.log('[setup-ipc] Daemon restarted successfully, version:', status.daemon?.version)
+        return { success: true }
+      } else {
+        return { success: false, error: 'Daemon did not start' }
+      }
+    } catch (err) {
+      console.error('[setup-ipc] Failed to restart daemon:', err)
+      return { success: false, error: (err as Error).message }
+    }
+  })
+
   // MCP Check - DELEGATES TO CLI: conduit mcp status --json
-  // GUI should NOT inspect config files directly - CLI is single source of truth
   ipcMain.handle('mcp:check', async (_, options?: { client?: string }): Promise<{ configured: boolean; configPath?: string; clients?: Record<string, { configured: boolean; configPath: string }> }> => {
     const conduitPath = path.join(getCLIInstallPath(), 'conduit')
     const clientId = options?.client || 'claude-code'
@@ -930,7 +619,6 @@ export function setupSetupIpcHandlers(): void {
       const { stdout } = await execFileAsync(conduitPath, ['mcp', 'status', '--json'])
       const result = JSON.parse(stdout) as Record<string, { configured: boolean; configPath: string; serverName?: string }>
 
-      // Return configuration status for the requested client
       const clientConfig = result[clientId]
       if (clientConfig) {
         return {
@@ -943,41 +631,8 @@ export function setupSetupIpcHandlers(): void {
       return { configured: false, clients: result }
     } catch (err) {
       console.error('Failed to check MCP status via CLI:', err)
-      // Fallback: return not configured if CLI fails
       return { configured: false }
     }
   })
-
-  // Shell operations
-  ipcMain.handle('shell:open-external', async (_, url: string): Promise<void> => {
-    await shell.openExternal(url)
-  })
-
-  ipcMain.handle('shell:open-terminal', async (): Promise<void> => {
-    // macOS: open Terminal app
-    if (process.platform === 'darwin') {
-      spawn('open', ['-a', 'Terminal'])
-    }
-  })
 }
 
-// Helper: Compare semver versions (returns 1 if a > b, -1 if a < b, 0 if equal)
-function compareVersions(a: string, b: string): number {
-  const partsA = a.split('.').map(Number)
-  const partsB = b.split('.').map(Number)
-
-  for (let i = 0; i < Math.max(partsA.length, partsB.length); i++) {
-    const partA = partsA[i] || 0
-    const partB = partsB[i] || 0
-    if (partA > partB) return 1
-    if (partA < partB) return -1
-  }
-  return 0
-}
-
-// NOTE: ensurePodmanMachineReady, execContainerCommand, and findBinary have been REMOVED.
-// All container/dependency operations now delegate to CLI commands:
-//   - conduit deps status --json
-//   - conduit deps install <dep>
-//   - conduit deps validate <path>
-//   - conduit config set/unset/get

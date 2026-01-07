@@ -4,6 +4,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import { setupIpcHandlers } from './ipc'
 import { setupSetupIpcHandlers } from './setup-ipc'
 import { setupUninstallIpcHandlers } from './uninstall-ipc'
+import { setupTerminalIpcHandlers } from './terminal-ipc'
 import { createApplicationMenu } from './menu'
 import { initAutoUpdater } from './updater'
 
@@ -12,9 +13,9 @@ let mainWindow: BrowserWindow | null = null
 function createWindow(): void {
   mainWindow = new BrowserWindow({
     width: 1200,
-    height: 800,
+    height: 850,
     minWidth: 900,
-    minHeight: 600,
+    minHeight: 750,
     show: false,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
@@ -56,6 +57,7 @@ app.whenReady().then(() => {
   setupIpcHandlers()
   setupSetupIpcHandlers()
   setupUninstallIpcHandlers()
+  setupTerminalIpcHandlers()
   createWindow()
 
   // Initialize auto-updater after window is created

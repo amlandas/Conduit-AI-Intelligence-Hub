@@ -40,7 +40,7 @@ export default function App(): JSX.Element {
   const [startupCheckDone, setStartupCheckDone] = useState(false) // Track if initial CLI check is done
   const { theme } = useSettingsStore()
   const { setupCompleted, cliInstalled, resetSetup, setCLIInstalled, completeSetup } = useSetupStore()
-  const { setSSEConnected, setStatus, refresh: refreshDaemon } = useDaemonStore()
+  const { setSSEConnected, handleSSEEvent, refresh: refreshDaemon } = useDaemonStore()
   const { updateInstance, addInstance, removeInstance, refresh: refreshInstances } = useInstancesStore()
   const { addSource, removeSource, updateSource, setSyncing, refresh: refreshKB } = useKBStore()
 
@@ -50,26 +50,30 @@ export default function App(): JSX.Element {
   // ═══════════════════════════════════════════════════════════════
   useEffect(() => {
     const verifyCLI = async (): Promise<void> => {
+      console.log('[App] Starting CLI verification...')
       try {
         // Check if CLI binary exists and is executable
         // Uses existing setup:check-cli IPC handler
         const result = await window.conduit.checkCLI()
+        console.log('[App] CLI check result:', result)
 
         if (result.installed && result.version) {
           // CLI exists - update store and mark setup as complete
           // Setup completion is DERIVED from CLI existence, not persisted
+          console.log('[App] CLI found, setting cliInstalled=true, calling completeSetup')
           setCLIInstalled(true, result.version, result.path || undefined)
           completeSetup()  // CLI installed = setup complete
         } else {
           // CLI NOT installed - show wizard to install it
-          console.warn('CLI not found, showing setup wizard')
+          console.warn('[App] CLI not found, showing setup wizard')
           resetSetup()
         }
       } catch (error) {
         // Error checking CLI - assume not installed, show wizard
-        console.error('Failed to verify CLI:', error)
+        console.error('[App] Failed to verify CLI:', error)
         resetSetup()
       } finally {
+        console.log('[App] Setting startupCheckDone=true')
         setStartupCheckDone(true)
       }
     }
@@ -132,11 +136,8 @@ export default function App(): JSX.Element {
       const e = event as { type: string; data: Record<string, unknown> }
       switch (e.type) {
         case 'daemon_status':
-          setStatus({
-            connected: true,
-            uptime: e.data.uptime as string,
-            startTime: e.data.start_time as string
-          })
+          // Trigger refresh to sync state from CLI (stateless pattern)
+          handleSSEEvent(e)
           break
         case 'instance_created':
           addInstance({
@@ -220,8 +221,12 @@ export default function App(): JSX.Element {
   // RENDER LOGIC: CLI verification gates everything
   // ═══════════════════════════════════════════════════════════════
 
+  // Debug logging for render decisions
+  console.log('[App] Render state:', { startupCheckDone, cliInstalled, setupCompleted })
+
   // Still checking CLI on startup - show loading spinner
   if (!startupCheckDone) {
+    console.log('[App] Rendering: StartupLoader (startupCheckDone=false)')
     return <StartupLoader />
   }
 
@@ -229,8 +234,11 @@ export default function App(): JSX.Element {
   // Uses cliInstalled from store (updated during setup flow)
   // This ensures we NEVER show dashboard without verified CLI
   if (!cliInstalled || !setupCompleted) {
+    console.log('[App] Rendering: SetupWizard (cliInstalled=', cliInstalled, ', setupCompleted=', setupCompleted, ')')
     return <SetupWizard />
   }
+
+  console.log('[App] Rendering: Main app')
 
   // CLI verified AND setup complete - show main app
   return (

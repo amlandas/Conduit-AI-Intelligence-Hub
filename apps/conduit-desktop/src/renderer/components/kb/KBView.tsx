@@ -34,7 +34,6 @@ export function KBView(): JSX.Element {
     searchQuery,
     refresh,
     search,
-    removeSource,
     addSource,
     // Global sync state - persists across tab switches
     ragSyncing,
@@ -56,6 +55,7 @@ export function KBView(): JSX.Element {
   const { isFeatureVisible } = useSettingsStore()
   const [query, setQuery] = useState(searchQuery)
   const [addModalOpen, setAddModalOpen] = useState(false)
+  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   // Subscribe to progress events and check MCP config on mount
   useEffect(() => {
@@ -124,11 +124,24 @@ export function KBView(): JSX.Element {
   }
 
   const handleRemove = async (sourceId: string): Promise<void> => {
+    // Clear any previous error
+    setDeleteError(null)
     try {
-      await window.conduit.removeKBSource(sourceId)
-      removeSource(sourceId)
+      const result = await window.conduit.removeKBSource(sourceId)
+      // Check if CLI returned an error (IPC handler returns { error: message } on failure)
+      if (result && typeof result === 'object' && 'error' in result) {
+        const errorMsg = (result as { error: string }).error
+        console.error('Failed to remove source:', errorMsg)
+        setDeleteError(`Failed to remove source: ${errorMsg}`)
+        return
+      }
+      // CLI succeeded - refresh to sync with server state
+      // Don't update local state directly; let refresh() get authoritative state
+      await refresh()
     } catch (err) {
-      console.error('Failed to remove source:', err)
+      const errorMsg = (err as Error).message
+      console.error('Failed to remove source:', errorMsg)
+      setDeleteError(`Failed to remove source: ${errorMsg}`)
     }
   }
 
@@ -358,6 +371,20 @@ export function KBView(): JSX.Element {
             </div>
           </div>
         </section>
+      )}
+
+      {/* Delete Error Banner */}
+      {deleteError && (
+        <div className="p-3 rounded-lg bg-macos-red/10 flex items-center gap-2">
+          <XCircle className="w-4 h-4 text-macos-red flex-shrink-0" />
+          <span className="text-sm text-macos-red flex-1">{deleteError}</span>
+          <button
+            onClick={() => setDeleteError(null)}
+            className="text-macos-red hover:text-macos-red/80 text-sm"
+          >
+            Dismiss
+          </button>
+        </div>
       )}
 
       {/* Sources */}

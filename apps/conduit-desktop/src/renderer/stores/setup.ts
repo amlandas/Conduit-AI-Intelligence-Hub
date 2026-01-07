@@ -1,17 +1,15 @@
+/**
+ * Setup Store
+ *
+ * Simplified state management for the setup wizard.
+ * CLI is the source of truth - GUI checks CLI status on every startup.
+ */
 import { create } from 'zustand'
 
-// NOTE: This store is intentionally NOT persisted.
-// CLI is the source of truth. GUI checks CLI status on every startup.
-// Persisting setup state caused bugs where GUI showed dashboard without CLI installed.
+// Simplified to 3 steps: welcome, terminal-install, complete
+export type SetupStep = 'welcome' | 'terminal-install' | 'complete'
 
-export type SetupStep =
-  | 'welcome'
-  | 'cli-install'
-  | 'dependencies'
-  | 'services'
-  | 'models'
-  | 'complete'
-
+// Keep DependencyStatus for backward compatibility (dashboard may still use it)
 export interface DependencyStatus {
   name: string
   installed: boolean
@@ -19,9 +17,9 @@ export interface DependencyStatus {
   required: boolean
   installUrl?: string
   brewFormula?: string
-  binaryPath?: string       // Path where the binary was found
-  customPath?: string       // User-specified custom path (if any)
-  supportsAutoInstall?: boolean  // Whether auto-installation is supported
+  binaryPath?: string
+  customPath?: string
+  supportsAutoInstall?: boolean
 }
 
 export interface SetupState {
@@ -32,24 +30,22 @@ export interface SetupState {
   // Current step
   currentStep: SetupStep
 
-  // CLI installation
+  // CLI installation (still needed for App.tsx detection)
   cliInstalled: boolean
   cliVersion: string | null
   cliInstallPath: string | null
 
-  // Dependencies
-  dependencies: DependencyStatus[]
+  // Terminal installation state
+  installationSuccess: boolean | null
+  installationError: string | null
 
-  // Services
+  // Legacy: Keep for backward compatibility with other components
+  dependencies: DependencyStatus[]
   daemonRunning: boolean
   qdrantRunning: boolean
   falkordbRunning: boolean
-
-  // Models
   modelsInstalled: string[]
   modelsPending: string[]
-
-  // Progress
   currentOperation: string | null
   operationProgress: number
   operationError: string | null
@@ -57,6 +53,11 @@ export interface SetupState {
   // Actions
   setStep: (step: SetupStep) => void
   setCLIInstalled: (installed: boolean, version?: string, path?: string) => void
+  setInstallationResult: (success: boolean, error?: string) => void
+  completeSetup: () => void
+  resetSetup: () => void
+
+  // Legacy actions (keep for backward compatibility)
   setDependencies: (deps: DependencyStatus[]) => void
   updateDependency: (name: string, status: Partial<DependencyStatus>) => void
   setDaemonRunning: (running: boolean) => void
@@ -66,18 +67,20 @@ export interface SetupState {
   setModelsPending: (models: string[]) => void
   setOperation: (operation: string | null, progress?: number) => void
   setOperationError: (error: string | null) => void
-  completeSetup: () => void
-  resetSetup: () => void
 }
 
 export const useSetupStore = create<SetupState>()((set) => ({
-  // Initial state - always starts fresh, derived from CLI on startup
+  // Initial state
   setupCompleted: false,
   setupCompletedAt: null,
   currentStep: 'welcome',
   cliInstalled: false,
   cliVersion: null,
   cliInstallPath: null,
+  installationSuccess: null,
+  installationError: null,
+
+  // Legacy state (kept for backward compatibility)
   dependencies: [],
   daemonRunning: false,
   qdrantRunning: false,
@@ -97,6 +100,40 @@ export const useSetupStore = create<SetupState>()((set) => ({
     cliInstallPath: path || null,
   }),
 
+  setInstallationResult: (success, error) => set({
+    installationSuccess: success,
+    installationError: error || null,
+  }),
+
+  completeSetup: () => set({
+    setupCompleted: true,
+    setupCompletedAt: new Date().toISOString(),
+    currentStep: 'complete',
+    currentOperation: null,
+    operationError: null,
+  }),
+
+  resetSetup: () => set({
+    setupCompleted: false,
+    setupCompletedAt: null,
+    currentStep: 'welcome',
+    cliInstalled: false,
+    cliVersion: null,
+    cliInstallPath: null,
+    installationSuccess: null,
+    installationError: null,
+    dependencies: [],
+    daemonRunning: false,
+    qdrantRunning: false,
+    falkordbRunning: false,
+    modelsInstalled: [],
+    modelsPending: ['nomic-embed-text', 'qwen2.5-coder:7b', 'mistral:7b-instruct'],
+    currentOperation: null,
+    operationProgress: 0,
+    operationError: null,
+  }),
+
+  // Legacy actions (kept for backward compatibility)
   setDependencies: (deps) => set({ dependencies: deps }),
 
   updateDependency: (name, status) => set((state) => ({
@@ -125,31 +162,5 @@ export const useSetupStore = create<SetupState>()((set) => ({
   setOperationError: (error) => set({
     operationError: error,
     currentOperation: null,
-  }),
-
-  completeSetup: () => set({
-    setupCompleted: true,
-    setupCompletedAt: new Date().toISOString(),
-    currentStep: 'complete',
-    currentOperation: null,
-    operationError: null,
-  }),
-
-  resetSetup: () => set({
-    setupCompleted: false,
-    setupCompletedAt: null,
-    currentStep: 'welcome',
-    cliInstalled: false,
-    cliVersion: null,
-    cliInstallPath: null,
-    dependencies: [],
-    daemonRunning: false,
-    qdrantRunning: false,
-    falkordbRunning: false,
-    modelsInstalled: [],
-    modelsPending: ['nomic-embed-text', 'qwen2.5-coder:7b', 'mistral:7b-instruct'],
-    currentOperation: null,
-    operationProgress: 0,
-    operationError: null,
   }),
 }))

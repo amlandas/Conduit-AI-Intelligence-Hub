@@ -1,6 +1,3 @@
 export { WelcomeStep } from './WelcomeStep'
-export { CLIInstallStep } from './CLIInstallStep'
-export { DependenciesStep } from './DependenciesStep'
-export { ServicesStep } from './ServicesStep'
-export { ModelsStep } from './ModelsStep'
+export { TerminalInstallStep } from './TerminalInstallStep'
 export { CompleteStep } from './CompleteStep'

@@ -20,7 +20,8 @@ interface DaemonControlsProps {
 type LogLevel = 'debug' | 'info' | 'warn' | 'error'
 
 export function DaemonControls({ className }: DaemonControlsProps): JSX.Element {
-  const { status, refresh } = useDaemonStore()
+  const { getStatus, refresh } = useDaemonStore()
+  const status = getStatus() // Derive from raw CLI response
   const [starting, setStarting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const [restarting, setRestarting] = useState(false)

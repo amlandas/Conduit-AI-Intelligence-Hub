@@ -42,11 +42,13 @@ export function NavigationShell({
   onSearchOpenChange,
   className
 }: NavigationShellProps): JSX.Element {
-  const { status, sseConnected } = useDaemonStore()
+  const { getStatus, sseConnected } = useDaemonStore()
   const { instances } = useInstancesStore()
   const { sources } = useKBStore()
   const { sidebarCollapsed } = useSettingsStore()
 
+  // Derive status from raw CLI response (stateless pattern)
+  const status = getStatus()
   const runningInstances = instances.filter((i) => i.status === 'RUNNING').length
 
   return (
@@ -77,7 +79,7 @@ export function NavigationShell({
               <Search className="w-4 h-4" />
               {!sidebarCollapsed && (
                 <>
-                  <span className="flex-1 text-left">Search</span>
+                  <span className="flex-1 text-left">Search KB</span>
                   <kbd className="text-xs opacity-60">⌘K</kbd>
                 </>
               )}
@@ -129,6 +131,8 @@ export function NavigationShell({
 
         <div className="flex-1" />
 
+        <span className="opacity-70">GUI v{__APP_VERSION__}</span>
+        {status.version && <span className="opacity-70">CLI {status.version}</span>}
         <span>{runningInstances} Connector{runningInstances !== 1 ? 's' : ''}</span>
         <span>{sources.length} Source{sources.length !== 1 ? 's' : ''}</span>
       </footer>
