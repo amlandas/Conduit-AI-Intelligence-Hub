@@ -177,26 +177,67 @@ export function setupIpcHandlers(): void {
   })
 
   // conduit kb search <query> --json
-  ipcMain.handle('kb:search', async (_, query: string, options?: { mode?: string; raw?: boolean; limit?: number; min_score?: number; semantic_weight?: number }) => {
+  // Supports full RAG tuning options from RAGTuningPanel
+  ipcMain.handle('kb:search', async (_, query: string, options?: {
+    // Search mode
+    searchMode?: 'hybrid' | 'semantic' | 'fts5'
+    mode?: string  // Legacy: 'semantic' | 'fts5'
+    raw?: boolean
+    // RAG tuning options
+    minScore?: number        // --min-score: Minimum similarity threshold (0.0-1.0)
+    semanticWeight?: number  // --semantic-weight: Semantic vs lexical weight (0.0-1.0)
+    mmrLambda?: number       // --mmr-lambda: Relevance vs diversity (0.0-1.0)
+    maxResults?: number      // --limit: Maximum results to return
+    reranking?: boolean      // false = --no-rerank flag
+    // Legacy snake_case (backward compatibility)
+    limit?: number
+    min_score?: number
+    semantic_weight?: number
+  }) => {
     try {
       const args = ['kb', 'search', query, '--json']
-      if (options?.mode === 'semantic') {
+
+      // Search mode (prefer new searchMode, fallback to legacy mode)
+      const searchMode = options?.searchMode || options?.mode
+      if (searchMode === 'semantic') {
         args.push('--semantic')
-      } else if (options?.mode === 'fts5') {
+      } else if (searchMode === 'fts5') {
         args.push('--fts5')
       }
+      // 'hybrid' is default, no flag needed
+
       if (options?.raw) {
         args.push('--raw')
       }
-      if (options?.limit) {
-        args.push('--limit', String(options.limit))
+
+      // Max results (prefer maxResults, fallback to limit)
+      const maxResults = options?.maxResults ?? options?.limit
+      if (maxResults !== undefined && maxResults > 0) {
+        args.push('--limit', String(maxResults))
       }
-      if (options?.min_score !== undefined) {
-        args.push('--min-score', String(options.min_score))
+
+      // Min score threshold (prefer minScore, fallback to min_score)
+      const minScore = options?.minScore ?? options?.min_score
+      if (minScore !== undefined && minScore >= 0) {
+        args.push('--min-score', String(minScore))
       }
-      if (options?.semantic_weight !== undefined) {
-        args.push('--semantic-weight', String(options.semantic_weight))
+
+      // Semantic weight (prefer semanticWeight, fallback to semantic_weight)
+      const semanticWeight = options?.semanticWeight ?? options?.semantic_weight
+      if (semanticWeight !== undefined && semanticWeight >= 0 && semanticWeight <= 1) {
+        args.push('--semantic-weight', String(semanticWeight))
       }
+
+      // MMR lambda (new option)
+      if (options?.mmrLambda !== undefined && options.mmrLambda >= 0 && options.mmrLambda <= 1) {
+        args.push('--mmr-lambda', String(options.mmrLambda))
+      }
+
+      // Reranking (false = disable)
+      if (options?.reranking === false) {
+        args.push('--no-rerank')
+      }
+
       return await execCLI(args)
     } catch (err) {
       return { error: (err as Error).message, results: [], total_hits: 0 }

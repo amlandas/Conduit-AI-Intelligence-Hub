@@ -8,8 +8,9 @@
 import { useState, useEffect } from 'react'
 import { cn } from '@/lib/utils'
 import { useKBStore, useSettingsStore } from '@/stores'
+import type { RAGSearchOptions } from '@/stores/kb'
 import { AddSourceModal } from './AddSourceModal'
-import { RAGTuningPanel } from './RAGTuningPanel'
+import { RAGTuningPanel, type RAGSettings } from './RAGTuningPanel'
 import { KAGPanel } from './KAGPanel'
 import {
   FolderOpen,
@@ -56,6 +57,8 @@ export function KBView(): JSX.Element {
   const [query, setQuery] = useState(searchQuery)
   const [addModalOpen, setAddModalOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string | null>(null)
+  // RAG tuning settings - passed to CLI search for advanced mode
+  const [ragSettings, setRagSettings] = useState<RAGSettings | null>(null)
 
   // Subscribe to progress events and check MCP config on mount
   useEffect(() => {
@@ -80,7 +83,16 @@ export function KBView(): JSX.Element {
 
   const handleSearch = (e: React.FormEvent): void => {
     e.preventDefault()
-    search(query)
+    // Convert RAG panel settings to search options for CLI
+    const options: RAGSearchOptions | undefined = ragSettings ? {
+      minScore: ragSettings.minScore,
+      semanticWeight: ragSettings.semanticWeight,
+      mmrLambda: ragSettings.mmrLambda,
+      maxResults: ragSettings.maxResults,
+      reranking: ragSettings.reranking,
+      searchMode: ragSettings.searchMode
+    } : undefined
+    search(query, options)
   }
 
   // RAG Sync - delegate to CLI: conduit kb sync
@@ -434,7 +446,11 @@ export function KBView(): JSX.Element {
 
       {/* Advanced Mode: RAG Tuning Panel */}
       {isFeatureVisible('showRAGTuning') && (
-        <RAGTuningPanel className="mt-6" />
+        <RAGTuningPanel
+          className="mt-6"
+          settings={ragSettings || undefined}
+          onChange={setRagSettings}
+        />
       )}
 
       {/* Advanced Mode: KAG Panel */}
