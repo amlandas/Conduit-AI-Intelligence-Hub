@@ -1,840 +1,389 @@
-# Conduit - AI Intelligence Hub
+# Conduit
 
-[![Latest Release](https://img.shields.io/github/v/release/amlandas/Conduit-AI-Intelligence-Hub)](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest)
+### Make Your AI Tools Smarter with a Private Knowledge Base
+
+**Your Documents. Your AI. Your Control.**
+
+[![Latest Release](https://img.shields.io/github/v/release/amlandas/Conduit-AI-Intelligence-Hub?label=release)](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![CLI Version](https://img.shields.io/badge/CLI-v1.0-green.svg)](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest)
+[![GitHub Discussions](https://img.shields.io/github/discussions/amlandas/Conduit-AI-Intelligence-Hub)](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/discussions)
 
-Conduit is a local-first, security-first AI intelligence hub that connects AI clients (CLI tools, IDEs, desktop apps) to external tools via MCP (Model Context Protocol) servers. It provides document-to-knowledge transformation, sandboxed connector execution, and unified configuration management.
+---
 
-## Desktop App Installation (macOS)
+Conduit transforms your local documents into a **private knowledge base** that makes AI tools like Claude Desktop, ChatGPT, Perplexity, and AI coding assistants like Claude Code, Cursor, Copilot, Kiro, and Gemini CLI significantly smarter.
 
-Download and install via the graphical interface:
+**Everything stays local.** No documents or artifacts ever leave your machine.
 
-1. **Download** the latest DMG from [GitHub Releases](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest)
-   - Apple Silicon (M1/M2/M3): `Conduit-x.x.x-arm64.dmg`
-   - Intel Mac: `Conduit-x.x.x-x64.dmg`
+## Why Conduit?
 
-2. **Install** by opening the DMG and dragging Conduit to Applications
+AI tools are powerful, but they struggle with:
+- **Context bloat**: Feeding too much information overwhelms the AI
+- **Missing context**: Not enough information leads to hallucinations
+- **Privacy concerns**: Sensitive documents shouldn't leave your machine
 
-3. **Launch** Conduit - the **First-Run Setup Wizard** will guide you through:
-   - CLI installation (bundled in the app, no Go required)
-   - Dependency installation with **one-click auto-install** or manual options:
-     - **Ollama**: Auto-install via Homebrew (macOS) or official installer (Linux)
-     - **Podman** (recommended): Auto-install via Homebrew, or download manually
-     - **Docker**: Download from Docker website
-   - If dependencies are already installed but not detected, use **"Locate"** to specify the path manually
-   - Service startup (Qdrant, FalkorDB)
-   - AI model download (qwen2.5-coder, nomic-embed-text, mistral)
+Conduit solves this by:
+- **Intelligent retrieval**: RAG (Retrieval-Augmented Generation) and KAG (Knowledge-Augmented Generation) find exactly the right context
+- **Local-first**: All processing happens on your machine - documents never leave
+- **MCP integration**: Works with any AI tool that supports [Model Context Protocol](https://modelcontextprotocol.io)
 
-4. **Done!** The Dashboard shows real-time status of all services.
+---
 
-> **Note:** The Desktop app bundles CLI binaries, so you don't need Go or any build tools installed.
+## Quick Start (5 minutes)
 
-### macOS Security Note
-
-When first opening Conduit on macOS, you may see **"Conduit.app is damaged and can't be opened"**. This happens because the app is not yet notarized with Apple.
-
-**To fix this, run in Terminal:**
-```bash
-xattr -cr /Applications/Conduit.app
-```
-
-Then open Conduit normally. This only needs to be done once after installation.
-
-> **Alternative:** Right-click Conduit.app in Applications → Select "Open" → Click "Open" in the dialog.
-
-## CLI Installation
-
-For terminal-based installation, run:
+### Install via CLI (Recommended)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
 ```
 
-The installer will:
-- Detect your OS and architecture
-- Install any missing dependencies (Go, Git, Docker/Podman, Ollama)
-- Install document extraction tools (pdftotext, antiword, unrtf)
-- Build and install Conduit
-- Configure your shell PATH automatically (bash/zsh)
-- Set up the daemon as a background service
-- Pull the default AI model (qwen2.5-coder:7b)
-- Install Qdrant vector database (via Docker) for semantic search
-- Pull the embedding model (nomic-embed-text) for document vectorization
-- Install FalkorDB graph database (via Docker) for knowledge graphs
-- Pull the KAG extraction model (mistral:7b-instruct) for entity extraction
-- Verify the installation
+The installer handles everything:
+- Installs Conduit CLI and daemon
+- Sets up container runtime (Podman/Docker)
+- Installs AI models via Ollama
+- Configures vector database (Qdrant) and knowledge graph (FalkorDB)
+- Auto-configures MCP server in Claude Code
 
-### Installation Options
+### Verify Installation
 
 ```bash
-# Custom install location (default: /usr/local/bin or ~/.local/bin)
-curl -fsSL ... | bash -s -- --install-dir ~/.local/bin
-
-# Skip daemon service setup
-curl -fsSL ... | bash -s -- --no-service
-
-# Verbose output for troubleshooting
-curl -fsSL ... | bash -s -- --verbose
-
-# Skip model download (download later)
-curl -fsSL ... | bash -s -- --skip-model
-
-# Skip KAG components (FalkorDB + Mistral model)
-curl -fsSL ... | bash -s -- --no-kag
-```
-
-After installation, restart your terminal (or run `source ~/.zshrc` / `source ~/.bashrc`), then run:
-
-```bash
-conduit status
-```
-
-## V0 Features
-
-- **One-Click Installation**: Automated setup with interactive prompts
-- **Daemon Core**: Unix socket IPC, HTTP API, background services
-- **Container Runtime**: Podman (preferred) / Docker support for sandboxed connectors
-- **Policy Engine**: Permission evaluation, sensitive path protection, network controls
-- **Lifecycle Manager**: Connector instance state machine, health monitoring
-- **Client Adapters**: Claude Code, Cursor, VS Code, Gemini CLI injection
-- **Knowledge Base**: Document indexing with multi-format support, MCP server
-  - **Semantic Search**: Find documents by meaning using Qdrant vector database + Ollama embeddings
-  - **Keyword Search**: Full-text search with SQLite FTS5 as fallback
-  - **RAG-Ready**: Perfect for AI client augmentation with ranked results + citations
-  - **KAG (Knowledge Graph)**: Entity extraction and graph-based reasoning using FalkorDB
-    - Multi-hop reasoning ("How is X related to Y across documents?")
-    - Aggregation queries ("List all threat models in the KB")
-    - Entity disambiguation via graph traversal
-    - **Hybrid entity search**: Combines lexical + semantic search with RRF fusion
-- **AI Integration**: Local AI with Ollama for intelligent code analysis
-- **CLI**: Complete command set for all operations
-
-## Requirements
-
-The installer handles these automatically, but for reference:
-
-- Go 1.21+
-- Git
-- SQLite 3.35+ with FTS5 extension (included in Go build)
-- Podman 4.0+ (recommended) or Docker 20.10+ (for running connectors)
-- Ollama (for local AI features)
-- Qdrant (for semantic search - auto-installed via Docker)
-- FalkorDB (for knowledge graphs - auto-installed via Docker)
-- Document extraction tools (for KB indexing):
-  - pdftotext (poppler) - for PDF files
-  - textutil (macOS) / antiword (Linux/Windows) - for DOC files
-  - textutil (macOS) / unrtf (Linux) - for RTF files
-  - DOCX and ODT are supported natively without external tools
-
-### Semantic Search Components
-
-For full semantic search capabilities:
-- **Qdrant**: Vector database running on localhost:6333 (auto-installed via Docker)
-- **nomic-embed-text**: Embedding model via Ollama (768 dimensions, auto-pulled)
-
-These are optional - Conduit falls back to keyword search (FTS5) if unavailable.
-
-### Knowledge Graph Components (KAG)
-
-For knowledge graph capabilities:
-- **FalkorDB**: Graph database running on localhost:6379 (auto-installed via Docker)
-- **mistral:7b-instruct**: Extraction model via Ollama (Apache 2.0 licensed, auto-pulled)
-
-These are optional - skip with `--no-kag` during installation.
-
-## Manual Installation
-
-If you prefer manual installation or the automated installer doesn't work for your system:
-
-```bash
-# Clone the repository
-git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git
-cd Conduit-AI-Intelligence-Hub
-
-# Build from source (creates bin/ directory)
-make build
-
-# This creates:
-#   bin/conduit        - CLI tool
-#   bin/conduit-daemon - Background daemon
-
-# Install to PATH (optional)
-sudo cp bin/conduit bin/conduit-daemon /usr/local/bin/
-
-# Install dependencies
-conduit install-deps
-
-# Set up daemon service
-conduit service install
-conduit service start
-```
-
-Alternative without Make:
-```bash
-mkdir -p bin
-go build -tags "fts5" -o bin/conduit ./cmd/conduit
-go build -tags "fts5" -o bin/conduit-daemon ./cmd/conduit-daemon
-```
-
-## Quick Start
-
-```bash
-# Check Conduit is running
-conduit status
-
-# Run diagnostics to verify everything is set up correctly
+# Restart terminal, then:
 conduit doctor
-
-# Run interactive setup wizard
-conduit setup
-
-# In case of issues, view daemon logs
-conduit service status
 ```
 
-## Desktop App (macOS)
-
-Conduit includes a native macOS desktop application for users who prefer a graphical interface.
-
-### Running the Desktop App
+### Add Your Documents
 
 ```bash
-# From the repository root
-cd apps/conduit-desktop
+# Add a folder to your knowledge base
+conduit kb add ~/Documents/my-project --name "My Project"
 
-# Install dependencies
-npm install
+# Sync documents (indexes for search)
+conduit kb sync
 
-# Run in development mode
-npm run dev
-
-# Build for production
-npm run build
-
-# Package as DMG
-npm run package:mac:dmg
+# Test search
+conduit kb search "how does authentication work"
 ```
 
-### Desktop App Features
+**That's it!** Your AI tools now have access to your private knowledge base.
 
-- **Dashboard**: Real-time status of daemon, Ollama, Qdrant, FalkorDB, and container runtime
-- **Knowledge Base**: Search, manage sources, view sync progress
-  - **RAG Tuning Panel** (Advanced Mode): Adjust search parameters in real-time
-    - Min Score, Semantic Weight, MMR Lambda, Max Results
-    - Search Mode selection (Hybrid/Semantic/FTS5)
-    - All settings passed directly to CLI for consistent behavior
-  - **KAG Search**: Entity and relationship exploration with proper error handling
-- **Connectors**: Start/stop instances, manage bindings
-- **Settings**: Theme, mode selection (Default/Advanced/Developer)
-- **Auto-Updates**: Automatic update checks from GitHub Releases
-- **Version Management**: Automatically restarts daemon when CLI version mismatch detected (v0.1.40+)
+---
 
-### Mode System
-
-| Mode | Features |
-|------|----------|
-| **Default** | Full visibility, simple controls |
-| **Advanced** | RAG/KAG tuning sliders, container controls, permissions |
-| **Developer** | Config editor, log viewer, daemon controls, API toggle |
-
-## Project Structure
+## How It Works
 
 ```
-conduit/
-├── cmd/
-│   ├── conduit/          # CLI tool
-│   └── conduit-daemon/   # Background daemon
-├── internal/
-│   ├── adapters/         # Client adapters (Claude Code, Cursor, etc.)
-│   ├── config/           # Configuration management
-│   ├── daemon/           # Daemon core and HTTP handlers
-│   ├── kb/               # Knowledge base (indexer, searcher, MCP)
-│   ├── lifecycle/        # Instance lifecycle management
-│   ├── observability/    # Logging and metrics
-│   ├── policy/           # Permission policy engine
-│   ├── runtime/          # Container runtime abstraction
-│   └── store/            # SQLite data store
-├── pkg/
-│   └── models/           # Shared types and errors
-├── tests/
-│   └── integration/      # Integration tests
-├── docs/                 # Documentation
-├── artifacts/            # Build artifacts
-└── scripts/              # Build and utility scripts
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Your Local Machine                           │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│   ┌──────────────┐         ┌──────────────────────────────────┐    │
+│   │ Your Docs    │ ──────► │        Conduit                   │    │
+│   │ (PDF, MD,    │         │  ┌────────────────────────────┐  │    │
+│   │  Code, etc.) │         │  │ RAG: Semantic + Keyword    │  │    │
+│   └──────────────┘         │  │ KAG: Knowledge Graph       │  │    │
+│                            │  └────────────────────────────┘  │    │
+│                            └───────────────┬──────────────────┘    │
+│                                            │                        │
+│                                            │ MCP Protocol           │
+│                                            ▼                        │
+│   ┌────────────────────────────────────────────────────────────┐   │
+│   │              AI Tools (via MCP Server)                     │   │
+│   │  Claude Code │ Cursor │ Claude Desktop │ ChatGPT │ etc.   │   │
+│   └────────────────────────────────────────────────────────────┘   │
+│                                                                     │
+└─────────────────────────────────────────────────────────────────────┘
 ```
 
-## CLI Commands
+### Key Technologies
 
-### Installation & Setup
-```bash
-conduit setup                 # Interactive setup wizard
-conduit install-deps          # Install runtime dependencies
-conduit install --document-tools  # Install document extraction tools
-conduit doctor                # Run diagnostics
-conduit uninstall --info      # Show what's installed
-conduit uninstall --all       # Uninstall Conduit (see Uninstalling section)
-```
+| Component | Purpose |
+|-----------|---------|
+| **RAG** (Retrieval-Augmented Generation) | Finds semantically similar documents using vector search |
+| **KAG** (Knowledge-Augmented Generation) | Builds a knowledge graph for multi-hop reasoning |
+| **MCP** (Model Context Protocol) | Standard protocol for AI tools to access external data |
+| **Qdrant** | Vector database for semantic search (runs locally in container) |
+| **FalkorDB** | Graph database for knowledge graphs (runs locally in container) |
+| **Ollama** | Local AI models for embeddings and entity extraction |
 
-### Dependency Management (v0.1.10+)
-```bash
-conduit deps status           # Check all dependencies (Homebrew, Ollama, Podman/Docker)
-conduit deps status --json    # JSON output for scripting/GUI
-conduit deps install ollama   # Install Ollama (platform-aware: Homebrew on macOS, curl on Linux)
-conduit deps install podman   # Install Podman (with machine init on macOS)
-conduit deps install homebrew # Install Homebrew
-conduit deps validate <path>  # Validate a custom binary path
-conduit deps validate <path> --json  # JSON output for scripting
-```
+---
 
-### Service Management
-```bash
-conduit service install       # Install daemon as system service
-conduit service start         # Start the daemon service
-conduit service stop          # Stop the daemon service
-conduit service status        # Show service status
-conduit service remove        # Remove daemon service
-```
+## CLI Reference
 
-### Instance Management
-```bash
-conduit install <package>     # Install a connector
-conduit list                  # List all instances
-conduit start <instance>      # Start an instance
-conduit stop <instance>       # Stop an instance
-conduit remove <instance>     # Remove an instance
-conduit logs <instance>       # View instance logs
-```
+Conduit is a CLI-first tool. For the complete command reference, see **[CLI Command Index](docs/CLI_COMMAND_INDEX.md)**.
 
-### Client Management
-```bash
-conduit client list           # List detected AI clients
-conduit client bind           # Bind connector to client
-conduit client unbind         # Unbind connector from client
-```
-
-### Knowledge Base
-```bash
-conduit kb add <path>         # Add document source
-conduit kb list               # List document sources
-conduit kb sync               # Sync all sources
-conduit kb search <query>     # Search documents (hybrid by default)
-conduit kb search <query> --semantic  # Force semantic search only
-conduit kb search <query> --fts5      # Force keyword search only
-conduit kb remove <name>      # Remove source (cleans up FTS5 + vectors)
-conduit kb migrate            # Migrate existing docs to vector store
-conduit kb stats              # Show KB statistics
-
-# Advanced search options (RAG tuning)
-conduit kb search <query> --min-score 0.05      # Lower similarity threshold
-conduit kb search <query> --limit 20            # More results
-conduit kb search <query> --semantic-weight 0.8 # Prefer semantic over keyword
-conduit kb search <query> --mmr-lambda 0.9      # More relevance, less diversity
-
-# KAG (Knowledge Graph) operations
-conduit kb kag-sync               # Extract entities from indexed documents
-conduit kb kag-sync --force       # Re-extract all chunks
-conduit kb kag-status             # Show detailed dashboard with progress bar
-conduit kb kag-retry              # Retry failed extractions
-conduit kb kag-retry --dry-run    # Preview what would be retried
-conduit kb kag-retry --max-retries 3  # Retry with custom attempts (max: 5)
-conduit kb kag-dedupe             # Merge duplicate entities
-conduit kb kag-dedupe --dry-run   # Preview duplicates without merging
-conduit kb kag-vectorize          # Generate embeddings for semantic entity search
-conduit kb kag-query <query>      # Query the knowledge graph (tokenized matching)
-conduit kb kag-query <query> --hybrid  # Hybrid search (lexical + semantic via RRF)
-conduit kb kag-query <query> --entities Docker,Kubernetes  # With entity hints
-conduit kb kag-query <query> --max-hops 3  # Multi-hop traversal (max: 3)
-```
-
-### Qdrant Management
-```bash
-conduit qdrant status         # Check Qdrant container and vector count
-conduit qdrant install        # Install/start Qdrant container
-conduit qdrant start          # Start existing container
-conduit qdrant stop           # Stop container (preserves data)
-conduit qdrant attach         # Enable semantic search without restart
-conduit qdrant purge          # Clear all vectors (useful after reinstall)
-```
-
-### FalkorDB Management
-```bash
-conduit falkordb status       # Check FalkorDB container and graph stats
-conduit falkordb install      # Install/start FalkorDB container
-conduit falkordb start        # Start existing container
-conduit falkordb stop         # Stop container (preserves data)
-```
-
-### Ollama Management
-```bash
-conduit ollama status         # Show Ollama status and loaded models
-conduit ollama models         # List available Ollama models
-conduit ollama pull <model>   # Download a model from the registry
-conduit ollama warmup         # Preload required models into memory
-```
-
-### MCP Configuration (v0.1.11+)
-```bash
-conduit mcp configure                   # Auto-configure MCP KB server in Claude Code
-conduit mcp configure --client cursor   # Configure for Cursor IDE
-conduit mcp configure --force           # Overwrite existing configuration
-```
-
-> **Note:** After running `conduit kb sync`, the MCP KB server is automatically configured in Claude Code. This command is for manual configuration or reconfiguration.
-
-**Search Modes:**
-- **Hybrid (default)**: Tries semantic search first, falls back to keyword search
-- **Semantic (`--semantic`)**: Vector-based search using embeddings (requires Qdrant + Ollama)
-- **Keyword (`--fts5`)**: Full-text keyword search using SQLite FTS5
-
-Semantic search understands meaning - "understanding text with computers" matches documents about "natural language processing" even without exact keyword matches.
-
-**KB Removal**: When you remove a source with `conduit kb remove`, both FTS5 entries and Qdrant vectors are automatically cleaned up. The output shows deletion statistics:
-```
-✓ Removed source: Project Docs (42 documents, 420 vectors)
-```
-
-**Supported Document Formats:**
-- Text: `.md`, `.txt`, `.rst`
-- Code: `.go`, `.py`, `.js`, `.ts`, `.java`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt`
-- Scripts: `.sh`, `.bash`, `.zsh`, `.fish`, `.ps1`, `.bat`, `.cmd`
-- Config: `.json`, `.yaml`, `.yml`, `.xml`, `.jsonld`, `.toml`, `.ini`, `.cfg`
-- Data: `.csv`, `.tsv`
-- Documents: `.pdf`, `.doc`, `.docx`, `.odt`, `.rtf`
-
-### System
-```bash
-conduit status                # Show daemon status
-conduit config                # Show configuration
-conduit config --all          # Show full configuration
-conduit config get <key>      # Get a specific config value (e.g., ai.model)
-conduit config set <key> <val>  # Set a config value (e.g., deps.ollama.path)
-conduit config unset <key>    # Remove a config value
-conduit backup                # Backup data directory
-conduit doctor                # Run comprehensive diagnostics
-```
-
-### MCP Operations
-```bash
-conduit mcp kb                # Run knowledge base MCP server (read-only)
-conduit mcp status            # Show MCP server capabilities and health
-conduit mcp logs              # View MCP-related logs
-conduit mcp stdio --instance <id>  # Run connector MCP server over stdio
-```
-
-## Architecture
-
-### Security Model
-
-- **Rootless Containers**: Podman preferred for rootless operation
-- **Capability Dropping**: All capabilities dropped by default
-- **Read-only Root Filesystem**: Containers run with immutable root
-- **Network Isolation**: Default to no network access
-- **Sensitive Path Protection**: Automatic blocking of ~/.ssh, ~/.aws, etc.
-
-### State Machine
-
-```
-CREATED → AUDITING → INSTALLED → STARTING → RUNNING
-                  ↘              ↗        ↘
-                   BLOCKED      STOPPED    DEGRADED
-                        ↘         ↓
-                         DISABLED → REMOVING → REMOVED
-```
-
-### MCP Protocol
-
-Conduit exposes connectors and the knowledge base via MCP:
-
-```json
-{
-  "mcpServers": {
-    "conduit-kb": {
-      "command": "conduit",
-      "args": ["mcp", "kb"]
-    }
-  }
-}
-```
-
-## MCP Server for AI Clients
-
-Conduit provides a **read-only** MCP server that enables AI clients (Claude Code, Cursor, VS Code) to search and retrieve documents from your private knowledge base.
-
-### Design Principles
-
-- **AI Reads, Humans Write**: The MCP server provides read-only access. All administrative operations (add/remove/sync sources) are reserved for the CLI.
-- **Safety First**: No destructive operations are exposed via MCP to prevent accidental or adversarial knowledge base modifications.
-- **Graceful Degradation**: Works with FTS5 (keyword search) alone and enhances with semantic search when Qdrant + Ollama are available.
-
-### Available Tools
-
-| Tool | Description |
-|------|-------------|
-| `kb_search` | Search knowledge base with hybrid search (FTS5 + semantic) |
-| `kb_search_with_context` | Search with merged, prompt-ready results and citations |
-| `kb_list_sources` | List all indexed sources with statistics |
-| `kb_get_document` | Retrieve full document content by ID |
-| `kb_stats` | Get knowledge base statistics |
-| `kag_query` | Query knowledge graph for entities and relationships |
-
-### Configuration
-
-**Claude Code** (`~/.claude.json`):
-```json
-{
-  "mcpServers": {
-    "conduit-kb": {
-      "command": "conduit",
-      "args": ["mcp", "kb"]
-    }
-  }
-}
-```
-
-**Cursor** (`.cursor/settings/extensions.json`):
-```json
-{
-  "mcpServers": {
-    "conduit-kb": {
-      "command": "conduit",
-      "args": ["mcp", "kb"]
-    }
-  }
-}
-```
-
-**VS Code** (`.vscode/settings.json`):
-```json
-{
-  "mcp.servers": {
-    "conduit-kb": {
-      "command": "conduit",
-      "args": ["mcp", "kb"]
-    }
-  }
-}
-```
-
-### Checking MCP Status
+### Essential Commands
 
 ```bash
-# Show MCP server capabilities, health, and source statistics
-conduit mcp status
+# Setup & Health
+conduit doctor              # Run diagnostics
+conduit status              # Show system status
 
-# View MCP-related logs
-conduit mcp logs
+# Knowledge Base
+conduit kb add <path>       # Add document folder
+conduit kb sync             # Index documents
+conduit kb search <query>   # Search your knowledge base
+conduit kb list             # List all sources
+conduit kb stats            # Show statistics
+
+# MCP Server
+conduit mcp status          # Verify MCP server is configured
+conduit mcp configure       # Configure MCP for Claude Code
 ```
-
-### Source-Aware Search
-
-All search operations support filtering by source ID for multi-KB scenarios:
-
-```json
-{
-  "name": "kb_search",
-  "arguments": {
-    "query": "authentication",
-    "source_id": "my-project-docs",
-    "limit": 10
-  }
-}
-```
-
-Use `kb_list_sources` to see available source IDs.
 
 ### Search Modes
 
-The MCP server supports three search modes via the `mode` parameter:
+```bash
+# Hybrid search (default) - combines keyword + semantic
+conduit kb search "authentication flow"
 
-| Mode | Description |
-|------|-------------|
-| `hybrid` | (Default) Combines keyword + semantic search with RRF fusion |
-| `semantic` | Vector similarity only (requires Qdrant + Ollama) |
-| `fts5` | Keyword matching only (always available) |
+# Semantic search - finds by meaning
+conduit kb search "securing user login" --semantic
 
-For detailed MCP server documentation, see [docs/MCP_SERVER_DESIGN.md](docs/MCP_SERVER_DESIGN.md).
-
-## Configuration
-
-Configuration is loaded from:
-1. `~/.conduit/conduit.yaml`
-2. `/etc/conduit/conduit.yaml`
-3. Environment variables (CONDUIT_*)
-
-Example configuration:
-```yaml
-data_dir: ~/.conduit
-socket: ~/.conduit/conduit.sock
-log_level: info
-
-runtime:
-  preferred: auto  # "podman", "docker", or "auto"
-  health_interval: 30s
-
-kb:
-  chunk_size: 1000
-  chunk_overlap: 100
-  max_file_size: 104857600  # 100MB
-
-  # RAG (Retrieval-Augmented Generation) tuning
-  # These control how semantic search retrieves and ranks results
-  rag:
-    min_score: 0.0        # Minimum similarity threshold (0.0-1.0)
-                          # 0 = no filtering, return all results ranked by score
-    semantic_weight: 0.5  # Balance: 0.0=keyword only, 1.0=semantic only
-    enable_mmr: true      # Maximal Marginal Relevance for diversity
-    mmr_lambda: 0.7       # 0.0=max diversity, 1.0=max relevance
-    enable_rerank: true   # Re-score top candidates semantically
-    default_limit: 10     # Default number of results
-
-  # KAG (Knowledge-Augmented Generation) settings
-  kag:
-    enabled: true         # Enable knowledge graph (requires FalkorDB)
-    preload_model: false  # Preload model on daemon startup (uses ~4GB RAM)
-    provider: ollama      # LLM provider: ollama, openai, anthropic
-    ollama:
-      model: mistral:7b-instruct-q4_K_M  # Extraction model
-      host: http://localhost:11434
-    graph:
-      backend: falkordb
-      falkordb:
-        host: localhost
-        port: 6379
-        graph_name: conduit_kg
-    extraction:
-      confidence_threshold: 0.7  # Minimum confidence for entities
-      max_entities_per_chunk: 20
-      workers: 2                 # Background extraction workers
-
-policy:
-  allow_network_egress: false
-  forbidden_paths:
-    - /
-    - /etc
-    - ~/.ssh
-    - ~/.aws
+# Keyword search - exact matches
+conduit kb search "OAuth2 client_id" --fts5
 ```
+
+### Knowledge Graph Queries
+
+```bash
+# Extract entities from your documents
+conduit kb kag-sync
+
+# Query relationships
+conduit kb kag-query "Kubernetes"
+conduit kb kag-query "authentication" --entities OAuth,JWT --max-hops 2
+```
+
+---
+
+## MCP Server Integration
+
+Conduit automatically creates an MCP server for your knowledge base and configures it for Claude Code.
+
+### For Claude Code (Auto-configured)
+
+After running `conduit kb sync`, your knowledge base is automatically available in Claude Code.
+
+### For Other AI Tools (Manual Configuration)
+
+Add to your AI tool's MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "conduit-kb": {
+      "command": "conduit",
+      "args": ["mcp", "kb"]
+    }
+  }
+}
+```
+
+**Configuration locations:**
+- **Claude Desktop**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+- **Cursor**: `.cursor/mcp.json`
+- **VS Code**: `.vscode/settings.json` (under `mcp.servers`)
+
+### Available MCP Tools
+
+| Tool | Description |
+|------|-------------|
+| `kb_search` | Hybrid search (semantic + keyword) |
+| `kb_search_with_context` | Search with merged results and citations |
+| `kb_list_sources` | List indexed document sources |
+| `kb_get_document` | Retrieve full document content |
+| `kb_stats` | Knowledge base statistics |
+| `kag_query` | Query knowledge graph for entities |
+
+---
+
+## Installation Options
+
+### CLI Installation (Recommended)
+
+```bash
+# Standard install
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
+
+# Custom options
+curl -fsSL ... | bash -s -- --install-dir ~/.local/bin  # Custom location
+curl -fsSL ... | bash -s -- --skip-model                # Skip AI model download
+curl -fsSL ... | bash -s -- --no-kag                    # Skip knowledge graph setup
+curl -fsSL ... | bash -s -- --verbose                   # Verbose output
+```
+
+### Manual Installation
+
+```bash
+git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git
+cd Conduit-AI-Intelligence-Hub
+make build
+sudo cp bin/conduit bin/conduit-daemon /usr/local/bin/
+conduit setup
+```
+
+### Desktop App (Experimental)
+
+> **Note:** The Desktop App is currently experimental and under active development. The CLI is the recommended way to use Conduit.
+
+For users who prefer a graphical interface, download the DMG from [Releases](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest).
+
+<details>
+<summary>Desktop App Details</summary>
+
+#### Download
+
+- Apple Silicon (M1/M2/M3/M4): `Conduit-x.x.x-arm64.dmg`
+
+#### macOS Security Note
+
+On first launch, you may see "Conduit.app is damaged". Run:
+
+```bash
+xattr -cr /Applications/Conduit.app
+```
+
+#### Features (Experimental)
+
+- Dashboard with real-time status
+- Knowledge Base management with RAG tuning
+- KAG search interface
+- Settings and configuration
+
+</details>
+
+---
+
+## Supported Document Formats
+
+| Category | Formats |
+|----------|---------|
+| **Documentation** | `.md`, `.txt`, `.rst` |
+| **Code** | `.go`, `.py`, `.js`, `.ts`, `.java`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.cs`, `.swift`, `.kt` |
+| **Scripts** | `.sh`, `.bash`, `.zsh`, `.ps1`, `.bat` |
+| **Config** | `.json`, `.yaml`, `.yml`, `.xml`, `.toml`, `.ini` |
+| **Data** | `.csv`, `.tsv` |
+| **Documents** | `.pdf`, `.doc`, `.docx`, `.odt`, `.rtf` |
+
+---
 
 ## Uninstalling
 
-Conduit provides three ways to uninstall, all with consistent behavior:
-
-### Method 1: CLI Command (Recommended)
+The recommended way to uninstall is via the CLI:
 
 ```bash
-# Show what's installed
-conduit uninstall --info
-
-# Preview what would be removed (dry run)
+# Preview what will be removed
 conduit uninstall --dry-run --all
 
-# Execute uninstall
+# Uninstall (keeps your data)
+conduit uninstall --keep-data
+
+# Full uninstall (removes everything)
 conduit uninstall --all
 ```
 
-### Method 2: Uninstall Script
+**Backup method** (if CLI is unavailable):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
 ```
 
-### Method 3: Desktop App
-
-Open **Settings → Uninstall** in the Conduit Desktop app for a graphical uninstall wizard.
-
-### Uninstall Tiers
-
-| Tier | Command | What's Removed |
-|------|---------|----------------|
-| **Keep Data** | `conduit uninstall --keep-data` | Daemon service, binaries, shell config (preserves `~/.conduit/`) |
-| **All** | `conduit uninstall --all` | Everything above + data directory + containers (Qdrant, FalkorDB) |
-| **Full** | `conduit uninstall --full` | Everything above + optional Ollama removal |
-
-**Note:** Docker and Podman are **never** removed (they are system tools).
-
-### CLI Options
-
-```bash
-# Tier selection
-conduit uninstall --keep-data       # Tier 1: Keep data for reinstall
-conduit uninstall --all             # Tier 2: Remove data and containers
-conduit uninstall --full            # Tier 3: Full cleanup
-
-# Control flags
-conduit uninstall --force           # Skip confirmations
-conduit uninstall --dry-run         # Preview without removing
-conduit uninstall --json            # JSON output for scripting
-conduit uninstall --info            # Show installation status
-
-# Selective removal
-conduit uninstall --remove-ollama   # Include Ollama in removal
-conduit uninstall --remove-qdrant   # Remove only Qdrant container
-conduit uninstall --remove-falkordb # Remove only FalkorDB container
-```
-
-### What Gets Removed
-
-**Tier 1 (Keep Data):**
-- Daemon service (launchd/systemd)
-- CLI binaries (`~/.local/bin/conduit`, `conduit-daemon`)
-- Shell PATH configuration
-- Symlinks
-
-**Tier 2 (All) adds:**
-- Data directory (`~/.conduit/`)
-- Qdrant container and volumes
-- FalkorDB container and volumes
-
-**Tier 3 (Full) adds:**
-- Ollama binary and models (`~/.ollama/`) - optional, requires `--remove-ollama`
-
-### Script Options
-
-```bash
-# Force mode (skip confirmations)
-curl -fsSL ... | bash -s -- --force
-
-# Remove everything including Ollama
-curl -fsSL ... | bash -s -- --remove-all
-
-# Custom paths
-curl -fsSL ... | bash -s -- --install-dir ~/.local/bin --conduit-home ~/.conduit
-```
+---
 
 ## Troubleshooting
 
+### Quick Diagnostics
+
+```bash
+conduit doctor    # Comprehensive health check
+conduit status    # System status overview
+```
+
 ### Common Issues
 
-**Semantic search not working (0 vectors)**
+**Semantic search shows 0 vectors:**
 ```bash
-# Check if Qdrant is running
-curl http://localhost:6333/collections
-
-# Check daemon logs for errors
-cat ~/.conduit/daemon.log | grep -E "(error|warn)" | tail -20
-
-# Restart Qdrant container
-podman restart conduit-qdrant  # or: docker restart conduit-qdrant
+conduit qdrant status              # Check Qdrant
+conduit kb sync --rebuild-vectors  # Rebuild vectors
 ```
 
-**Documents show 0 added after sync**
-- Documents may already be indexed with matching hashes
-- Check: `conduit kb stats` to see current document count
-- Force re-index: Remove source and re-add it
-
-**Daemon can't find pdftotext or other tools**
+**MCP server not working:**
 ```bash
-# On macOS, install poppler via Homebrew
-brew install poppler
-
-# Then restart the daemon service
-conduit service stop && conduit service start
+conduit mcp status     # Check MCP configuration
+conduit mcp configure  # Reconfigure
 ```
 
-**Container operations fail with credential errors**
-```bash
-# If you see "docker-credential-gcloud" errors, the install script
-# handles this automatically. For manual operation:
-echo '{"auths": {}}' > ~/.docker/config.json.tmp
-mv ~/.docker/config.json ~/.docker/config.json.backup
-mv ~/.docker/config.json.tmp ~/.docker/config.json
-# Run your container command, then restore:
-mv ~/.docker/config.json.backup ~/.docker/config.json
-```
-
-**KAG entity extraction not working**
-```bash
-# Check if FalkorDB is running
-conduit falkordb status
-
-# Check if extraction model is available
-conduit ollama models
-
-# Check extraction status (shows progress, errors, system resources)
-conduit kb kag-status
-
-# Retry failed extractions (with automatic retry logic)
-conduit kb kag-retry
-
-# Preview what would be retried
-conduit kb kag-retry --dry-run
-
-# Force re-extraction of all chunks
-conduit kb kag-sync --force
-```
-
-**KAG first extraction takes 1-2 minutes**
-
-The Mistral extraction model (~4GB) needs to load into memory on first use. To eliminate this delay, enable model preloading in your config:
-
+**KAG extraction slow on first run:**
+The extraction model (~4GB) loads on first use. Enable preloading in `~/.conduit/conduit.yaml`:
 ```yaml
 kb:
   kag:
-    preload_model: true  # Loads model when daemon starts
+    preload_model: true
 ```
 
-This uses ~4GB RAM continuously but provides instant KAG queries.
+For more troubleshooting, see [Known Issues](docs/KNOWN_ISSUES.md).
 
-**KAG query returns empty results**
-- Ensure documents have been synced: `conduit kb sync`
-- Run entity extraction: `conduit kb kag-sync`
-- Check extraction status: `conduit kb kag-status`
-- Lower confidence threshold in config if extractions are being filtered
+---
 
-### Diagnostic Commands
+## Documentation
 
-```bash
-# Check daemon status
-conduit status
+| Document | Description |
+|----------|-------------|
+| [CLI Command Index](docs/CLI_COMMAND_INDEX.md) | Complete CLI reference |
+| [Quick Start Guide](docs/QUICK_START.md) | Step-by-step getting started |
+| [User Guide](docs/USER_GUIDE.md) | Detailed usage instructions |
+| [Admin Guide](docs/ADMIN_GUIDE.md) | System administration |
+| [Known Issues](docs/KNOWN_ISSUES.md) | Issues and workarounds |
+| [MCP Server Design](docs/MCP_SERVER_DESIGN.md) | MCP implementation details |
 
-# Run comprehensive diagnostics
-conduit doctor
-
-# Check KB statistics
-conduit kb stats
-
-# View daemon logs
-cat ~/.conduit/daemon.log | tail -50
-
-# Check Qdrant vector count
-curl -s http://localhost:6333/collections/conduit_kb | jq '.result.points_count'
-
-# Check FalkorDB graph stats
-conduit falkordb status
-
-# Check KAG extraction status
-conduit kb kag-status
-```
-
-## Development
-
-### Running Tests
-
-```bash
-# All tests
-make test
-
-# With coverage
-make test-coverage
-
-# Specific package
-go test ./internal/kb/...
-```
-
-### Building
-
-```bash
-# Build all binaries
-make build
-
-# Build for specific platform
-GOOS=linux GOARCH=amd64 make build
-```
-
-## License
-
-MIT License - see LICENSE file for details.
+---
 
 ## Contributing
 
-Contributions are welcome! Please read CONTRIBUTING.md for guidelines.
+We welcome contributions! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+- **Bug Reports**: Use the [bug report template](.github/ISSUE_TEMPLATE/bug_report.md)
+- **Feature Requests**: Use the [feature request template](.github/ISSUE_TEMPLATE/feature_request.md)
+- **Questions**: Ask in [GitHub Discussions](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/discussions)
+
+---
+
+## Requirements
+
+The installer handles these automatically:
+
+| Requirement | Version | Notes |
+|-------------|---------|-------|
+| macOS or Linux | - | Windows support planned |
+| Podman or Docker | 4.0+ / 20.10+ | Container runtime |
+| Ollama | Latest | Local AI models |
+
+---
+
+## Privacy & Security
+
+- **100% Local**: All documents and processing stay on your machine
+- **No Telemetry**: Conduit doesn't phone home
+- **Sandboxed Containers**: Qdrant and FalkorDB run in isolated containers
+- **Read-Only MCP**: AI tools can only read, not modify your knowledge base
+
+---
+
+## License
+
+MIT License - see [LICENSE](LICENSE) for details.
+
+---
+
+## Acknowledgments
+
+Built with:
+- [Qdrant](https://qdrant.tech/) - Vector database
+- [FalkorDB](https://www.falkordb.com/) - Graph database
+- [Ollama](https://ollama.ai/) - Local AI models
+- [Model Context Protocol](https://modelcontextprotocol.io/) - AI tool integration
+
+---
+
+<p align="center">
+  <strong>Conduit v1.0</strong> — Private Knowledge Base for AI Tools
+</p>
