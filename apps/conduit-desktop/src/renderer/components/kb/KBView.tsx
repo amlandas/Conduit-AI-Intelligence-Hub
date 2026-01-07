@@ -34,7 +34,7 @@ export function KBView(): JSX.Element {
     searchQuery,
     refresh,
     search,
-    addSource,
+    // Note: addSource removed - we now use refresh() after CLI add to get authoritative state
     // Global sync state - persists across tab switches
     ragSyncing,
     ragProgress,
@@ -147,13 +147,13 @@ export function KBView(): JSX.Element {
 
   const handleAddSource = async (name: string, path: string): Promise<void> => {
     const result = await window.conduit.addKBSource({ name, path })
-    if (result && typeof result === 'object' && 'id' in result) {
-      addSource({
-        id: (result as { id: string }).id,
-        name,
-        path
-      })
+    // Check if CLI returned an error
+    if (result && typeof result === 'object' && 'error' in result) {
+      throw new Error((result as { error: string }).error)
     }
+    // CLI succeeded - refresh to get authoritative state from CLI
+    // Don't update local state directly; let refresh() sync with server
+    await refresh()
   }
 
   return (
