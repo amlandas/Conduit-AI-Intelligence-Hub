@@ -1,6 +1,6 @@
 # Conduit CLI Command Index
 
-**Version**: 0.1.0
+**Version**: 1.0.42
 **Last Updated**: January 2026
 
 This document provides a complete reference of all CLI commands available in Conduit.
@@ -14,38 +14,64 @@ This document provides a complete reference of all CLI commands available in Con
 | **Setup** | `conduit setup` | Interactive setup wizard |
 | **Setup** | `conduit doctor` | Run diagnostics |
 | **Setup** | `conduit install-deps` | Install runtime dependencies |
+| **Deps** | `conduit deps status` | Check dependency status |
+| **Deps** | `conduit deps install` | Install a dependency |
+| **Deps** | `conduit deps validate` | Validate custom binary path |
 | **Service** | `conduit service install` | Install daemon as system service |
 | **Service** | `conduit service start` | Start the daemon |
 | **Service** | `conduit service stop` | Stop the daemon |
 | **Service** | `conduit service status` | Show service status |
+| **Service** | `conduit service remove` | Remove the daemon service |
 | **Instance** | `conduit install` | Install a connector |
+| **Instance** | `conduit create` | Create a connector instance |
 | **Instance** | `conduit list` | List all instances |
 | **Instance** | `conduit start <id>` | Start an instance |
 | **Instance** | `conduit stop <id>` | Stop an instance |
 | **Instance** | `conduit remove <id>` | Remove an instance |
 | **Instance** | `conduit logs <id>` | View instance logs |
+| **Instance** | `conduit audit <id>` | Show audit logs (Advanced) |
 | **Client** | `conduit client list` | List detected AI clients |
 | **Client** | `conduit client bind` | Bind instance to client |
 | **Client** | `conduit client unbind` | Remove binding |
+| **Client** | `conduit client bindings` | Show bindings for instance |
 | **KB** | `conduit kb add <path>` | Add document source |
 | **KB** | `conduit kb list` | List sources |
 | **KB** | `conduit kb sync` | Sync documents |
 | **KB** | `conduit kb search <query>` | Search documents |
 | **KB** | `conduit kb stats` | Show statistics |
 | **KB** | `conduit kb remove <id>` | Remove source |
+| **KB** | `conduit kb migrate` | Migrate to vector store |
 | **KAG** | `conduit kb kag-sync` | Extract entities from documents |
 | **KAG** | `conduit kb kag-status` | Show extraction status |
 | **KAG** | `conduit kb kag-query` | Query knowledge graph |
-| **FalkorDB** | `conduit falkordb install` | Install FalkorDB container |
-| **FalkorDB** | `conduit falkordb start` | Start FalkorDB |
-| **FalkorDB** | `conduit falkordb stop` | Stop FalkorDB |
-| **FalkorDB** | `conduit falkordb status` | Check FalkorDB status |
+| **KAG** | `conduit kb kag-retry` | Retry failed extractions |
+| **KAG** | `conduit kb kag-dedupe` | Deduplicate entities |
+| **KAG** | `conduit kb kag-vectorize` | Generate entity embeddings |
+| **MCP** | `conduit mcp configure` | Auto-configure MCP in AI clients |
+| **MCP** | `conduit mcp status` | Show MCP server status |
+| **MCP** | `conduit mcp kb` | Run KB MCP server |
+| **MCP** | `conduit mcp stdio` | Run MCP server over stdio |
+| **MCP** | `conduit mcp logs` | Show MCP server logs |
+| **Ollama** | `conduit ollama status` | Show Ollama status |
+| **Ollama** | `conduit ollama models` | List available models |
+| **Ollama** | `conduit ollama pull` | Download a model |
+| **Ollama** | `conduit ollama warmup` | Preload models into memory |
 | **Qdrant** | `conduit qdrant install` | Install Qdrant container |
 | **Qdrant** | `conduit qdrant start` | Start Qdrant |
 | **Qdrant** | `conduit qdrant stop` | Stop Qdrant |
 | **Qdrant** | `conduit qdrant status` | Check Qdrant status |
+| **Qdrant** | `conduit qdrant attach` | Enable semantic search |
+| **Qdrant** | `conduit qdrant purge` | Clear all vectors |
+| **FalkorDB** | `conduit falkordb install` | Install FalkorDB container |
+| **FalkorDB** | `conduit falkordb start` | Start FalkorDB |
+| **FalkorDB** | `conduit falkordb stop` | Stop FalkorDB |
+| **FalkorDB** | `conduit falkordb status` | Check FalkorDB status |
+| **Config** | `conduit config` | Show configuration |
+| **Config** | `conduit config get` | Get a config value |
+| **Config** | `conduit config set` | Set a config value |
+| **Config** | `conduit config unset` | Remove a config value |
 | **System** | `conduit status` | Show daemon status |
-| **System** | `conduit config show` | Show configuration |
+| **System** | `conduit stats` | Show daemon statistics |
 | **System** | `conduit backup` | Backup data |
 | **System** | `conduit uninstall` | Uninstall Conduit |
 | **System** | `conduit events` | Stream real-time events (SSE) |
@@ -113,6 +139,83 @@ conduit install-deps [options]
 | `--document-tools` | Install PDF/DOC extraction tools |
 | `--semantic` | Install semantic search (Qdrant, Ollama) |
 | `--kag` | Install KAG dependencies (Mistral model) |
+| `--verbose` | Show verbose output |
+
+---
+
+## Dependency Commands
+
+Manage Conduit dependencies programmatically. These commands are used by the GUI and automation tools.
+
+### `conduit deps status`
+
+Check status of all dependencies.
+
+```bash
+conduit deps status [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--json` | Output in JSON format |
+
+**Dependencies checked**:
+- Homebrew (package manager, macOS/Linux)
+- Ollama (local AI runtime)
+- Podman (container runtime, preferred)
+- Docker (container runtime, alternative)
+
+**Examples**:
+```bash
+# Human-readable output
+conduit deps status
+
+# JSON output for GUI
+conduit deps status --json
+```
+
+### `conduit deps install <dependency>`
+
+Install a Conduit dependency.
+
+```bash
+conduit deps install <dependency>
+```
+
+**Supported dependencies**:
+| Dependency | Description |
+|------------|-------------|
+| `ollama` | Local AI runtime |
+| `podman` | Container runtime (recommended) |
+| `docker` | Container runtime (alternative) |
+| `homebrew` | Package manager (macOS/Linux) |
+
+**Installation methods by platform**:
+- **macOS**: Uses Homebrew when available
+- **Linux**: Uses official installers or system package managers
+
+**Progress output**: Commands output `PROGRESS:<percent>:<message>` for GUI integration.
+
+**Examples**:
+```bash
+conduit deps install ollama
+conduit deps install podman
+```
+
+### `conduit deps validate`
+
+Validate a custom binary path.
+
+```bash
+conduit deps validate <dependency> <path>
+```
+
+**Examples**:
+```bash
+conduit deps validate ollama /custom/path/ollama
+conduit deps validate podman /usr/local/bin/podman
+```
 
 ---
 
@@ -191,6 +294,32 @@ conduit install \
   --config PATH=/Users/me/docs
 ```
 
+### `conduit create <package-id>`
+
+Create a new connector instance from a package.
+
+```bash
+conduit create <package-id> [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--name <name>` | Display name for the instance |
+| `--version <ver>` | Package version (default: 1.0.0) |
+| `--image <ref>` | Docker image reference |
+| `--config <str>` | Instance config (format: key1=value1,key2=value2) |
+| `--json` | Output as JSON (for GUI) |
+
+The instance will be created but not started. Use `conduit start` to run it.
+
+**Examples**:
+```bash
+conduit create filesystem --name "My Files"
+conduit create github --name "GitHub Repos" --config "token=ghp_xxx"
+conduit create filesystem --json   # JSON output for GUI
+```
+
 ### `conduit list`
 
 List all connector instances.
@@ -248,18 +377,23 @@ conduit logs <instance-id> [options]
 | `--follow, -f` | Follow log output |
 | `--lines, -n <num>` | Number of lines to show (default: 50) |
 
-### `conduit inspect <instance-id>`
+### `conduit audit <instance-id>`
 
-Show detailed information about an instance.
+Show instance audit logs. *(Advanced Mode)*
 
 ```bash
-conduit inspect <instance-id> [options]
+conduit audit <instance-id> [options]
 ```
 
 **Options**:
 | Option | Description |
 |--------|-------------|
-| `--json` | Output as JSON |
+| `--limit <num>` | Maximum number of audit entries (default: 100) |
+| `--json` | Output as JSON (for GUI) |
+
+Audit logs track all access and operations performed by the instance. This is an Advanced Mode feature for security monitoring.
+
+> **Note**: This feature requires daemon API support (coming in future release).
 
 ---
 
@@ -532,56 +666,294 @@ conduit kb kag-query "container orchestration" --entities Docker,Kubernetes
 conduit kb kag-query "authentication" --limit 5 --max-hops 1
 ```
 
+### `conduit kb kag-retry`
+
+Retry failed KAG extractions.
+
+```bash
+conduit kb kag-retry [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--chunk-id <id>` | Specific chunk IDs to retry (repeatable) |
+| `--max-retries <num>` | Maximum retry attempts (default: 2, max: 5) |
+| `--dry-run` | Preview without executing |
+
+Without flags, retries all failed chunks. Shows error breakdown by category (Incomplete JSON, Invalid escape, Schema mismatch, Timeout, Connection, Parse error).
+
+**Examples**:
+```bash
+# Retry all failed chunks
+conduit kb kag-retry
+
+# Retry specific chunk
+conduit kb kag-retry --chunk-id abc123
+
+# Preview what would be retried
+conduit kb kag-retry --dry-run
+
+# Retry with 3 attempts
+conduit kb kag-retry --max-retries 3
+```
+
+### `conduit kb kag-dedupe`
+
+Deduplicate entities in the knowledge graph.
+
+```bash
+conduit kb kag-dedupe [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--dry-run` | Preview without making changes |
+
+Merges duplicate entities that have the same normalized name and type (e.g., "Threat Model" and "threat model"). Keeps the highest confidence and best description.
+
+**Examples**:
+```bash
+# Deduplicate all entities
+conduit kb kag-dedupe
+
+# Preview without making changes
+conduit kb kag-dedupe --dry-run
+```
+
+### `conduit kb kag-vectorize`
+
+Generate vector embeddings for KAG entities.
+
+```bash
+conduit kb kag-vectorize [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--batch-size <num>` | Entities per batch (default: 50) |
+| `--ollama-host <url>` | Ollama host URL (default: http://localhost:11434) |
+| `--qdrant-host <host>` | Qdrant host (default: localhost) |
+| `--qdrant-port <port>` | Qdrant port (default: 6334) |
+
+Generates and stores vector embeddings for all entities in the knowledge graph. Enables semantic search over entities using vector similarity. Embeddings are stored in a Qdrant collection (`conduit_entities`) separate from chunk vectors.
+
+**Requirements**:
+- Ollama running with `nomic-embed-text` model
+- Qdrant running on the specified host/port
+
+**Examples**:
+```bash
+conduit kb kag-vectorize
+conduit kb kag-vectorize --batch-size 50
+conduit kb kag-vectorize --ollama-host http://192.168.1.60:11434
+```
+
 ---
 
-## FalkorDB Commands
+## MCP Commands
 
-### `conduit falkordb install`
+Manage the Model Context Protocol (MCP) server for AI client integration.
 
-Install FalkorDB container.
+### `conduit mcp configure`
+
+Auto-configure the Conduit MCP KB server in AI clients.
 
 ```bash
-conduit falkordb install [options]
+conduit mcp configure [options]
 ```
 
 **Options**:
 | Option | Description |
 |--------|-------------|
-| `--port <num>` | Port to bind (default: 6379) |
-| `--memory <size>` | Memory limit (e.g., "1g") |
+| `--client, -c <name>` | Client to configure (default: claude-code) |
+| `--force, -f` | Overwrite existing configuration |
 
-### `conduit falkordb start`
+**Supported clients**:
+- `claude-code`: Claude Code CLI (`~/.claude.json`)
+- `cursor`: Cursor IDE (`.cursor/settings/extensions.json`)
+- `vscode`: VS Code (`.vscode/settings.json`)
 
-Start FalkorDB container.
-
+**Examples**:
 ```bash
-conduit falkordb start
+# Configure for Claude Code (default)
+conduit mcp configure
+
+# Configure for Cursor IDE
+conduit mcp configure --client cursor
+
+# Overwrite existing configuration
+conduit mcp configure --force
 ```
 
-### `conduit falkordb stop`
+### `conduit mcp status`
 
-Stop FalkorDB container.
-
-```bash
-conduit falkordb stop
-```
-
-### `conduit falkordb status`
-
-Check FalkorDB status.
+Show MCP server status and capabilities.
 
 ```bash
-conduit falkordb status [options]
+conduit mcp status [options]
 ```
 
 **Options**:
 | Option | Description |
 |--------|-------------|
-| `--json` | Output as JSON |
+| `--json` | Output as JSON (for GUI) |
+
+**Shows**:
+- MCP configuration status in AI clients (Claude Code, Cursor, VS Code)
+- Search capabilities (FTS5, semantic search availability)
+- Qdrant and Ollama connectivity status
+- Knowledge base sources and statistics
+
+### `conduit mcp kb`
+
+Run the Knowledge Base MCP server over stdio.
+
+```bash
+conduit mcp kb
+```
+
+This server provides search and document retrieval tools for AI clients to access your private knowledge base. Typically invoked by AI clients automatically.
+
+**Example MCP client configuration**:
+```json
+{
+  "mcpServers": {
+    "conduit-kb": {
+      "command": "conduit",
+      "args": ["mcp", "kb"]
+    }
+  }
+}
+```
+
+### `conduit mcp stdio`
+
+Run an MCP server over stdio for a connector instance.
+
+```bash
+conduit mcp stdio --instance <instance-id>
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--instance <id>` | Connector instance ID (required) |
+
+Proxies an MCP server over stdio. Runs a containerized MCP server with stdin/stdout attached, allowing AI clients to communicate with it via the MCP protocol.
+
+**Example usage in AI client config**:
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "conduit",
+      "args": ["mcp", "stdio", "--instance", "abc123"]
+    }
+  }
+}
+```
+
+### `conduit mcp logs`
+
+Show MCP server logs.
+
+```bash
+conduit mcp logs [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--tail, -n <num>` | Number of lines to show |
+| `--follow, -f` | Follow log output |
+
+Shows daemon logs related to MCP operations.
+
+---
+
+## Ollama Commands
+
+Manage Ollama models for semantic search and entity extraction.
+
+### `conduit ollama status`
+
+Show Ollama status and loaded models.
+
+```bash
+conduit ollama status
+```
+
+**Shows**:
+- Whether Ollama is running
+- Currently loaded models (kept in memory)
+- Required models for Conduit:
+  - `nomic-embed-text` - Semantic search embeddings
+  - `mistral:7b-instruct-q4_K_M` - Entity extraction (KAG)
+
+Models that aren't loaded will have a cold-start delay on first use (1-2 minutes).
+
+### `conduit ollama models`
+
+List available Ollama models.
+
+```bash
+conduit ollama models
+```
+
+Shows all Ollama models installed on the system and indicates which required models are present.
+
+### `conduit ollama pull <model>`
+
+Pull (download) an Ollama model from the registry.
+
+```bash
+conduit ollama pull <model>
+```
+
+Progress is streamed to stdout, making it suitable for GUI integration. If Ollama is not running, it will be started automatically.
+
+**Examples**:
+```bash
+conduit ollama pull nomic-embed-text
+conduit ollama pull mistral:7b-instruct-q4_K_M
+```
+
+### `conduit ollama warmup`
+
+Preload Ollama models into memory for faster inference.
+
+```bash
+conduit ollama warmup [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--models <list>` | Specific models to warm up (default: all required) |
+
+By default, warms up both required models:
+- `nomic-embed-text` - For semantic search
+- `mistral:7b-instruct-q4_K_M` - For entity extraction
+
+Models stay loaded based on Ollama's `keep_alive` setting (default: 5 minutes).
+
+**Examples**:
+```bash
+# Warm up all required models
+conduit ollama warmup
+
+# Warm up specific model
+conduit ollama warmup --models nomic-embed-text
+```
 
 ---
 
 ## Qdrant Commands
+
+Manage the Qdrant vector database for semantic search.
 
 ### `conduit qdrant install`
 
@@ -626,6 +998,183 @@ conduit qdrant status [options]
 |--------|-------------|
 | `--json` | Output as JSON |
 
+### `conduit qdrant attach`
+
+Enable semantic search in daemon without restart.
+
+```bash
+conduit qdrant attach [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--reindex` | Re-index existing documents after attach |
+
+This command:
+1. Verifies Qdrant is running and healthy
+2. Notifies the daemon to initialize semantic search
+3. Optionally triggers re-indexing of existing documents
+
+Use this after installing Qdrant to enable semantic search without restarting the daemon.
+
+**Examples**:
+```bash
+# Attach and enable semantic search
+conduit qdrant attach
+
+# Attach and re-index all documents
+conduit qdrant attach --reindex
+```
+
+### `conduit qdrant purge`
+
+Clear all vectors from the Qdrant collection.
+
+```bash
+conduit qdrant purge [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--force, -f` | Skip confirmation prompt |
+
+Removes all vectors from the Qdrant collection. Useful when:
+- You reinstalled Conduit and have orphaned vectors
+- You want to start fresh with semantic search
+- There's a mismatch between SQLite documents and Qdrant vectors
+
+After purging, run `conduit kb sync` to re-index all documents.
+
+> **Warning**: This operation cannot be undone!
+
+---
+
+## FalkorDB Commands
+
+Manage the FalkorDB graph database for KAG (Knowledge-Augmented Generation).
+
+### `conduit falkordb install`
+
+Install FalkorDB container.
+
+```bash
+conduit falkordb install [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--port <num>` | Port to bind (default: 6379) |
+| `--memory <size>` | Memory limit (e.g., "1g") |
+| `--prefer-runtime <rt>` | Prefer podman or docker |
+
+### `conduit falkordb start`
+
+Start FalkorDB container.
+
+```bash
+conduit falkordb start
+```
+
+### `conduit falkordb stop`
+
+Stop FalkorDB container.
+
+```bash
+conduit falkordb stop
+```
+
+### `conduit falkordb status`
+
+Check FalkorDB status.
+
+```bash
+conduit falkordb status [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--json` | Output as JSON |
+
+---
+
+## Configuration Commands
+
+Manage Conduit configuration.
+
+### `conduit config`
+
+Show current Conduit configuration.
+
+```bash
+conduit config [options]
+```
+
+**Options**:
+| Option | Description |
+|--------|-------------|
+| `--all, -a` | Show all configuration options |
+
+**Shows**:
+- Paths (data directory, socket, database, logs, backups)
+- Logging settings (level, format)
+- AI configuration (provider, model, endpoint, timeout, confidence)
+- Runtime settings (preferred runtime, timeouts)
+- Knowledge Base settings (workers, max file size, chunk size) *(with --all)*
+- Policy settings (network egress, forbidden paths) *(with --all)*
+- API settings (timeouts) *(with --all)*
+
+### `conduit config get <key>`
+
+Get a specific configuration value.
+
+```bash
+conduit config get <key>
+```
+
+Keys use dot notation to access nested values.
+
+**Examples**:
+```bash
+conduit config get ai.model
+conduit config get deps.ollama.path
+conduit config get runtime.preferred
+```
+
+### `conduit config set <key> <value>`
+
+Set a specific configuration value.
+
+```bash
+conduit config set <key> <value>
+```
+
+Keys use dot notation. Values are stored in `~/.conduit/conduit.yaml`.
+
+**Examples**:
+```bash
+conduit config set ai.model qwen2.5-coder:7b
+conduit config set deps.ollama.path /custom/path/ollama
+conduit config set runtime.preferred podman
+```
+
+### `conduit config unset <key>`
+
+Remove a specific configuration value.
+
+```bash
+conduit config unset <key>
+```
+
+**Examples**:
+```bash
+conduit config unset deps.ollama.path
+conduit config unset runtime.preferred
+```
+
 ---
 
 ## System Commands
@@ -643,18 +1192,33 @@ conduit status [options]
 |--------|-------------|
 | `--json` | Output as JSON |
 
-### `conduit config show`
+### `conduit stats`
 
-Show current configuration.
+Show daemon statistics.
 
 ```bash
-conduit config show [options]
+conduit stats [options]
 ```
 
 **Options**:
 | Option | Description |
 |--------|-------------|
-| `--json` | Output as JSON |
+| `--json` | Output as JSON (for GUI) |
+
+**Output includes**:
+- Instance counts (total, running)
+- Binding counts
+- Knowledge base stats (sources, documents, chunks)
+- Daemon info (version, uptime)
+
+**Examples**:
+```bash
+# Human-readable output
+conduit stats
+
+# JSON output for GUI integration
+conduit stats --json
+```
 
 ### `conduit backup`
 
@@ -669,6 +1233,14 @@ conduit backup [options]
 |--------|-------------|
 | `--output <path>` | Output path for backup |
 | `--include-vectors` | Include vector store data |
+
+**Backup includes**:
+- Database (conduit.db)
+- Configuration (conduit.yaml)
+- Knowledge base data
+- Connector configurations
+
+The backup is saved as a compressed tar.gz archive.
 
 ### `conduit uninstall`
 
@@ -723,7 +1295,7 @@ conduit events
 conduit events --json
 
 # Example output:
-# [14:32:05] 📚 kb_sync_completed
+# [14:32:05] kb_sync_completed
 #          source_id: src_abc123
 #          added: 15
 #          updated: 3
@@ -735,41 +1307,37 @@ conduit events --json
 
 ## Permissions Commands
 
-### `conduit permissions show <instance-id>`
+*(Advanced Mode)*
 
-Show permissions for an instance.
+### `conduit permissions <instance-id>`
 
-```bash
-conduit permissions show <instance-id>
-```
-
-### `conduit permissions grant <instance-id>`
-
-Grant permissions to an instance.
+Get or set instance permissions.
 
 ```bash
-conduit permissions grant <instance-id> [options]
+conduit permissions <instance-id> [options]
 ```
 
 **Options**:
 | Option | Description |
 |--------|-------------|
-| `--readonly <path>` | Grant read-only access (repeatable) |
-| `--readwrite <path>` | Grant read-write access (repeatable) |
+| `--set <perm>` | Set permission (format: permission.name=true/false) |
+| `--json` | Output as JSON (for GUI) |
 
-### `conduit permissions revoke <instance-id>`
+Permissions control what operations an instance can perform. This is an Advanced Mode feature for fine-grained access control.
 
-Revoke permissions from an instance.
-
+**Examples**:
 ```bash
-conduit permissions revoke <instance-id> [options]
+# View permissions
+conduit permissions abc123
+
+# Set a permission
+conduit permissions abc123 --set "filesystem.read=true"
+
+# JSON output for GUI
+conduit permissions abc123 --json
 ```
 
-**Options**:
-| Option | Description |
-|--------|-------------|
-| `--type <type>` | Permission type to revoke |
-| `--all` | Revoke all permissions |
+> **Note**: This feature requires daemon API support (coming in future release).
 
 ---
 
@@ -803,7 +1371,10 @@ conduit permissions revoke <instance-id> [options]
 
 ## See Also
 
-- [User Guide](USER_GUIDE.md) - Getting started and tutorials
+- [Quick Start Guide](QUICK_START.md) - Get started in 5 minutes
+- [User Guide](USER_GUIDE.md) - Detailed usage instructions
 - [Admin Guide](ADMIN_GUIDE.md) - System administration
+- [Known Issues](KNOWN_ISSUES.md) - Issues and workarounds
 - [KAG HLD](KAG_HLD.md) - Knowledge graph design
 - [KB Search HLD](KB_SEARCH_HLD.md) - Search architecture
+- [MCP Server Design](MCP_SERVER_DESIGN.md) - MCP server implementation
