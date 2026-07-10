@@ -1,53 +1,49 @@
-# Why Not Just Point Claude at My Docs Folder?
+# Why Not Just Point My AI at My Files?
 
-*An honest answer. Updated July 2026.*
+*Updated July 2026.*
 
-This is the first question any skeptical developer should ask about Conduit — or about any local knowledge-base tool for AI agents. Here is the honest answer, including the cases where the answer is "you're right, just use the folder."
+Every AI tool now claims it can work with your documents. ChatGPT and Claude take file uploads and Projects. NotebookLM eats whole folders. Coding agents grep your repo. So the first question anyone should ask about Conduit is: why would I run a separate knowledge base at all?
 
-## You probably don't need Conduit if…
+Fair question. For a lot of people the answer is: you shouldn't. This page tries to sort out which side of the line you're on.
 
-**Your docs are markdown, live in (or near) your repos, and total a few MB.**
-Then the built-in mechanisms are better than anything Conduit does:
+## When the built-in options are enough
 
-- **Commit the docs to the repo.** Claude Code, Codex, Copilot and every other agentic tool will grep them. The 2026 consensus is clear: for content that's already on disk next to your code, agentic keyword search is excellent — studies put it within a few percent of full RAG pipelines for repo-scale content, with zero infrastructure.
-- **Use your tool's native context features.** `CLAUDE.md` imports and path-scoped rules (Claude Code), `AGENTS.md` (Codex, Copilot, others), Cursor rules and @Docs. These are zero-install, git-versioned, and team-shareable.
-- **Native memory is real now.** Claude Code, Copilot, Codex, and Cursor all remember project conventions and session learnings out of the box. You do not need a knowledge base for "remember how we do error handling."
-- **Long context + prompt caching.** If your entire corpus is a few hundred KB, loading all of it into a 1M-token context with caching is often cheaper and simpler than running any retrieval service.
+**If your material is small and lives in one place, use what your AI tool already gives you.**
 
-If that's your situation, stop here. Conduit would be added complexity for capabilities your tools already have. Most individual developers are in this category, and pretending otherwise would waste your afternoon.
+A few hundred pages of notes, a handful of PDFs, one active project? Upload them to a ChatGPT or Claude Project, or drop them in NotebookLM. These tools handle modest corpora well, and models with million-token context windows plus prompt caching can often just read everything you have. No index, no sync, nothing to maintain.
 
-## Where the folder approach actually breaks
+**If you're a developer and your docs are markdown sitting in your repos, you need even less.** Coding agents search files directly, and the consensus by now is that this works well for anything that's already plain text on disk. `CLAUDE.md` imports, `AGENTS.md`, Cursor rules. All free, all versioned with your code. Claude Code, Copilot, Codex, and Cursor also remember project conventions on their own now, so "help my tool remember how we do things" no longer needs any external product.
 
-Each of these is a real limitation of "just point the agent at files" — and they compound:
+If that covers you, stop reading. Adding Conduit to that setup buys you complexity and not much else. Most people are in this category, including most developers.
 
-**1. Not everything is a grep-able text file.**
-PDFs, Word docs, exported wiki dumps, scanned specs, slide decks. Agents can't grep a PDF. Something has to extract, clean, chunk, and index that content before any AI tool can use it. This is the single biggest gap: if your knowledge lives in `~/Documents/architecture-reviews/*.pdf` rather than `./docs/*.md`, the folder approach simply does not work.
+## Where it stops working
 
-**2. Prose is where keyword search actually fails.**
-Grep won the code-search argument because code identifiers are literal. Prose isn't: the decision you need says "we chose eventual consistency for the billing pipeline" and you search for "why is invoicing async." No keyword overlaps. Semantic + keyword hybrid retrieval measurably beats either alone on prose corpora — this is the one place the extra machinery earns its keep.
+The built-in options share some walls. You hit them when:
 
-**3. Cross-project knowledge has no home.**
-Your agent's context is the current repo. The design decision that answers today's question might live in another project's docs, a wiki export from two years ago, or a folder of meeting notes. Per-repo files and per-repo memory can't see any of it.
+**Your knowledge isn't in grep-able text files.** Case files, research papers, scanned contracts, old Word documents, slide decks, wiki exports. An agent can't grep a PDF, and upload-based tools cap out on file counts and sizes long before a real archive fits. Somebody has to extract, clean, and index that content before any AI can use it. This is the biggest wall and the most common one.
 
-**4. Corpus size eventually beats context windows.**
-At tens of thousands of chunks (hundreds of PDFs, years of notes), you can't load everything, and letting an agent iteratively grep through it burns enormous context on misses. Retrieval that returns the right five chunks with citations is cheaper and faster.
+**You search prose the way people actually ask questions.** Keyword search wins for code because identifiers are literal. Prose is the opposite. The decision memo says "we chose eventual consistency for the billing pipeline" and you ask "why is invoicing async." Nothing overlaps. For documents written in natural language, combining semantic and keyword retrieval measurably beats either one, and it beats an agent guessing search terms.
 
-**5. Tool lock-in for your knowledge layer.**
-Native memory is siloed: Claude's lives in `~/.claude`, Cursor's in its cloud, Copilot's in GitHub. Tools also die (Gemini CLI was retired in June 2026). An MCP knowledge server is tool-agnostic — one index, every client, survives switching.
+**Your knowledge crosses projects and apps.** The answer to today's question might sit in another project's design docs, in notes from two years ago, or in a client folder that has nothing to do with the repo or Project you're currently in. Per-project uploads and per-repo files can't see across those boundaries. You end up re-uploading the same material into every new context, or doing without.
 
-**6. Some content must not leave your machine.**
-Cursor's doc indexing and Copilot Spaces are cloud-side. If your corpus includes anything confidential — client documents, unreleased plans, personal records — cloud indexing is a non-starter, and you need the retrieval stack to be fully local, including embeddings.
+**The corpus outgrows the context window.** Hundreds of PDFs or years of accumulated notes won't fit, and letting an agent rummage through it by trial and error burns time and tokens on misses. Past a certain size you want retrieval that hands back the right five passages with citations.
 
-## So the honest positioning is:
+**Your knowledge is trapped in one vendor's silo.** Claude's memory lives in Claude. ChatGPT's Projects live in ChatGPT. Cursor's index lives in Cursor's cloud. Switch tools, or use three at once, and you're maintaining three copies of your own knowledge. Tools also get discontinued; your knowledge layer shouldn't die with them. An MCP server is one index that every client can query, and MCP is now supported nearly everywhere.
 
-> **Conduit is for the developer whose private knowledge is multi-format (PDFs and docs, not just markdown), multi-project (no single repo owns it), too large to paste into context, and too sensitive to index in someone's cloud — and who wants every AI tool they use to query it the same way.**
+**The content can't leave your machine.** Uploads, Projects, NotebookLM, Cursor's doc indexing, Copilot Spaces: all cloud-side. If you handle client documents, patient records, unreleased work, or anything under a confidentiality obligation, that's disqualifying. Then the whole pipeline has to run locally, embeddings included.
 
-If fewer than two of those clauses describe you, use the folder. Genuinely.
+## Who Conduit is actually for
 
-## Current caveats (also honest)
+Put together, that's a specific person: someone whose private knowledge is **multi-format** (PDFs and documents, not just markdown), **spread across projects or apps**, **too large to upload or paste**, and in some cases **too sensitive to index in anyone's cloud** — and who wants the AI tools they use, plural, to query it the same way.
 
-- Conduit v1's install is heavy (containers + local models) — far heavier than this niche deserves. A single-binary rebuild is being evaluated; whether it proceeds depends on whether this niche turns out to be real for people other than the author.
-- Retrieval results are returned verbatim to your AI client — if you index untrusted documents, their content can influence your agent (prompt injection). Index what you trust.
-- Search quality on prose is the point of the architecture, but you should demand evidence: benchmark it on *your* corpus against plain grep before adopting anything.
+That might be a researcher with a decade of papers and reading notes. A lawyer or consultant with client archives. An analyst with years of reports. Or a developer whose design docs and decision records span a dozen repos. The common thread is a serious personal corpus and more than one AI tool, not a job title.
 
-*Feedback, counterexamples, and "actually I just use X and it's fine" stories are all welcome — that's exactly the signal this page exists to collect.*
+If fewer than two of those clauses describe you, the folder or the upload button is the right answer. That's not false modesty; it's what the comparison comes out to.
+
+## Caveats, since this page promised honesty
+
+- Conduit v1's install is heavy for what it does: containers plus local models. A single-binary rebuild is under evaluation, and whether it happens depends on whether enough people recognize themselves in the paragraph above.
+- Search results go to your AI client verbatim. If you index documents you don't trust, whatever instructions they contain reach your AI as tool output (prompt injection). Index what you trust.
+- Don't take retrieval quality on faith, from us or anyone. Test it on your own material against the simplest alternative before adopting any tool in this category.
+
+*If you read this and thought "I just use X and it works fine," that's useful information. Tell us. Collecting exactly that signal is what this page is for.*
