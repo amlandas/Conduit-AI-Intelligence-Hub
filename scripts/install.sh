@@ -1071,14 +1071,14 @@ install_qdrant() {
     if ! $CONTAINER_CMD run -d \
         --name conduit-qdrant \
         --restart unless-stopped \
-        -p 6333:6333 \
-        -p 6334:6334 \
+        -p 127.0.0.1:6333:6333 \
+        -p 127.0.0.1:6334:6334 \
         -v "${CONDUIT_HOME}/qdrant:/qdrant/storage" \
         docker.io/qdrant/qdrant:latest 2>&1; then
         warn "Failed to start Qdrant container"
         restore_docker_config
         echo "You may need to start Qdrant manually:"
-        echo "  $CONTAINER_CMD run -d --name conduit-qdrant -p 6333:6333 -p 6334:6334 -v ~/.conduit/qdrant:/qdrant/storage qdrant/qdrant"
+        echo "  $CONTAINER_CMD run -d --name conduit-qdrant -p 127.0.0.1:6333:6333 -p 127.0.0.1:6334:6334 -v ~/.conduit/qdrant:/qdrant/storage qdrant/qdrant"
         return 1
     fi
 
@@ -1223,13 +1223,13 @@ install_falkordb() {
     if ! $CONTAINER_CMD run -d \
         --name conduit-falkordb \
         --restart unless-stopped \
-        -p 6379:6379 \
+        -p 127.0.0.1:6379:6379 \
         -v "${CONDUIT_HOME}/falkordb:/data" \
         docker.io/falkordb/falkordb:latest 2>&1; then
         warn "Failed to start FalkorDB container"
         restore_docker_config
         echo "You may need to start FalkorDB manually:"
-        echo "  $CONTAINER_CMD run -d --name conduit-falkordb -p 6379:6379 -v ~/.conduit/falkordb:/data falkordb/falkordb"
+        echo "  $CONTAINER_CMD run -d --name conduit-falkordb -p 127.0.0.1:6379:6379 -v ~/.conduit/falkordb:/data falkordb/falkordb"
         return 1
     fi
 

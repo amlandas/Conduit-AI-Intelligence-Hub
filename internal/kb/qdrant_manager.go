@@ -268,8 +268,10 @@ func (m *QdrantManager) createContainer(ctx context.Context) error {
 	args := []string{
 		"run", "-d",
 		"--name", m.containerName,
-		"-p", fmt.Sprintf("%d:%d", m.httpPort, 6333),
-		"-p", fmt.Sprintf("%d:%d", m.grpcPort, 6334),
+		// Bind to loopback only: the KB stores have no auth, so they must
+		// never be reachable from the LAN (see KNOWN_ISSUES: SEC-001).
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", m.httpPort, 6333),
+		"-p", fmt.Sprintf("127.0.0.1:%d:%d", m.grpcPort, 6334),
 		"-v", volumeMount,
 		"docker.io/qdrant/qdrant:latest",
 	}
