@@ -6157,7 +6157,8 @@ After installation, enable KAG with:
 			}
 			runArgs = append(runArgs, "-d",
 				"--name", "conduit-falkordb",
-				"-p", "6379:6379",
+				// Loopback only: FalkorDB has no auth (see KNOWN_ISSUES: SEC-001)
+				"-p", "127.0.0.1:6379:6379",
 				"-v", dataDir+":/data",
 				"--restart", "unless-stopped",
 				"falkordb/falkordb:latest",

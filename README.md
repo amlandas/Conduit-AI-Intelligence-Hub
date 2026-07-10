@@ -221,35 +221,15 @@ sudo cp bin/conduit bin/conduit-daemon /usr/local/bin/
 conduit setup
 ```
 
-### Desktop App (Experimental)
+### Desktop App (Discontinued — Do Not Install)
 
-> **Note:** The Desktop App is currently experimental and under active development. The CLI is the recommended way to use Conduit.
-
-For users who prefer a graphical interface, download the DMG from [Releases](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases/latest).
-
-<details>
-<summary>Desktop App Details</summary>
-
-#### Download
-
-- Apple Silicon (M1/M2/M3/M4): `Conduit-x.x.x-arm64.dmg`
-
-#### macOS Security Note
-
-On first launch, you may see "Conduit.app is damaged". Run:
-
-```bash
-xattr -cr /Applications/Conduit.app
-```
-
-#### Features (Experimental)
-
-- Dashboard with real-time status
-- Knowledge Base management with RAG tuning
-- KAG search interface
-- Settings and configuration
-
-</details>
+> **⚠️ Desktop App development is halted as of July 2026.** The published DMGs
+> are unsigned, run an end-of-life Electron version, and contain a known
+> security vulnerability ([SEC-002](docs/KNOWN_ISSUES.md#sec-002-desktop-app-electron-gui-is-unsupported--do-not-use-security)).
+> Do not install them. If you have the app installed, remove it:
+> `rm -rf /Applications/Conduit.app`
+>
+> The CLI is the supported way to use Conduit and provides all functionality.
 
 ---
 
@@ -328,6 +308,7 @@ For more troubleshooting, see [Known Issues](docs/KNOWN_ISSUES.md).
 
 | Document | Description |
 |----------|-------------|
+| [Why Not Just a Folder?](docs/WHY_NOT_JUST_A_FOLDER.md) | Honest comparison vs. built-in agent capabilities — read this first |
 | [CLI Command Index](docs/CLI_COMMAND_INDEX.md) | Complete CLI reference |
 | [Quick Start Guide](docs/QUICK_START.md) | Step-by-step getting started |
 | [User Guide](docs/USER_GUIDE.md) | Detailed usage instructions |
