@@ -1,593 +1,277 @@
-# Conduit - Claude Code Context Document
+# Conduit — Developer Context (v2)
 
-**Purpose**: This document provides all necessary context for Claude Code (Opus 4.5 or Sonnet 4.5) to continue development on the Conduit project.
+**Start here if you are working on the code.**
 
-**Last Updated**: December 2025
-**Current Version**: V0.1.0 (Complete)
+This document describes Conduit 2.0. If something you read elsewhere mentions a
+daemon, Qdrant, FalkorDB, Podman or an Electron GUI as a current feature, that
+document is stale — see [CHANGELOG.md](CHANGELOG.md) for what was removed and
+why.
 
 ---
 
-## Quick Start for Claude Code
+## What Conduit is
 
-### 1. Project Location
-```
-/Users/amlandas/workplace/Simpleflo - Conduit AI Intelligence Hub/Simpleflo-Conduit-Dev-CC/Conduit-Dev-ClaudeCode/conduit
-```
+A local-first knowledge base that AI clients query over MCP.
 
-### 2. Essential Commands
+It is **one binary**. There is no daemon, no socket, no HTTP API, and no
+background service. Every command opens a SQLite file, does its work in
+process, and exits. That is the whole architecture, and it is why
+`conduit kb search` works on a machine where nothing else is running.
+
+SQLite holds everything: the FTS5 keyword index, the vectors, the chunk and
+document metadata, and (optionally) the knowledge graph edges. One file, WAL
+mode, one backup.
+
+---
+
+## Build and test
+
 ```bash
-# Build the project
+# Build
+CGO_ENABLED=1 go build -tags fts5 -o conduit ./cmd/conduit
+# or:
 make build
 
-# Run all tests
+# Test
+CGO_ENABLED=1 go test -tags fts5 ./...
+# or:
 make test
 
-# Run daemon
-./bin/conduit-daemon --foreground --log-level=debug
-
-# Check status
-./bin/conduit status
+make fmt      # gofmt
+make vet      # go vet
+make lint     # golangci-lint
+make run-mcp  # build and run the KB MCP server over stdio
+make help     # list all targets
 ```
 
-### 3. Key Files to Read First
-- `README.md` - Project overview
-- `docs/V0_OUTCOME.md` - What's implemented
-- `go.mod` - Dependencies
-- `Makefile` - Build configuration
+**`CGO_ENABLED=1` and `-tags fts5` are not optional.** A build without them
+compiles cleanly, starts cleanly, and then fails every search with
+`no such module: fts5`. Any build command you write, script you add, or CI job
+you touch must set both.
+
+Requires Go 1.21+ and a C compiler.
 
 ---
 
-## Project Overview
+## Package map
 
-### What is Conduit?
+### `cmd/conduit`
 
-Conduit is a **local-first, security-first AI intelligence hub** that:
-1. Connects AI clients (Claude Code, Cursor, VS Code, Gemini CLI) to MCP servers
-2. Runs connectors in isolated containers (Podman/Docker)
-3. Manages permissions with a policy engine
-4. Provides a searchable knowledge base with FTS5
+The entry point. Thin — it hands off to `internal/cli`.
 
-### Architecture Summary
+### `internal/cli`
 
-```
-AI Clients → Unix Socket → Conduit Daemon → Container Runtime
-                              │
-                              ├── Policy Engine (permissions)
-                              ├── Lifecycle Manager (state machine)
-                              ├── Client Adapters (config injection)
-                              ├── Knowledge Base (FTS5 search)
-                              └── SQLite Store (persistence)
-```
+Conduit's command surface (Cobra). Every command is a thin frontend over a
+library call.
 
----
+Two things to know before editing:
 
-## Codebase Structure
+- **Output is a contract.** Human-readable output and every `--json` shape are
+  consumed by scripts and by the frozen desktop GUI. Treat them as API.
+- **Removed commands are documented, not deleted.** `removed.go` registers the
+  retired v1 surface as hidden stubs that name what went away and what to use
+  instead. Deleting them outright would give the user cobra's "unknown command"
+  and no idea why a documented command vanished. They are hidden so `--help`
+  shows only what Conduit can actually do.
 
-```
-conduit/
-├── cmd/
-│   ├── conduit/              # CLI application
-│   │   ├── main.go           # Entry point
-│   │   └── commands/         # Cobra command handlers
-│   │       ├── root.go
-│   │       ├── install.go
-│   │       ├── list.go
-│   │       ├── start.go
-│   │       ├── stop.go
-│   │       ├── remove.go
-│   │       ├── client.go
-│   │       ├── kb.go
-│   │       ├── status.go
-│   │       └── doctor.go
-│   └── conduit-daemon/       # Background daemon
-│       └── main.go
-│
-├── internal/
-│   ├── adapters/             # Client adapters (Claude, Cursor, etc.)
-│   │   ├── registry.go       # Adapter registry
-│   │   ├── base.go           # Base adapter with common logic
-│   │   ├── claude.go         # Claude Code adapter
-│   │   ├── cursor.go         # Cursor adapter
-│   │   ├── vscode.go         # VS Code adapter
-│   │   └── gemini.go         # Gemini CLI adapter
-│   │
-│   ├── config/               # Configuration management
-│   │   └── config.go         # Viper-based config loading
-│   │
-│   ├── daemon/               # Daemon core
-│   │   ├── daemon.go         # Main daemon struct and lifecycle
-│   │   └── handlers.go       # HTTP API handlers
-│   │
-│   ├── kb/                   # Knowledge base
-│   │   ├── indexer.go        # Document indexing
-│   │   ├── searcher.go       # FTS5 search
-│   │   ├── chunker.go        # Text chunking
-│   │   ├── source.go         # Source management
-│   │   ├── types.go          # KB types
-│   │   └── mcp.go            # MCP server for KB
-│   │
-│   ├── lifecycle/            # Instance lifecycle management
-│   │   ├── manager.go        # State machine, operations
-│   │   └── types.go          # Status enums, transitions
-│   │
-│   ├── observability/        # Logging
-│   │   └── logging.go        # Zerolog configuration
-│   │
-│   ├── policy/               # Security policy engine
-│   │   ├── engine.go         # Permission evaluation
-│   │   └── types.go          # Permission types
-│   │
-│   ├── runtime/              # Container runtime abstraction
-│   │   └── provider.go       # Podman/Docker provider
-│   │
-│   └── store/                # Data persistence
-│       ├── store.go          # SQLite wrapper
-│       └── migrations.go     # Schema migrations
-│
-├── pkg/
-│   └── models/               # Shared types
-│       └── errors.go         # Custom error types
-│
-├── tests/
-│   └── integration/          # Integration tests
-│       ├── lifecycle_integration_test.go
-│       └── kb_integration_test.go
-│
-├── scripts/                  # Installation and utility scripts
-│   ├── install.sh            # One-click installation script
-│   └── uninstall.sh          # Complete uninstallation script
-│
-├── docs/                     # Documentation
-│   ├── V0_OUTCOME.md         # Implementation summary
-│   ├── USER_GUIDE.md         # User documentation
-│   ├── ADMIN_GUIDE.md        # Administrator guide
-│   └── USE_CASES.md          # Real-world examples
-│
-├── Makefile                  # Build configuration
-├── go.mod                    # Go module definition
-├── README.md                 # Project overview
-└── CONTEXT.md                # This file
-```
+Files map to command groups: `kb.go`, `mcp.go`, `model.go`, `kag.go`,
+`doctor.go`, `setup.go`, `status.go`, `uninstall.go`, `backup.go`,
+`config_cmd.go`, `ollama.go`, `root.go`, `removed.go`.
 
----
+### `internal/kbservice`
 
-## Technology Stack
+**The in-process knowledge base library.** Everything the CLI, the MCP server,
+and any future frontend can do to a knowledge base is a method here. No HTTP
+layer, no socket, no daemon.
 
-| Component | Technology | Notes |
-|-----------|------------|-------|
-| Language | Go 1.21+ | CGO required for SQLite |
-| Database | SQLite + FTS5 | Full-text search |
-| HTTP Router | go-chi/chi v5 | Lightweight router |
-| CLI Framework | spf13/cobra | Command structure |
-| Config | spf13/viper | YAML/env config |
-| Logging | rs/zerolog | JSON structured logs |
-| SQLite Driver | mattn/go-sqlite3 | CGO-based |
-| UUID | google/uuid | Instance IDs |
+- Concurrency is SQLite's job. The database is opened in WAL mode with a busy
+  timeout, so a `conduit kb sync` in one terminal and a `kb_search` arriving
+  over MCP in another serialise at the database rather than at a daemon.
+  Writers serialise (SQLite has one writer); readers never block.
+- The map-shaped results returned by `Search` are a compatibility contract,
+  reproduced exactly as the removed HTTP daemon produced them.
+- `pathsafety.go` enforces `policy.forbidden_paths` / `policy.warn_paths` on
+  `kb add`, after symlink resolution.
 
-### Build Requirements
+### `internal/kb`
 
-```makefile
-CGO_ENABLED=1           # Required for SQLite
-GOTAGS=-tags "fts5"     # Required for full-text search
-```
+The retrieval engine. The largest package and the one with the most invariants.
 
----
+- `hybrid_search.go` — RRF fusion of FTS5 and vector results. RRF is the *only*
+  fusion method; `HybridSearchOptions` has 4 fields.
+- `vecstore_sqlite.go` — the vector store. Raw little-endian float32 BLOBs plus
+  a precomputed L2 norm in `kb_vectors`, searched by an exact brute-force
+  cosine scan in pure Go. The scan is two-phase: top-K over
+  `(chunk_id, norm, embedding)` alone, then a join back to `kb_chunks` and
+  `kb_documents` for the survivors. Exactness is the point — filters are
+  ordinary SQL predicates evaluated *before* the distance, so a selective
+  source filter can never silently cost recall the way post-filtering an
+  approximate index would.
+- `chunker.go`, `indexer.go`, `searcher.go`, `semantic_search.go`,
+  `result_processor.go`, `content_cleaner.go` — the ingest and retrieval path.
+- `graph_store_sqlite.go`, `graph_schema.go`, `kag_search.go`,
+  `pattern_extractor.go`, `entity_extractor.go` — the opt-in knowledge graph.
+- `golden_retrieval_test.go`, `known_bugs_test.go`, `retrieval_test_suite.go`,
+  `fallback_test.go`, `fusion_test.go` — the golden harness. **A ranking change
+  must show up here as a deliberate diff.** `known_bugs_test.go` carries
+  regression tests for issues #69–#77 by number; do not weaken them.
 
-## Key Patterns & Conventions
+### `internal/embed`
 
-### 1. Error Handling
+The embedding provider layer. Three implementations behind one interface:
 
-```go
-// Use wrapped errors with context
-if err != nil {
-    return fmt.Errorf("operation description: %w", err)
-}
-```
+- `llamaserver.go` / `sidecar.go` — the default. A `llama-server` process bound
+  to `127.0.0.1` on a port Conduit picks, shared as a singleton across the
+  process, stopped after an idle timeout.
+- `ollama.go` — an Ollama daemon the user already runs.
+- provider `none` — no model, no port. Lexical-only search. **A first-class
+  mode, not a degraded one.** Code must not treat it as an error path.
 
-### 2. Logging
+`registry.go` pins each model to an exact HuggingFace repo, file and SHA-256,
+plus its pooling mode and required instruction prefixes. Pooling and prefixes
+are not cosmetic: the wrong mode degrades retrieval silently, with no error and
+no obvious signal in the vectors. `download.go` verifies the hash before the
+file is renamed into place; there is no flag to install an unverified model.
 
-```go
-// Use component-tagged loggers
-logger := observability.Logger("component-name")
-logger.Info().
-    Str("key", "value").
-    Msg("message")
-```
+### `internal/mcpserver`
 
-### 3. Database Access
+The Knowledge Base MCP server, built on the official
+`github.com/modelcontextprotocol/go-sdk`. Negotiates spec revision 2026-07-28
+and stays compatible with the older legacy `initialize` handshake.
 
-```go
-// Use context for cancellation
-row := db.QueryRowContext(ctx, "SELECT ...")
+**The stdio transport owns `os.Stdout`.** Nothing in this package, or anything
+it calls, may write to stdout — doing so corrupts the protocol frame stream.
+All diagnostics go to stderr via the zerolog global logger.
 
-// Use sql.NullString for nullable columns
-var nullableField sql.NullString
-err := row.Scan(&nullableField)
+`tools.go` registers the seven tools. Its descriptions were carried over
+verbatim from the hand-rolled server and are a deliberate asset: they teach AI
+clients how to query well, and client prompts are tuned against the exact
+wording. A test byte-freezes the schemas. Do not "improve" them casually.
 
-// Parse datetime strings from SQLite
-createdAt, _ := time.Parse("2006-01-02 15:04:05", createdAtStr)
-```
+### `internal/setup`
 
-### 4. State Machine
+The small amount of machine preparation Conduit still needs, and its removal.
+Optional document extraction tools, MCP client configuration, shell PATH
+handling, and uninstall.
 
-```go
-// Always check valid transitions
-if !IsValidTransition(instance.Status, newStatus) {
-    return fmt.Errorf("invalid transition from %s to %s",
-        instance.Status, newStatus)
-}
-```
+Replaces the old `internal/installer`, which existed to orchestrate a container
+runtime, Qdrant and FalkorDB images, an Ollama service and a launchd/systemd
+unit — none of which exist now. Nothing here installs a package manager or
+edits system state without being asked; bootstrapping a bare machine is the
+install script's job.
 
-### 5. Container Security
+`safety.go` and its tests carry the adversarially-reviewed teardown guards:
+path checks are identity-based, not string-prefix based.
 
-```go
-// Default security settings
-Security: runtime.SecuritySpec{
-    ReadOnlyRootfs:   true,
-    NoNewPrivileges:  true,
-    DropCapabilities: []string{"ALL"},
-}
-```
+### `internal/config`
+
+**The single source of truth for configuration.** The `Config` struct *is* the
+schema; anything not reachable from it is not a Conduit setting.
+
+Precedence, highest wins:
+
+1. command-line flags (`--db`, `--data-dir`, `--log-level`)
+2. environment (`CONDUIT_*`, nested keys use `_` for `.`)
+3. configuration file (`./conduit.yaml`, then `~/.conduit`, then `/etc/conduit`)
+4. compiled defaults (`DefaultConfig`)
+
+Exactly one file is read: the first found, most specific first, so a project
+directory can override a user's settings. `Load` reports unknown keys rather
+than ignoring them, so a stale key from a removed subsystem is visible.
+
+### `internal/store`
+
+SQLite open and migrate. Migrations are embedded via `go:embed migrations/*.sql`.
+
+### `internal/querylog`
+
+The local-only query-*shape* log. Its privacy contract is enforced by
+construction: the `Record` struct has no field that can hold query text, entity
+names, titles, paths, snippets or results — not redacted at write time,
+structurally absent. A redaction test guards against a field being added.
+Nothing here opens a socket; the file is 0600 under the data directory and
+Conduit never reads it back.
+
+### `internal/observability`
+
+Logging and metrics helpers (zerolog).
+
+### `pkg/models` and `tests/`
+
+Shared types, plus `tests/integration` and `tests/scripts`.
 
 ---
 
-## Current State (V0 Complete)
+## Design principles
 
-### What's Implemented
+**Library-first.** Business logic lives in `internal/kbservice` and is
+importable and testable without a process boundary. The CLI is a shell over it;
+so is the MCP server. If you find yourself putting logic in a Cobra `RunE`,
+move it down. (This replaces v1's "GUI must call the CLI" rule, which existed
+because the daemon was the real source of truth. There is no daemon now — the
+library is.)
 
-| Feature | Status | Location |
-|---------|--------|----------|
-| Daemon Core | Complete | `internal/daemon/` |
-| Container Runtime | Complete | `internal/runtime/` |
-| Policy Engine | Complete | `internal/policy/` |
-| Lifecycle Manager | Complete | `internal/lifecycle/` |
-| Client Adapters | Complete | `internal/adapters/` |
-| Knowledge Base | Complete | `internal/kb/` |
-| CLI Commands | Complete | `cmd/conduit/commands/` |
-| SQLite Store | Complete | `internal/store/` |
-| Integration Tests | Complete | `tests/integration/` |
+**No LLM in the hot path.** Retrieval returns raw chunks and lets the connected
+AI client synthesise. This is what makes search fast, private and predictable.
+It is also why an indexed document is a prompt-injection vector — see SEC-003
+in [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md). Do not add a summarisation or
+rerank-by-LLM step to the query path without a very good reason and an explicit
+decision.
 
-### Test Status
+**RRF-only fusion.** One fusion algorithm, four options, deterministic results.
+v1 had 13 option fields, most of which the engine either never read or
+overwrote from a preset before use — knobs that appeared to work and did
+nothing. If you add a retrieval option, prove with a test that changing it
+changes an observable result.
 
-All 93 tests passing:
-```
-ok  internal/adapters
-ok  internal/config
-ok  internal/kb
-ok  internal/lifecycle
-ok  internal/policy
-ok  internal/runtime
-ok  internal/store
-ok  pkg/models
-ok  tests/integration
-```
+**Honest degradation.** Every subsystem states its actual state rather than
+faking success. `embed.provider: none` is a supported configuration, not a
+failure. `kag_query` distinguishes "graph disabled" from "graph empty" from "no
+match". `kb sync` exits 2 on partial success rather than reporting success.
+`doctor` exits non-zero when a check genuinely failed. **Never report success
+for work that did not happen** — that single failure mode is what made the v1
+documentation untrustworthy.
 
----
+**Opt-in for anything expensive or unproven.** `kb.kag.enabled` is `false` by
+default and no graph tables exist until it is true. `conduit setup` does not
+download a few-hundred-megabyte model unless asked.
 
-## Installation Scripts (`scripts/`)
-
-### install.sh
-
-One-click installation script with comprehensive UX improvements:
-
-**Key Implementation Details**:
-- **stdin Redirection**: Uses `/dev/tty` for all interactive prompts to support `curl | bash` execution
-  ```bash
-  read -r -p "$prompt" response </dev/tty
-  ```
-- **Platform-Specific Installation**:
-  - macOS: Uses Homebrew for Ollama installation
-  - Linux: Uses official Ollama install script
-- **Interactive Menus**:
-  - Container runtime selection (Docker/Podman with platform-specific recommendations)
-  - AI provider selection (Ollama local vs Anthropic API)
-- **PATH Configuration**: Automatically detects shell and adds PATH with duplicate checking
-- **Service Integration**: Sets up launchd (macOS) or systemd (Linux) services
-
-**Features**:
-- Dependency detection and installation (Go, Git, Docker/Podman, Ollama)
-- Build from source with FTS5 support
-- Service installation and startup verification
-- Model download (qwen2.5-coder:7b for Ollama)
-
-### uninstall.sh
-
-Complete uninstallation script with smart dependency management:
-
-**Key Implementation Details**:
-- **Smart Runtime Detection**: Reads `~/.conduit/conduit.yaml` to determine which runtime Conduit used
-  ```bash
-  RUNTIME=$(grep "preferred:" "$CONDUIT_HOME/conduit.yaml" | awk '{print $2}')
-  ```
-- **Graceful Error Handling**: Uses `|| true` pattern to continue on errors
-- **Selective Dependency Removal**: Only removes Docker OR Podman (whichever Conduit used)
-- **Specific Model Detection**: Identifies qwen2.5-coder:7b model specifically
-- **Shell Config Cleanup**: Removes PATH entries with backup creation
-
-**Features**:
-- Interactive prompts for each component (service, binaries, data, dependencies)
-- Process termination with user consent
-- Backup creation for shell configurations
-- Continues on errors to clean up remaining components
+**Determinism.** The same query against the same index returns the same
+ranking. Tie-breaks are explicit.
 
 ---
 
-## Known Issues & Workarounds
+## Where the living plan is
 
-### 1. SQLite DateTime Handling
+Work-package planning, benchmarks and decision records live in `.eng-lead-kb/`:
 
-**Issue**: SQLite stores datetime as TEXT; Go's `database/sql` can't scan directly to `time.Time`.
+- `BENCH-WP-2.1.md` — the vector-scan benchmark that justified brute-force
+  cosine over an approximate index
+- `BAKEOFF-WP-2.2.md` — the embedding model comparison behind the registry
+- `MCP-PORT-NOTES.md` — the SDK port notes
 
-**Solution** (in `internal/lifecycle/manager.go`):
-```go
-var createdAt, updatedAt string  // Scan to strings
-row.Scan(&createdAt, &updatedAt)
-inst.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAt)
-```
-
-### 2. FTS5 Build Flag
-
-**Issue**: FTS5 not available without build flag.
-
-**Solution**: Always build with:
-```bash
-CGO_ENABLED=1 go build -tags "fts5" ...
-```
-
-### 3. Foreign Key Constraints
-
-**Issue**: KB documents require valid source_id.
-
-**Solution**: Always create source before indexing documents (see `tests/integration/kb_integration_test.go`).
-
-### 4. Temp Directory Policy
-
-**Issue**: macOS temp directories (`/var/folders/...`) were blocked.
-
-**Solution**: Added `allowedPaths` exception list in `internal/policy/engine.go`.
+That directory belongs to the engineering lead; treat it as read-only
+reference.
 
 ---
 
-## V1 Roadmap (Not Implemented)
+## Documentation map
 
-| Feature | Priority | Complexity |
-|---------|----------|------------|
-| Audit Subsystem | High | Medium |
-| Package Registry | High | High |
-| Secret Management | High | Medium |
-| Remote API (HTTPS) | Medium | Medium |
-| Web Dashboard | Medium | High |
-| Multi-User Support | Low | High |
-| Metrics Export | Low | Low |
+| Document | Contents |
+|---|---|
+| [README.md](README.md) | What Conduit is, quick start, security posture |
+| [CHANGELOG.md](CHANGELOG.md) | Full v1 → v2 lineage, BREAKING CHANGES |
+| [CLAUDE.md](CLAUDE.md) | Rules for AI coding agents on this repo |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Development workflow |
+| [docs/INSTALL_V2.md](docs/INSTALL_V2.md) | Installation and upgrade |
+| [docs/USER_GUIDE.md](docs/USER_GUIDE.md) | Day-to-day use |
+| [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md) | Configuration schema, diagnostics, backup |
+| [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md) | Security advisories, current limitations |
+| [docs/EMBEDDING_SIDECAR.md](docs/EMBEDDING_SIDECAR.md) | How the sidecar works |
 
----
-
-## Development Workflow
-
-### Adding a New Feature
-
-1. **Plan** - Define the feature scope
-2. **Design** - Create types in appropriate `types.go`
-3. **Implement** - Write implementation with tests
-4. **Test** - Run `make test`
-5. **Document** - Update relevant docs
-
-### Adding a New Command
-
-```bash
-# 1. Create command file
-touch cmd/conduit/commands/newcommand.go
-
-# 2. Add to root.go
-rootCmd.AddCommand(newCommandCmd)
-
-# 3. Implement handler
-```
-
-### Adding a New Adapter
-
-```bash
-# 1. Create adapter file
-touch internal/adapters/newclient.go
-
-# 2. Implement Adapter interface
-type newClientAdapter struct {
-    baseAdapter
-}
-
-# 3. Register in registry.go
-registry.Register("new-client", &newClientAdapter{})
-```
+Documents under `docs/HLD/` and several older design notes describe v1 and
+carry a historical banner. They are kept for lineage, not as guidance.
 
 ---
 
-## Testing Guidelines
-
-### Running Tests
-
-```bash
-# All tests
-make test
-
-# Specific package
-CGO_ENABLED=1 go test -tags "fts5" -v ./internal/kb/...
-
-# With race detection
-CGO_ENABLED=1 go test -tags "fts5" -race ./...
-
-# Integration only
-CGO_ENABLED=1 go test -tags "fts5" -v ./tests/integration/...
-```
-
-### Writing Tests
-
-```go
-func TestFeature(t *testing.T) {
-    // Setup
-    st := testStore(t)  // Helper creates temp store
-    if st == nil {
-        t.Skip("FTS5 not available")
-    }
-    defer st.Close()
-
-    // Test
-    result, err := feature.Do(ctx, args)
-
-    // Assert
-    if err != nil {
-        t.Fatalf("unexpected error: %v", err)
-    }
-    if result != expected {
-        t.Errorf("expected %v, got %v", expected, result)
-    }
-}
-```
-
----
-
-## API Reference
-
-### Daemon HTTP Endpoints
-
-| Method | Endpoint | Description |
-|--------|----------|-------------|
-| GET | `/api/v1/health` | Health check |
-| GET | `/api/v1/instances` | List instances |
-| POST | `/api/v1/instances` | Create instance |
-| GET | `/api/v1/instances/{id}` | Get instance |
-| POST | `/api/v1/instances/{id}/start` | Start instance |
-| POST | `/api/v1/instances/{id}/stop` | Stop instance |
-| DELETE | `/api/v1/instances/{id}` | Remove instance |
-| GET | `/api/v1/kb/sources` | List KB sources |
-| POST | `/api/v1/kb/sources` | Add KB source |
-| GET | `/api/v1/kb/search` | Search KB |
-
-### Key Interfaces
-
-```go
-// runtime.Provider
-type Provider interface {
-    Name() string
-    Available() bool
-    Run(ctx, spec) (containerID, error)
-    Stop(ctx, containerID, timeout) error
-    Remove(ctx, containerID, force) error
-    Status(ctx, containerID) (string, error)
-    Pull(ctx, image, opts) error
-}
-
-// adapters.Adapter
-type Adapter interface {
-    ID() string
-    Name() string
-    Installed() bool
-    ConfigPath() string
-    Inject(ctx, plan) error
-    Eject(ctx, bindingID) error
-    Validate(ctx, bindingID) (*ValidationResult, error)
-}
-```
-
----
-
-## Related Documents
-
-| Document | Path | Purpose |
-|----------|------|---------|
-| Project README | `README.md` | Overview and quick start |
-| V0 Outcome | `docs/V0_OUTCOME.md` | Implementation details |
-| User Guide | `docs/USER_GUIDE.md` | End-user documentation |
-| Admin Guide | `docs/ADMIN_GUIDE.md` | Administrator documentation |
-| Use Cases | `docs/USE_CASES.md` | Real-world examples |
-| Makefile | `Makefile` | Build configuration |
-| Go Module | `go.mod` | Dependencies |
-
----
-
-## Model-Specific Notes
-
-### For Opus 4.5
-
-- Full context available for complex architectural decisions
-- Can handle multi-file refactoring
-- Best for: new feature implementation, architectural changes
-
-### For Sonnet 4.5
-
-- Focus on specific, well-defined tasks
-- Provide explicit file paths
-- Best for: bug fixes, tests, documentation updates
-
-### Context Loading Suggestions
-
-When starting a new session:
-
-1. **Minimal Context** (quick tasks):
-   - This file (`CONTEXT.md`)
-   - Specific file(s) being modified
-
-2. **Standard Context** (feature work):
-   - This file
-   - `README.md`
-   - `docs/V0_OUTCOME.md`
-   - Relevant package files
-
-3. **Full Context** (architecture work):
-   - All docs in `docs/`
-   - `internal/` structure
-   - `Makefile`
-
----
-
-## Quick Reference: Common Tasks
-
-### Fix a Bug
-
-```bash
-# 1. Reproduce the issue
-./bin/conduit-daemon --foreground --log-level=debug
-
-# 2. Find the source
-# Check the stack trace/logs for component
-
-# 3. Write a test that fails
-# 4. Fix the code
-# 5. Verify tests pass
-make test
-```
-
-### Add a CLI Command
-
-1. Create `cmd/conduit/commands/newcmd.go`
-2. Define cobra command
-3. Add to parent command
-4. Implement handler (call daemon API or internal logic)
-5. Add tests
-
-### Add a Database Table
-
-1. Add migration in `internal/store/migrations.go`
-2. Increment migration version
-3. Add CRUD methods to store
-4. Add types to appropriate package
-5. Test with `make test`
-
-### Add a Policy Rule
-
-1. Edit `internal/policy/engine.go`
-2. Add to `forbiddenPaths` or `forbiddenPatterns`
-3. Or add new rule to `initBuiltinRules()`
-4. Add test case
-5. Verify with `make test`
-
----
-
-## Contact & Resources
-
-- **Repository**: https://github.com/amlandas/Conduit-AI-Intelligence-Hub
-- **Documentation**: `docs/` directory
-- **Issues**: https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues
-
----
-
-*This context document should be updated whenever significant changes are made to the project structure, patterns, or state.*
+**Last updated**: August 2026 (Conduit 2.0.0-beta)
