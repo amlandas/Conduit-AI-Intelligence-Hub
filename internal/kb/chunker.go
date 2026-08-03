@@ -85,26 +85,45 @@ func (c *Chunker) Chunk(content string, opts ChunkOptions) []Chunk {
 	return c.splitRecursive(content, opts)
 }
 
-// splitRecursive splits content using priority-ordered splitters.
+// splitRecursive splits content into overlapping windows, cutting at the best
+// boundary the splitter list can find rather than blindly at MaxSize.
+//
+// Issue #76 was two defects in this loop:
+//
+//   - It pre-cut the window to content[currentPos : currentPos+MaxSize] and then
+//     handed that slice to findBestSplit together with the same MaxSize.
+//     findBestSplit's first statement returns early when the text already fits,
+//     which was therefore always true, so the splitter search was unreachable
+//     and every boundary was a blind cut mid-word. ChunkOptions.Splitters was
+//     inert. It is now given the whole remaining text.
+//   - It advanced by (len - Overlap) unconditionally, including on the window
+//     that already reached the end of the document, so every multi-chunk
+//     document ended with a chunk wholly contained in its predecessor. The loop
+//     now stops when the window reaches the end.
 func (c *Chunker) splitRecursive(content string, opts ChunkOptions) []Chunk {
 	var chunks []Chunk
 	var currentPos int
+	var prevEnd int // absolute end of the previously emitted window
 	index := 0
 
 	for currentPos < len(content) {
-		// Calculate chunk boundaries
-		endPos := currentPos + opts.MaxSize
-		if endPos > len(content) {
-			endPos = len(content)
+		remaining := content[currentPos:]
+
+		// The new window starts Overlap bytes inside the previous one. A cut at
+		// or before prevEnd would therefore produce a chunk with no new content
+		// at all -- the same redundancy the trailing chunk used to have, just in
+		// the middle of the document. minSize forbids it.
+		minSize := 0
+		if prevEnd > currentPos {
+			minSize = prevEnd - currentPos
 		}
 
-		// Find best split point
-		chunkText := content[currentPos:endPos]
-		splitPoint := c.findBestSplit(chunkText, opts.Splitters, opts.MaxSize)
-
-		if splitPoint < len(chunkText) {
-			chunkText = chunkText[:splitPoint]
+		splitPoint := c.findBestSplit(remaining, opts.Splitters, minSize, opts.MaxSize)
+		if splitPoint <= 0 || splitPoint > len(remaining) {
+			splitPoint = len(remaining)
 		}
+		chunkText := remaining[:splitPoint]
+		prevEnd = currentPos + len(chunkText)
 
 		// Trim whitespace but preserve for position tracking
 		trimmedText := strings.TrimSpace(chunkText)
@@ -119,60 +138,76 @@ func (c *Chunker) splitRecursive(content string, opts ChunkOptions) []Chunk {
 			index++
 		}
 
-		// Move position with overlap
+		// This window reached the end of the document, so every character is
+		// already covered. Advancing here is what used to emit the redundant
+		// trailing chunk.
+		if currentPos+len(chunkText) >= len(content) {
+			break
+		}
+
 		advance := len(chunkText) - opts.Overlap
 		if advance <= 0 {
 			advance = len(chunkText)
 		}
-		currentPos += advance
-
-		// Prevent infinite loop
-		if len(chunkText) == 0 {
-			currentPos++
+		if advance <= 0 {
+			advance = 1 // never stall, whatever the splitter returned
 		}
+		currentPos += advance
 	}
 
 	return chunks
 }
 
-// findBestSplit finds the best split point using priority-ordered splitters.
-func (c *Chunker) findBestSplit(text string, splitters []string, maxSize int) int {
-	// If text is short enough, no split needed
-	if utf8.RuneCountInString(text) <= maxSize {
+// findBestSplit returns how many bytes of text belong in the next chunk.
+//
+// text is the whole remaining document, not a pre-cut window: narrowing it to
+// maxSize first is what made the early return below always fire and left the
+// splitter search unreachable (issue #76).
+//
+// The returned cut is in (minSize, maxSize]. minSize is how much of text the
+// previous chunk already covered, so a cut at or below it would add nothing.
+func (c *Chunker) findBestSplit(text string, splitters []string, minSize, maxSize int) int {
+	if maxSize <= 0 || len(text) <= maxSize {
 		return len(text)
 	}
-
-	// Try each splitter in priority order
-	for _, splitter := range splitters {
-		// Find the last occurrence of the splitter within maxSize
-		lastIdx := -1
-		searchText := text
-		if len(searchText) > maxSize {
-			searchText = text[:maxSize]
-		}
-
-		// Search from the end backwards
-		idx := strings.LastIndex(searchText, splitter)
-		if idx > 0 {
-			lastIdx = idx + len(splitter)
-		}
-
-		if lastIdx > 0 && lastIdx <= maxSize {
-			return lastIdx
-		}
+	if minSize >= maxSize {
+		minSize = 0 // an Overlap that wide leaves no room to be choosy
 	}
 
-	// No good split point found, split at maxSize
-	// But try to avoid splitting in the middle of a word
-	if maxSize < len(text) {
-		for i := maxSize; i > maxSize/2; i-- {
-			if text[i] == ' ' {
-				return i + 1
+	// The cut may land anywhere up to maxSize. Prefer the LAST occurrence of
+	// the highest-priority splitter inside that window, which keeps chunks as
+	// full as possible while still respecting the boundary.
+	window := text[:maxSize]
+	for _, splitter := range splitters {
+		if splitter == "" {
+			continue
+		}
+		if idx := strings.LastIndex(window, splitter); idx > 0 {
+			if cut := idx + len(splitter); cut > minSize {
+				return cut
 			}
 		}
 	}
 
-	return maxSize
+	// No splitter matched. Fall back to maxSize, preferring a word boundary and
+	// never cutting through a multi-byte rune.
+	floor := maxSize / 2
+	if minSize > floor {
+		floor = minSize
+	}
+	for i := maxSize; i > floor; i-- {
+		if text[i] == ' ' {
+			return i + 1
+		}
+	}
+	cut := maxSize
+	for cut > minSize && !utf8.RuneStart(text[cut]) {
+		cut--
+	}
+	if cut <= minSize {
+		return maxSize
+	}
+	return cut
 }
 
 // ChunkID derives the identifier for one chunk.
@@ -206,7 +241,17 @@ func (c *Chunker) ChunkWithMetadata(content string, opts ChunkOptions, docMeta m
 	return chunks
 }
 
-// EstimateChunkCount estimates the number of chunks for content.
+// EstimateChunkCount estimates how many chunks Chunk will produce.
+//
+// It models the windowing exactly: windows of MaxSize advancing by
+// (MaxSize - Overlap), stopping as soon as a window reaches the end. That makes
+// it exact whenever no splitter matches, and an upper-bound-flavoured estimate
+// otherwise, since a boundary-aware cut is never longer than MaxSize.
+//
+// Issue #76: the old formula was off by one in the other direction because it
+// did not round up, while Chunk itself emitted one chunk too many. The two
+// errors did not cancel -- 1485 characters at MaxSize 1000 / Overlap 100
+// estimated 2 and produced 3.
 func (c *Chunker) EstimateChunkCount(contentLength int, opts ChunkOptions) int {
 	if opts.MaxSize <= 0 {
 		opts.MaxSize = c.defaultMaxSize
@@ -219,12 +264,13 @@ func (c *Chunker) EstimateChunkCount(contentLength int, opts ChunkOptions) int {
 		return 1
 	}
 
-	effectiveChunkSize := opts.MaxSize - opts.Overlap
-	if effectiveChunkSize <= 0 {
-		effectiveChunkSize = opts.MaxSize
+	step := opts.MaxSize - opts.Overlap
+	if step <= 0 {
+		step = opts.MaxSize
 	}
 
-	return (contentLength-opts.Overlap)/effectiveChunkSize + 1
+	// ceil((contentLength - Overlap) / step)
+	return (contentLength - opts.Overlap + step - 1) / step
 }
 
 // ChunkSmart performs content-aware chunking based on file type.
