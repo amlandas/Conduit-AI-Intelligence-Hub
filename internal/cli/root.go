@@ -115,6 +115,7 @@ Examples:
 	root.AddCommand(doctorCmd())
 	root.AddCommand(statusCmd())
 	root.AddCommand(setupCmd())
+	root.AddCommand(modelCmd())
 	root.AddCommand(backupCmd())
 	root.AddCommand(uninstallCmd())
 	root.AddCommand(ollamaCmd())

@@ -27,7 +27,8 @@ func uninstallCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "uninstall",
 		Short: "Uninstall Conduit",
-		Long: `Remove the Conduit binary, its PATH entries, and optionally its data.
+		Long: `Remove the Conduit binary, its MCP client entries, its PATH lines, and
+optionally its data.
 
 UNINSTALL OPTIONS:
   --keep-data    Remove the binary and PATH entries, keep indexed data
@@ -38,15 +39,18 @@ SAFETY FLAGS:
   --dry-run      Show what would be removed without removing
   --json         Output results as JSON
 
+Data is kept unless you ask for it to go. --all is the only thing that deletes
+the knowledge base, and it prompts unless --force is given.
+
 NOTE: Conduit runs no service and no containers, so there is nothing of that
       kind to tear down. Tools you may share with other projects are never
       removed. To remove them yourself:
       - Ollama:  see https://ollama.com/download
       - poppler (pdftotext): brew uninstall poppler
 
-      If conduit-qdrant or conduit-falkordb containers are still present from
-      an install predating Conduit 2.0, nothing uses them:
-        podman rm -f conduit-qdrant conduit-falkordb
+      A machine that ran a Conduit 1.x installer also has a daemon service and
+      container leftovers that this command knows nothing about. Remove those
+      with scripts/remove-v1.sh, which defaults to --dry-run.
 
 Examples:
   conduit uninstall                    # Interactive mode
@@ -148,6 +152,33 @@ Examples:
 				return fmt.Errorf("uninstall failed: %w", err)
 			}
 
+			// ALWAYS strip the MCP entries. A client left pointing at a
+			// binary that no longer exists fails at every startup with an
+			// error the user cannot act on, so this is not optional and is not
+			// gated on --all: the entry describes the program, not the data.
+			if dryRun {
+				for _, id := range setuppkg.MCPClientIDs() {
+					if client, lerr := setuppkg.LookupMCPClient(id); lerr == nil {
+						if configured, _ := setuppkg.IsMCPClientConfigured(client.ConfigPath); configured {
+							result.ItemsRemoved = append(result.ItemsRemoved,
+								fmt.Sprintf("[DRY RUN] Would remove MCP entry from %s (%s)", id, client.ConfigPath))
+						}
+					}
+				}
+			} else {
+				removals, rerrs := setuppkg.RemoveAllMCPClients()
+				for _, r := range removals {
+					if r.Removed {
+						result.ItemsRemoved = append(result.ItemsRemoved,
+							fmt.Sprintf("MCP entry: %s (%s)", r.ClientID, r.ConfigPath))
+					}
+				}
+				for _, rerr := range rerrs {
+					result.ItemsFailed = append(result.ItemsFailed, fmt.Sprintf("MCP entry: %v", rerr))
+					result.Errors = append(result.Errors, rerr.Error())
+				}
+			}
+
 			// ALWAYS remove GUI state (Electron app userData)
 			// This ensures a clean slate on reinstall, regardless of --keep-data flag
 			// GUI state should NEVER persist independently of CLI state
@@ -222,8 +253,9 @@ Examples:
 				fmt.Println("  • Ollama:  rm -rf ~/.ollama && brew uninstall ollama")
 				fmt.Println("  • poppler: brew uninstall poppler")
 				fmt.Println()
-				fmt.Println("Containers left over from an install predating Conduit 2.0:")
-				fmt.Println("  • podman rm -f conduit-qdrant conduit-falkordb")
+				fmt.Println("If this machine ever ran a Conduit 1.x installer, it also has a")
+				fmt.Println("daemon service and container leftovers. Remove them with:")
+				fmt.Println("  • scripts/remove-v1.sh --dry-run   (then re-run with --yes)")
 			}
 
 			fmt.Println()
