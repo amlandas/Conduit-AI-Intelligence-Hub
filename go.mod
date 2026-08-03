@@ -7,7 +7,7 @@ require (
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.49
 	github.com/ollama/ollama v0.32.5
-	github.com/qdrant/go-client v1.16.2
+	github.com/qdrant/go-client v1.18.3
 	github.com/redis/go-redis/v9 v9.17.2
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.10.2
