@@ -10,11 +10,11 @@ type Source struct {
 	SourceID   string    `json:"source_id"`
 	Path       string    `json:"path"`
 	Name       string    `json:"name"`
-	Type       string    `json:"type"`       // "folder", "git", "confluence" (V1)
-	Patterns   []string  `json:"patterns"`   // ["*.md", "*.txt"]
-	Excludes   []string  `json:"excludes"`   // ["node_modules", ".git"]
-	SyncMode   string    `json:"sync_mode"`  // "watch", "manual", "scheduled"
-	Status     string    `json:"status"`     // "active", "paused", "error"
+	Type       string    `json:"type"`      // "folder", "git", "confluence" (V1)
+	Patterns   []string  `json:"patterns"`  // ["*.md", "*.txt"]
+	Excludes   []string  `json:"excludes"`  // ["node_modules", ".git"]
+	SyncMode   string    `json:"sync_mode"` // "watch", "manual", "scheduled"
+	Status     string    `json:"status"`    // "active", "paused", "error"
 	LastSync   time.Time `json:"last_sync"`
 	DocCount   int       `json:"doc_count"`
 	ChunkCount int       `json:"chunk_count"`

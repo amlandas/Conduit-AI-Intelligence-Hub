@@ -4,15 +4,15 @@ import "strings"
 
 // RetrievalTestCase defines a test case for retrieval quality validation.
 type RetrievalTestCase struct {
-	Name            string   // Test case name
-	Query           string   // Search query
-	ExpectedDocIDs  []string // Expected document IDs in results (any order)
-	ExpectedTopDoc  string   // Expected document ID at rank 1 (optional)
-	MustContain     []string // Phrases that must appear in top results
-	MustNotContain  []string // Phrases that should NOT appear (boilerplate)
-	MinResults      int      // Minimum expected results
-	MaxRank         int      // Maximum acceptable rank for expected doc (optional)
-	Description     string   // What this test validates
+	Name           string   // Test case name
+	Query          string   // Search query
+	ExpectedDocIDs []string // Expected document IDs in results (any order)
+	ExpectedTopDoc string   // Expected document ID at rank 1 (optional)
+	MustContain    []string // Phrases that must appear in top results
+	MustNotContain []string // Phrases that should NOT appear (boilerplate)
+	MinResults     int      // Minimum expected results
+	MaxRank        int      // Maximum acceptable rank for expected doc (optional)
+	Description    string   // What this test validates
 }
 
 // GetRetrievalTestSuite returns the standard test suite for retrieval quality.
@@ -101,16 +101,10 @@ func GetRetrievalTestSuite() []RetrievalTestCase {
 	}
 }
 
-// RetrievalMetrics holds quality metrics for retrieval evaluation.
-type RetrievalMetrics struct {
-	Precision    float64 // Precision@k: relevant results / total results
-	Recall       float64 // Recall@k: found relevant / total relevant
-	MRR          float64 // Mean Reciprocal Rank
-	NDCG         float64 // Normalized Discounted Cumulative Gain
-	TestsPassed  int     // Number of test cases passed
-	TestsFailed  int     // Number of test cases failed
-	FailedCases  []string // Names of failed test cases
-}
+// WP-3.2 deleted RetrievalMetrics (precision/recall/MRR/NDCG counters). Nothing
+// ever populated or read it: retrieval quality is measured by the golden suite
+// in golden_retrieval_test.go, which asserts on actual ranked output rather
+// than on numbers no code computed.
 
 // EvaluateTestCase checks if a search result passes a test case.
 func EvaluateTestCase(tc RetrievalTestCase, results []SearchHit) (passed bool, reason string) {

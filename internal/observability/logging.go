@@ -61,22 +61,22 @@ func WithRequestID(logger zerolog.Logger, requestID string) zerolog.Logger {
 
 // Event types for structured logging
 const (
-	EventInstanceCreated  = "instance_created"
-	EventInstanceStarted  = "instance_started"
-	EventInstanceStopped  = "instance_stopped"
-	EventInstanceFailed   = "instance_failed"
-	EventInstanceRemoved  = "instance_removed"
-	EventBindingCreated   = "binding_created"
-	EventBindingRemoved   = "binding_removed"
-	EventKBSourceAdded    = "kb_source_added"
-	EventKBSourceRemoved  = "kb_source_removed"
-	EventKBSyncCompleted  = "kb_sync_completed"
-	EventAuditCompleted   = "audit_completed"
-	EventPolicyDecision   = "policy_decision"
-	EventSecretAccessed   = "secret_accessed"
-	EventDaemonStarted    = "daemon_started"
-	EventDaemonStopped    = "daemon_stopped"
-	EventHealthCheck      = "health_check"
+	EventInstanceCreated = "instance_created"
+	EventInstanceStarted = "instance_started"
+	EventInstanceStopped = "instance_stopped"
+	EventInstanceFailed  = "instance_failed"
+	EventInstanceRemoved = "instance_removed"
+	EventBindingCreated  = "binding_created"
+	EventBindingRemoved  = "binding_removed"
+	EventKBSourceAdded   = "kb_source_added"
+	EventKBSourceRemoved = "kb_source_removed"
+	EventKBSyncCompleted = "kb_sync_completed"
+	EventAuditCompleted  = "audit_completed"
+	EventPolicyDecision  = "policy_decision"
+	EventSecretAccessed  = "secret_accessed"
+	EventDaemonStarted   = "daemon_started"
+	EventDaemonStopped   = "daemon_stopped"
+	EventHealthCheck     = "health_check"
 )
 
 // LogEvent logs a structured event.

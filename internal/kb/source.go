@@ -587,9 +587,9 @@ func (sm *SourceManager) detectMimeType(path string) string {
 	ext := strings.ToLower(filepath.Ext(path))
 	mimeTypes := map[string]string{
 		// Text/Documentation
-		".md":   "text/markdown",
-		".txt":  "text/plain",
-		".rst":  "text/x-rst",
+		".md":  "text/markdown",
+		".txt": "text/plain",
+		".rst": "text/x-rst",
 		// Code
 		".go":    "text/x-go",
 		".py":    "text/x-python",

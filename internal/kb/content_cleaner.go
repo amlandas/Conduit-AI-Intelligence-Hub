@@ -164,7 +164,7 @@ func compileBoilerplateRemovalPatterns() []*regexp.Regexp {
 		`\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}`,
 
 		// Common PDF extraction artifacts
-		`\x00`, // Null characters
+		`\x00`,                       // Null characters
 		`(?i)^\s*\d+\s+of\s+\d+\s*$`, // "1 of 10" page indicators
 	}
 
@@ -210,17 +210,17 @@ func compileOCRFixPatterns() []ocrFix {
 		{`(?i)\bSrst\b`, "first"},
 
 		// Spacing issues around punctuation
-		{`\s+([.,;:!?])`, "$1"},       // Remove space before punctuation
-		{`([.,;:!?])(\w)`, "$1 $2"},   // Add space after punctuation if missing
+		{`\s+([.,;:!?])`, "$1"},     // Remove space before punctuation
+		{`([.,;:!?])(\w)`, "$1 $2"}, // Add space after punctuation if missing
 
 		// Common character substitutions
-		{`(?i)\brn\b`, "m"},          // 'rn' often OCR'd instead of 'm'
-		{`\bl\s+l\b`, "ll"},          // Split double-l
-		{`(?i)\bvv\b`, "w"},          // 'vv' instead of 'w'
+		{`(?i)\brn\b`, "m"}, // 'rn' often OCR'd instead of 'm'
+		{`\bl\s+l\b`, "ll"}, // Split double-l
+		{`(?i)\bvv\b`, "w"}, // 'vv' instead of 'w'
 
 		// Quote normalization
-		{`[""]`, `"`},                // Curly quotes to straight
-		{`['']`, `'`},                // Curly apostrophes to straight
+		{`[""]`, `"`}, // Curly quotes to straight
+		{`['']`, `'`}, // Curly apostrophes to straight
 	}
 
 	var compiled []ocrFix

@@ -188,12 +188,12 @@ type ollamaOptions struct {
 }
 
 type ollamaGenerateResponse struct {
-	Model              string `json:"model"`
-	Response           string `json:"response"`
-	Done               bool   `json:"done"`
-	TotalDuration      int64  `json:"total_duration"`
-	PromptEvalCount    int    `json:"prompt_eval_count"`
-	EvalCount          int    `json:"eval_count"`
+	Model           string `json:"model"`
+	Response        string `json:"response"`
+	Done            bool   `json:"done"`
+	TotalDuration   int64  `json:"total_duration"`
+	PromptEvalCount int    `json:"prompt_eval_count"`
+	EvalCount       int    `json:"eval_count"`
 }
 
 // sanitizeJSONString cleans up common LLM JSON quirks before parsing.

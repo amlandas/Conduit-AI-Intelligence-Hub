@@ -87,15 +87,15 @@ type SemanticSearchResult struct {
 
 // SemanticSearchHit represents a single semantic search result.
 type SemanticSearchHit struct {
-	DocumentID   string            `json:"document_id"`
-	ChunkID      string            `json:"chunk_id"`
-	ChunkIndex   int               `json:"chunk_index"`
-	Path         string            `json:"path"`
-	Title        string            `json:"title"`
-	Snippet      string            `json:"snippet"`
-	Score        float64           `json:"score"`       // Similarity score (0-1)
-	Confidence   string            `json:"confidence"`  // "high", "medium", "low"
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	DocumentID string            `json:"document_id"`
+	ChunkID    string            `json:"chunk_id"`
+	ChunkIndex int               `json:"chunk_index"`
+	Path       string            `json:"path"`
+	Title      string            `json:"title"`
+	Snippet    string            `json:"snippet"`
+	Score      float64           `json:"score"`      // Similarity score (0-1)
+	Confidence string            `json:"confidence"` // "high", "medium", "low"
+	Metadata   map[string]string `json:"metadata,omitempty"`
 }
 
 // Search performs a semantic search using the query text.

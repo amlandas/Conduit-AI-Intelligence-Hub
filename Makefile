@@ -2,7 +2,6 @@
 # Build configuration
 
 BINARY_NAME=conduit
-DAEMON_NAME=conduit-daemon
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 BUILD_TIME=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 LDFLAGS=-ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME)"
@@ -18,24 +17,21 @@ BIN_DIR=bin
 CMD_DIR=cmd
 INTERNAL_DIR=internal
 
-.PHONY: all build build-cli build-daemon clean test test-critical test-high test-medium test-all lint fmt deps install help
+.PHONY: all build build-cli clean test test-critical test-high test-medium test-all lint fmt deps install help
 
 all: build
 
 ## Build targets
 
-build: build-cli build-daemon ## Build CLI and daemon
+# WP-3.2 deleted the daemon. There is exactly one binary target now, and
+# `build` is an alias for it rather than a fan-out over two.
+build: build-cli ## Build the conduit binary
 	@echo "Build complete: $(BIN_DIR)/"
 
 build-cli: deps ## Build CLI binary
 	@mkdir -p $(BIN_DIR)
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(GOTAGS) $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(BINARY_NAME) ./$(CMD_DIR)/$(BINARY_NAME)
 	@echo "Built: $(BIN_DIR)/$(BINARY_NAME)"
-
-build-daemon: deps ## Build daemon binary
-	@mkdir -p $(BIN_DIR)
-	CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(GOTAGS) $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(DAEMON_NAME) ./$(CMD_DIR)/$(DAEMON_NAME)
-	@echo "Built: $(BIN_DIR)/$(DAEMON_NAME)"
 
 # NOTE: the `build-all-platforms` cross-compile target was removed deliberately.
 #
@@ -100,12 +96,10 @@ deps: ## Download dependencies
 
 install: build ## Install to GOPATH/bin
 	cp $(BIN_DIR)/$(BINARY_NAME) $(GOPATH)/bin/
-	cp $(BIN_DIR)/$(DAEMON_NAME) $(GOPATH)/bin/
 	@echo "Installed to $(GOPATH)/bin/"
 
 install-local: build ## Install to /usr/local/bin (requires sudo)
 	sudo cp $(BIN_DIR)/$(BINARY_NAME) /usr/local/bin/
-	sudo cp $(BIN_DIR)/$(DAEMON_NAME) /usr/local/bin/
 	@echo "Installed to /usr/local/bin/"
 
 ## Cleanup targets
@@ -117,8 +111,8 @@ clean: ## Clean build artifacts
 
 ## Development helpers
 
-run-daemon: build-daemon ## Run daemon in foreground
-	./$(BIN_DIR)/$(DAEMON_NAME) --log-level=debug
+run-mcp: build-cli ## Run the KB MCP server over stdio
+	./$(BIN_DIR)/$(BINARY_NAME) mcp kb
 
 dev: build ## Build and run CLI help
 	./$(BIN_DIR)/$(BINARY_NAME) --help
