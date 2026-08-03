@@ -189,6 +189,33 @@ canonicalize_path() {
     printf '%s' "${result:-/}"
 }
 
+# detect_stat_flavor distinguishes GNU coreutils stat from BSD stat.
+#
+# This must be decided by capability, never by letting the wrong invocation
+# fail, because on GNU the wrong invocation does not cleanly fail -- it half
+# succeeds and pollutes stdout.
+#
+# GNU's -f is --file-system and takes no format argument, so
+# `stat -f '%d:%i' FILE` is parsed as "show filesystem status for the two files
+# '%d:%i' and FILE". The first fails, the second SUCCEEDS AND PRINTS A SIX-LINE
+# FILESYSTEM STATUS BLOCK, and the overall exit status is non-zero -- so a
+# `stat -f ... || stat -c ...` chain runs its fallback with that block already
+# on stdout and the caller captures both. The identity string became six lines
+# of filesystem statistics with the real device:inode appended to the end.
+#
+# BSD stat has no -c at all, so probing -c first is unambiguous in both
+# directions. Probing -f first would not be: GNU accepts it.
+detect_stat_flavor() {
+    if stat -c '%i' / >/dev/null 2>&1; then
+        printf 'gnu'
+    elif stat -f '%i' / >/dev/null 2>&1; then
+        printf 'bsd'
+    else
+        printf 'none'
+    fi
+}
+readonly STAT_FLAVOR="$(detect_stat_flavor)"
+
 # path_identity prints a path's device:inode, or nothing if it does not exist.
 #
 # This is what makes the deny list mean anything on a case-insensitive
@@ -202,7 +229,11 @@ path_identity() {
     # -L dereferences: we must compare the identity of the TARGET, not the link.
     # Without it /etc (a symlink to /private/etc on macOS) and /private/etc get
     # different identities, and the guard refuses one spelling but not the other.
-    stat -L -f '%d:%i' "$1" 2>/dev/null || stat -L -c '%d:%i' "$1" 2>/dev/null || printf ''
+    case "$STAT_FLAVOR" in
+        gnu) stat -L -c '%d:%i' "$1" 2>/dev/null || printf '' ;;
+        bsd) stat -L -f '%d:%i' "$1" 2>/dev/null || printf '' ;;
+        *)   printf '' ;;
+    esac
 }
 
 # protected_dirs lists every path that must never be a Conduit data directory.

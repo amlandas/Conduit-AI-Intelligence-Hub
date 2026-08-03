@@ -216,6 +216,40 @@ canonicalize_path() {
     printf '%s' "${result:-/}"
 }
 
+# detect_stat_flavor distinguishes GNU coreutils stat from BSD stat.
+#
+# This must be decided by capability, never by letting the wrong invocation
+# fail, because on GNU the wrong invocation does not cleanly fail -- it half
+# succeeds and pollutes stdout.
+#
+# GNU's -f is --file-system and takes no format argument, so
+# `stat -f '%Lp' FILE` is parsed as "show filesystem status for the two files
+# '%Lp' and FILE". The first fails, the second SUCCEEDS AND PRINTS A SIX-LINE
+# FILESYSTEM STATUS BLOCK, and the overall exit status is non-zero. A
+# `stat -f ... || stat -c ...` chain therefore runs its fallback with that block
+# already on stdout, and the caller captures both:
+#
+#     $ m="$(stat -f '%Lp' /etc/hosts 2>/dev/null || stat -c '%a' /etc/hosts)"
+#     $ echo "${#m}"
+#     237
+#
+# That is how `chmod "$m"` came to receive 237 characters of filesystem
+# statistics, fail, get swallowed by `|| true`, and leave a rewritten shell
+# profile at mktemp's 0600 instead of the user's 0644.
+#
+# BSD stat has no -c at all, so probing -c first is unambiguous in both
+# directions. Probing -f first would not be: GNU accepts it.
+detect_stat_flavor() {
+    if stat -c '%i' / >/dev/null 2>&1; then
+        printf 'gnu'
+    elif stat -f '%i' / >/dev/null 2>&1; then
+        printf 'bsd'
+    else
+        printf 'none'
+    fi
+}
+readonly STAT_FLAVOR="$(detect_stat_flavor)"
+
 # path_identity prints a path's device:inode, or nothing if it does not exist.
 #
 # This is what makes the deny list mean anything on a case-insensitive
@@ -229,7 +263,11 @@ path_identity() {
     # -L dereferences: we must compare the identity of the TARGET, not the link.
     # Without it /etc (a symlink to /private/etc on macOS) and /private/etc get
     # different identities, and the guard refuses one spelling but not the other.
-    stat -L -f '%d:%i' "$1" 2>/dev/null || stat -L -c '%d:%i' "$1" 2>/dev/null || printf ''
+    case "$STAT_FLAVOR" in
+        gnu) stat -L -c '%d:%i' "$1" 2>/dev/null || printf '' ;;
+        bsd) stat -L -f '%d:%i' "$1" 2>/dev/null || printf '' ;;
+        *)   printf '' ;;
+    esac
 }
 
 # protected_dirs lists every path that must never be a Conduit data directory.
@@ -623,7 +661,10 @@ remove_shell_path_lines() {
         # deliberately group-readable.
         local mode
         mode="$(file_mode "$file")"
-        chmod "$mode" "$tmp" 2>/dev/null || true
+        # Reported rather than swallowed: a chmod that quietly does nothing
+        # leaves the profile at mktemp's 0600, and the user finds out weeks
+        # later when something else cannot read it.
+        chmod "$mode" "$tmp" || warn "could not restore mode $mode on $file"
 
         if mv -f -- "$tmp" "$file"; then
             REMOVED=$((REMOVED + 1))
@@ -637,11 +678,25 @@ remove_shell_path_lines() {
 }
 
 # file_mode prints a file's permission bits as an octal string.
+#
+# The result is validated rather than trusted. Handing chmod something that is
+# not a mode is a silent no-op once the failure is swallowed, and the visible
+# consequence -- a shell profile left at 0600 -- shows up long after the
+# uninstall, as a file the user can no longer read from another account.
 file_mode() {
-    local m
-    # BSD stat (macOS) and GNU stat (Linux) disagree on flags; try both.
-    m="$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || true)"
-    printf '%s' "${m:-644}"
+    local m=""
+    case "$STAT_FLAVOR" in
+        gnu) m="$(stat -c '%a' "$1" 2>/dev/null || true)" ;;
+        bsd) m="$(stat -f '%Lp' "$1" 2>/dev/null || true)" ;;
+    esac
+
+    # Anything that is not a run of octal digits is not a mode, whatever
+    # produced it.
+    case "$m" in
+        ''|*[!0-7]*) m=644 ;;
+    esac
+
+    printf '%s' "$m"
 }
 
 remove_mcp_entries_manually() {
