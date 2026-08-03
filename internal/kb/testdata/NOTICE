@@ -1,0 +1,51 @@
+NOTICE — provenance of internal/kb/testdata
+
+This directory holds the fixed corpus used by the golden retrieval tests in
+internal/kb. Nothing here is shipped in the Conduit binary; it exists only so
+that retrieval behaviour can be pinned byte-for-byte across the v2 rebuild.
+
+corpus/ contents and provenance
+--------------------------------
+
+01-gettysburg-address.txt
+    Excerpt: "The Gettysburg Address", Abraham Lincoln, 19 November 1863
+    (Bliss copy). A work of the United States federal government, published
+    long before 1929. PUBLIC DOMAIN worldwide.
+
+02-declaration-preamble.txt
+    Excerpt: preamble of the United States Declaration of Independence, 1776.
+    A work of the United States federal government, published long before 1929.
+    PUBLIC DOMAIN worldwide.
+
+03-moby-dick-loomings.txt
+    Excerpt: opening of Chapter 1 ("Loomings") of "Moby-Dick; or, The Whale",
+    Herman Melville, 1851. Published before 1929; author died 1891.
+    PUBLIC DOMAIN worldwide.
+
+04-alice-down-the-rabbit-hole.txt
+    Excerpt: opening of Chapter 1 ("Down the Rabbit-Hole") of "Alice's
+    Adventures in Wonderland", Lewis Carroll (Charles Lutwidge Dodgson), 1865.
+    Published before 1929; author died 1898. PUBLIC DOMAIN worldwide.
+
+05-sonnet-18.txt
+    "Sonnet 18" ("Shall I compare thee to a summer's day?"), William
+    Shakespeare, first published 1609. PUBLIC DOMAIN worldwide.
+
+06-fixture-lantern-keeper.txt
+07-fixture-harbour-ledger.txt
+    ORIGINAL WORK written for this repository by the Conduit maintainers and
+    contributed under the repository's own licence (see /LICENSE). These two
+    files are synthetic: they exist to give the tests a controlled term
+    frequency gradient ("lantern") and a paragraph that appears verbatim in two
+    different documents. They are not quotations of anyone else's text.
+
+Notes on the excerpts
+---------------------
+
+The public-domain excerpts have been lightly normalised for test stability:
+em dashes and typographic quotation marks were replaced with ASCII equivalents,
+and long paragraphs were re-wrapped. The wording is otherwise unchanged. These
+files are fixtures, not scholarly editions; do not cite them as such.
+
+Total size of this directory is kept under 200 KB deliberately. Anything larger
+belongs outside the repository.

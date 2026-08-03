@@ -1,0 +1,9 @@
+Harbour Ledger
+
+The harbour master signs the ledger each morning. A single lantern hangs by the
+office door.
+
+Boilerplate notice: this paragraph is repeated verbatim in another fixture
+document so that duplicate content can be observed end to end.
+
+Tonnage, cargo, and berth assignments are recorded in separate columns.
