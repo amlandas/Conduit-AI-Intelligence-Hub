@@ -60,8 +60,10 @@ type UninstallInfo struct {
 	SourceCount    int    `json:"sourceCount,omitempty"`
 
 	// Containers
-	// TODO(WP-3.2): remove the Qdrant fields with dead-stack teardown. They now
-	// only describe a container left behind by a pre-WP-2.1 install.
+	// TODO(WP-3.2): remove the Qdrant and FalkorDB fields with dead-stack
+	// teardown. Conduit creates neither container any more (WP-2.1 deleted
+	// Qdrant, WP-2.3 deleted FalkorDB); these fields now only describe
+	// containers left behind by an older install.
 	ContainerRuntime        string `json:"containerRuntime,omitempty"` // "docker", "podman", or ""
 	HasQdrantContainer      bool   `json:"hasQdrantContainer"`
 	QdrantContainerRunning  bool   `json:"qdrantContainerRunning"`

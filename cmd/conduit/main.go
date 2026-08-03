@@ -5104,11 +5104,14 @@ SAFETY FLAGS:
   --dry-run      Show what would be removed without removing
   --json         Output results as JSON
 
-NOTE: Dependencies (Ollama, container runtimes, containers) are NOT removed.
+NOTE: Dependencies (Ollama, container runtimes) are NOT removed.
       These may be shared with other projects. To remove manually:
-      - Stop containers: podman stop falkordb && podman rm falkordb
       - Remove Ollama: See https://ollama.com/download for uninstall instructions
       - Remove Podman: brew uninstall podman
+
+      Conduit no longer runs any containers. If conduit-qdrant or
+      conduit-falkordb are still present from an older install, nothing
+      uses them: podman rm -f conduit-qdrant conduit-falkordb
 
 Examples:
   conduit uninstall                    # Interactive mode
@@ -5275,7 +5278,10 @@ Examples:
 			if !dryRun && result.Success {
 				fmt.Println()
 				fmt.Println("To remove dependencies manually (if no longer needed):")
-				fmt.Println("  • Containers: podman stop falkordb && podman rm falkordb")
+				// TODO(WP-3.2): remove with dead-stack teardown. Conduit no
+				// longer creates containers; these can only be left over from a
+				// pre-v2 install.
+				fmt.Println("  • Leftover containers: podman rm -f conduit-qdrant conduit-falkordb")
 				fmt.Println("  • Ollama: rm -rf ~/.ollama && brew uninstall ollama")
 				fmt.Println("  • Podman: podman machine stop && podman machine rm && brew uninstall podman")
 			}
@@ -5590,7 +5596,7 @@ The graph is off by default; enable it with kb.kag.enabled in
 ~/.conduit/conduit.yaml.
 
   conduit kb kag-sync      # extract entities and edges from indexed documents
-  conduit kb kag-stats     # entity and edge counts
+  conduit kb kag-status     # entity and edge counts
   conduit status           # dependency and capability overview`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return deprecatedGraphStackCmd(cmd)
@@ -5601,7 +5607,7 @@ The graph is off by default; enable it with kb.kag.enabled in
 		{"install", "Deprecated: no graph database container is required"},
 		{"start", "Deprecated: no graph database container is required"},
 		{"stop", "Deprecated: no graph database container is required"},
-		{"status", "Deprecated: use 'conduit kb kag-stats'"},
+		{"status", "Deprecated: use 'conduit kb kag-status'"},
 	} {
 		s := sub
 		cmd.AddCommand(&cobra.Command{
@@ -5629,7 +5635,7 @@ is no separate graph database to manage. The graph is off by default.
 
   kb.kag.enabled: true     # in ~/.conduit/conduit.yaml, to turn it on
   conduit kb kag-sync      # extract entities and edges from indexed documents
-  conduit kb kag-stats     # entity and edge counts
+  conduit kb kag-status     # entity and edge counts
 `)
 	return nil
 }
