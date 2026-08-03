@@ -52,6 +52,16 @@ no functionality is lost:
 conduit --help
 ```
 
+## Known defects (not being fixed)
+
+- **`uninstall-ipc.ts` misreports shell PATH entries as Conduit's.** It matches
+  any `export PATH` line containing `.local/bin`, which pipx, uv, poetry and
+  pip `--user` all write. The CLI and `scripts/uninstall.sh` were corrected in
+  v2 to key off Conduit's own `# Conduit` marker comment; this frozen copy was
+  not, and is out of scope. It affects what the GUI *reports*, and anyone
+  running an uninstall should use `conduit uninstall` or
+  `scripts/uninstall.sh`, both of which are precise.
+
 ## Note on dependencies
 
 Dependabot npm updates are deliberately **not** configured for this directory.

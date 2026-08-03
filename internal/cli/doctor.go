@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/simpleflo/conduit/internal/config"
+	"github.com/simpleflo/conduit/internal/embed"
 	"github.com/simpleflo/conduit/internal/kb"
 	"github.com/simpleflo/conduit/internal/kbservice"
 )
@@ -257,6 +258,13 @@ func runDoctor(ctx context.Context, probeTimeout time.Duration) []check {
 		})
 	}
 
+	// ---- embedding model artifact -------------------------------------------
+	//
+	// Reported separately from the provider because "the model was never
+	// downloaded" and "llama-server is missing" are different problems with
+	// different fixes, and a combined check told users neither.
+	checks = append(checks, embedModelCheck(cfg))
+
 	// ---- vector index -------------------------------------------------------
 	if cfg.Embed.Provider == config.EmbedProviderNone {
 		checks = append(checks, check{
@@ -333,10 +341,77 @@ func embedRemedy(cfg *config.Config) string {
 		return fmt.Sprintf("start Ollama (it should answer at %s), or set embed.provider to \"none\"",
 			cfg.Embed.Ollama.Host)
 	case config.EmbedProviderLlamaServer:
-		return "install llama-server (brew install llama.cpp) and download the model, " +
+		return "install llama-server (brew install llama.cpp), run 'conduit model download', " +
 			"or set embed.provider to \"none\" for lexical-only search"
 	default:
 		return "set embed.provider to \"llama-server\", \"ollama\" or \"none\""
+	}
+}
+
+// embedModelCheck reports whether the pinned GGUF is on disk.
+//
+// Presence is checked, not the hash: doctor is expected to be fast, and
+// re-reading a few hundred megabytes on every run to catch a rare corruption is
+// the wrong trade. 'conduit model verify' does the expensive check on demand.
+func embedModelCheck(cfg *config.Config) check {
+	if cfg.Embed.Provider != config.EmbedProviderLlamaServer {
+		return check{
+			Name: "embedding model", Status: checkSkip,
+			Detail: fmt.Sprintf("not used by embed.provider %q", cfg.Embed.Provider),
+		}
+	}
+
+	spec, err := embed.LookupModel(resolveModelID(cfg, nil))
+	if err != nil {
+		return check{
+			Name: "embedding model", Status: checkFail,
+			Detail: err.Error(),
+			Remedy: fmt.Sprintf("set embed.model to one of: %v", embed.ModelIDs()),
+		}
+	}
+
+	// An explicit model_path override wins, and is the user's responsibility.
+	if p := cfg.Embed.LlamaServer.ModelPath; p != "" {
+		if _, serr := os.Stat(p); serr != nil {
+			return check{
+				Name: "embedding model", Status: checkFail,
+				Detail: fmt.Sprintf("embed.llama_server.model_path points at %s, which does not exist", p),
+				Remedy: "correct the path, or clear it to use the managed download location",
+			}
+		}
+		return check{
+			Name: "embedding model", Status: checkOK,
+			Detail: fmt.Sprintf("%s (user-supplied path %s)", spec.ID, p),
+		}
+	}
+
+	st := embed.StatModel(spec, cfg.DataDir, false)
+	if !st.Present {
+		return check{
+			Name: "embedding model", Status: checkFail,
+			Detail: fmt.Sprintf("%s not downloaded (%s)", spec.ID, humanBytes(spec.SizeBytes)),
+			Remedy: fmt.Sprintf("run 'conduit model download %s'", spec.ID),
+		}
+	}
+
+	// A size that disagrees with the pin is a truncated or replaced file, and
+	// it is cheap enough to notice from the stat we already did.
+	//
+	// Exact byte counts, not humanBytes: a file truncated by one byte rounds to
+	// the same "261.6 MB" as the real one, and reporting "is 261.6 MB, expected
+	// 261.6 MB" reads as a bug in the checker rather than a corrupt download.
+	if st.SizeBytes != spec.SizeBytes {
+		return check{
+			Name: "embedding model", Status: checkFail,
+			Detail: fmt.Sprintf("%s is %d bytes on disk, expected %d (off by %d)",
+				spec.ID, st.SizeBytes, spec.SizeBytes, spec.SizeBytes-st.SizeBytes),
+			Remedy: fmt.Sprintf("run 'conduit model download %s --force'", spec.ID),
+		}
+	}
+
+	return check{
+		Name: "embedding model", Status: checkOK,
+		Detail: fmt.Sprintf("%s present (%s)", spec.ID, humanBytes(st.SizeBytes)),
 	}
 }
 

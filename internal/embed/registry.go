@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // ModelSpec pins one embedding model to an exact, verifiable artifact.
@@ -99,6 +100,17 @@ func (s ModelSpec) Validate() error {
 	default:
 		return fmt.Errorf("embed: model %s has invalid pooling %q", s.ID, s.Pooling)
 	}
+
+	// HFFile is joined onto the data directory to form the download
+	// destination, so a separator or a parent reference in it would write
+	// outside <data-dir>/models. Nothing in the pinned registry does that
+	// today; this is here so that adding an entry cannot make it possible.
+	if s.HFFile != filepath.Base(s.HFFile) ||
+		s.HFFile == "." || s.HFFile == ".." ||
+		strings.ContainsAny(s.HFFile, `/\`) {
+		return fmt.Errorf("embed: model %s has unsafe filename %q (must be a bare filename)", s.ID, s.HFFile)
+	}
+
 	return nil
 }
 

@@ -281,18 +281,18 @@ func isExecutable(info os.FileInfo) bool {
 
 // resolveModel validates the configured GGUF path.
 //
-// Downloading is deliberately out of scope for this work package; the error
-// names the expected path and points at the first-run download command that
-// WP-3.3 will implement.
+// Resolution never downloads: a search that needs an embedding is the wrong
+// moment to start a 274MB transfer. The error names the expected path and the
+// command that fills it, which Download in download.go implements.
 func (m *Manager) resolveModel() (string, error) {
 	path := m.cfg.ModelPath
 	if path == "" {
-		return "", fmt.Errorf("%w: no model path configured; set kb.embed.model_path or run `conduit embed download %s` (first-run download lands in WP-3.3)",
+		return "", fmt.Errorf("%w: no model path configured; set embed.llama_server.model_path or run `conduit model download %s`",
 			ErrModelNotFound, m.cfg.ModelID)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
-		return "", fmt.Errorf("%w: expected GGUF at %q; run `conduit embed download %s` to fetch it (first-run download lands in WP-3.3)",
+		return "", fmt.Errorf("%w: expected GGUF at %q; run `conduit model download %s` to fetch it",
 			ErrModelNotFound, path, m.cfg.ModelID)
 	}
 	if info.IsDir() {

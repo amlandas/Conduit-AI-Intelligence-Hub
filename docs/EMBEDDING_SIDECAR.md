@@ -1,8 +1,8 @@
 # Embedding Sidecar and Model Registry
 
-**Status:** WP-2.2, v2 line. The provider layer and sidecar manager are
-implemented in `internal/embed`. First-run model download is **not** implemented
-here; it lands in WP-3.3.
+**Status:** WP-2.2 + WP-3.3, v2 line. The provider layer and sidecar manager are
+implemented in `internal/embed`. Model download landed in WP-3.3 (`download.go`,
+surfaced as `conduit model download`); see `docs/INSTALL_V2.md`.
 
 Conduit v2 must produce embeddings with **no external service installed by the
 user**. A managed `llama-server` process is the primary embedding provider;
@@ -129,8 +129,9 @@ Two of these are non-obvious and both are load-bearing:
 
 ## Pinned model registry
 
-Every model is pinned to an exact artifact with a verified SHA-256, so WP-3.3's
-downloader can reject anything that does not match. Hashes and sizes were read
+Every model is pinned to an exact artifact with a verified SHA-256, so the
+downloader in `download.go` rejects anything that does not match. Hashes and
+sizes were read
 from the HuggingFace model-tree API on 2026-08-02, where the LFS `oid` **is** the
 file's SHA-256.
 
@@ -182,8 +183,11 @@ caps the sidecar context at 8192 so `-b`/`-ub` do not balloon RAM on Qwen3's
 Expected location: `<data_dir>/models/<gguf filename>`.
 
 When the file is missing, the error names the exact expected path and points at
-`conduit embed download <model-id>` — **a placeholder; WP-3.3 implements it.**
-Nothing in this package downloads anything.
+`conduit model download <model-id>`.
+
+Resolution itself never downloads. A search that needs an embedding is the wrong
+moment to start a 274MB transfer, so the sidecar fails with an actionable error
+and leaves the decision to the user.
 
 ---
 
@@ -215,7 +219,8 @@ Package coverage: **84.5%**.
 
 ## Open items for later work packages
 
-- **WP-3.3** — first-run download with SHA-256 verification against this registry.
+- ~~**WP-3.3** — first-run download with SHA-256 verification against this
+  registry.~~ Done: `internal/embed/download.go`, `conduit model download`.
 - **WP-3.4** — flip `internal/kb` onto this provider layer and retire the
   timeout-less client in `internal/kb/embeddings.go` (bug #71).
 - **Matryoshka truncation** — llama-server silently ignores the OpenAI

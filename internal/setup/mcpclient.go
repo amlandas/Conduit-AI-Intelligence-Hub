@@ -122,11 +122,114 @@ func ConfigureMCPClient(clientID string, force bool) (*ConfigureResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	if err := os.WriteFile(client.ConfigPath, data, 0644); err != nil {
+	if err := writeFileAtomic(client.ConfigPath, data, configFileMode(client.ConfigPath)); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
 	return res, nil
+}
+
+// RemoveResult reports what RemoveMCPClient did for one client.
+type RemoveResult struct {
+	// ClientID is the client that was examined.
+	ClientID string `json:"clientId"`
+
+	// ConfigPath is the file that was read, and written if Removed is true.
+	ConfigPath string `json:"configPath"`
+
+	// Removed is true when a Conduit entry was found and deleted.
+	Removed bool `json:"removed"`
+
+	// Missing is true when the client has no config file at all.
+	Missing bool `json:"missing"`
+}
+
+// RemoveMCPClient deletes Conduit's entry from an AI client's MCP config.
+//
+// It removes exactly one key and rewrites the rest of the file untouched. An
+// uninstall that clobbered a user's other MCP servers, or their unrelated
+// editor settings, would do more damage than leaving a stale entry behind --
+// so a config that cannot be parsed is reported, never overwritten.
+//
+// Removing an entry that is not there is not an error: uninstall must be safe
+// to run twice.
+func RemoveMCPClient(clientID string) (*RemoveResult, error) {
+	client, err := LookupMCPClient(clientID)
+	if err != nil {
+		return nil, err
+	}
+
+	res := &RemoveResult{ClientID: clientID, ConfigPath: client.ConfigPath}
+
+	data, err := os.ReadFile(client.ConfigPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			res.Missing = true
+			return res, nil
+		}
+		return nil, fmt.Errorf("read config: %w", err)
+	}
+
+	cfg := map[string]interface{}{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("parse %s: %w (left unchanged)", client.ConfigPath, err)
+	}
+
+	servers, container := serverMap(cfg, client.ServersKey)
+	if _, exists := servers[ServerName]; !exists {
+		return res, nil
+	}
+
+	delete(servers, ServerName)
+	container[lastSegment(client.ServersKey)] = servers
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("marshal config: %w", err)
+	}
+	// Atomic replacement. ~/.claude.json holds every MCP server the user has
+	// configured plus Claude Code's own state; a truncating write that dies
+	// part way through costs them all of it, and an uninstall is exactly the
+	// moment nobody is watching closely.
+	if err := writeFileAtomic(client.ConfigPath, out, configFileMode(client.ConfigPath)); err != nil {
+		return nil, fmt.Errorf("write config: %w", err)
+	}
+
+	res.Removed = true
+	return res, nil
+}
+
+// configFileMode returns an existing file's permissions, or a sane default.
+//
+// Rewriting a config must not change who can read it. CreateTemp starts at
+// 0600, so without this an atomic replace would quietly tighten -- or, against
+// a deliberately group-readable file, alter -- the permissions of a file
+// Conduit does not own.
+func configFileMode(path string) os.FileMode {
+	if info, err := os.Stat(path); err == nil {
+		return info.Mode().Perm()
+	}
+	return 0644
+}
+
+// RemoveAllMCPClients strips Conduit from every supported client.
+//
+// One client failing does not stop the others: a broken Cursor config must not
+// leave a stale Claude Code entry pointing at a binary that is about to be
+// deleted. Errors are collected and returned alongside the results.
+func RemoveAllMCPClients() ([]*RemoveResult, []error) {
+	var results []*RemoveResult
+	var errs []error
+
+	for _, id := range MCPClientIDs() {
+		res, err := RemoveMCPClient(id)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", id, err))
+			continue
+		}
+		results = append(results, res)
+	}
+	return results, errs
 }
 
 // IsMCPClientConfigured reports whether a config file already registers
