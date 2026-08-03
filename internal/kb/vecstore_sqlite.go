@@ -249,8 +249,10 @@ func (vi *SQLiteVectorIndex) ensureSchema(ctx context.Context) error {
 				embedding   BLOB NOT NULL,
 				created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 			)`,
+			// Must match migration 005 exactly, foreign key included: a database
+			// created by one path and opened by the other has to behave the same.
 			`CREATE TABLE IF NOT EXISTS kb_entity_vectors (
-				entity_id   TEXT PRIMARY KEY,
+				entity_id   TEXT PRIMARY KEY REFERENCES kb_entities(entity_id) ON DELETE CASCADE,
 				name        TEXT NOT NULL DEFAULT '',
 				entity_type TEXT NOT NULL DEFAULT '',
 				description TEXT NOT NULL DEFAULT '',
