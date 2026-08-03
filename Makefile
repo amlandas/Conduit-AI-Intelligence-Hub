@@ -18,9 +18,6 @@ BIN_DIR=bin
 CMD_DIR=cmd
 INTERNAL_DIR=internal
 
-# Platforms
-PLATFORMS=darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64
-
 .PHONY: all build build-cli build-daemon clean test test-critical test-high test-medium test-all lint fmt deps install help
 
 all: build
@@ -40,18 +37,20 @@ build-daemon: deps ## Build daemon binary
 	CGO_ENABLED=$(CGO_ENABLED) $(GO) build $(GOTAGS) $(GOFLAGS) $(LDFLAGS) -o $(BIN_DIR)/$(DAEMON_NAME) ./$(CMD_DIR)/$(DAEMON_NAME)
 	@echo "Built: $(BIN_DIR)/$(DAEMON_NAME)"
 
-build-all-platforms: deps ## Build for all platforms
-	@for platform in $(PLATFORMS); do \
-		GOOS=$${platform%/*} GOARCH=$${platform#*/} \
-		$(GO) build $(GOFLAGS) $(LDFLAGS) \
-			-o $(BIN_DIR)/$(BINARY_NAME)-$${platform%/*}-$${platform#*/}$$(if [ "$${platform%/*}" = "windows" ]; then echo ".exe"; fi) \
-			./$(CMD_DIR)/$(BINARY_NAME); \
-		GOOS=$${platform%/*} GOARCH=$${platform#*/} \
-		$(GO) build $(GOFLAGS) $(LDFLAGS) \
-			-o $(BIN_DIR)/$(DAEMON_NAME)-$${platform%/*}-$${platform#*/}$$(if [ "$${platform%/*}" = "windows" ]; then echo ".exe"; fi) \
-			./$(CMD_DIR)/$(DAEMON_NAME); \
-	done
-	@echo "Built all platforms in $(BIN_DIR)/"
+# NOTE: the `build-all-platforms` cross-compile target was removed deliberately.
+#
+# Conduit requires CGO (github.com/mattn/go-sqlite3) plus -tags "fts5" for
+# SQLite full-text search. Setting GOOS/GOARCH implicitly disables CGO, so the
+# old target built "successfully" while linking a go-sqlite3 stub whose every
+# call fails at runtime with:
+#   "Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work."
+# Those binaries could not open the knowledge base at all.
+#
+# Forcing CGO_ENABLED=1 does not fix it either: cross-compiling cgo needs a C
+# cross-toolchain per target (musl/gcc for linux, mingw-w64 for windows), which
+# a single host does not have. Release artifacts must therefore be built
+# natively on each platform - see .github/workflows/ci.yml for the per-OS
+# matrix and .github/workflows/release.yml for packaging.
 
 ## Test targets
 
