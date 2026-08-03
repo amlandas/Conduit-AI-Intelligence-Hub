@@ -48,7 +48,7 @@ type Service struct {
 	hybrid   *kb.HybridSearcher
 	graph    *kb.GraphStore
 
-	embedder kb.Embedder
+	embedder  kb.Embedder
 	embedInfo EmbedderInfo
 
 	logger zerolog.Logger

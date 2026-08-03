@@ -4,9 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"net/http"
 	"time"
 )
+
+// EmbedProbe is the part of an embedder that capability detection needs.
+//
+// kb.Embedder satisfies it. Taking an interface rather than assuming Ollama on
+// port 11434 is the point: since WP-3.2 the embedding provider is configurable
+// ("llama-server", "ollama" or "none"), so nothing here may hardcode one.
+type EmbedProbe interface {
+	// Model reports the embedding model identifier.
+	Model() string
+
+	// HealthCheck verifies the provider can currently serve requests.
+	HealthCheck(ctx context.Context) error
+}
 
 // Capabilities describes the available search features.
 type Capabilities struct {
@@ -14,24 +26,38 @@ type Capabilities struct {
 	FTS5Available bool `json:"fts5_available"`
 
 	// SemanticAvailable indicates if semantic search is available
-	// (vector index present + Ollama reachable for query embedding)
+	// (vector index present + embedding provider reachable)
 	SemanticAvailable bool `json:"semantic_available"`
 
 	// VectorStatus describes the state of the in-database vector index
 	VectorStatus string `json:"vector_status"`
 
-	// EmbeddingModel is the Ollama model used for embeddings
-	EmbeddingModel string `json:"embedding_model"`
+	// EmbeddingModel is the model used for embeddings, empty when embeddings
+	// are disabled.
+	EmbeddingModel string `json:"embedding_model,omitempty"`
 
-	// OllamaStatus describes Ollama connectivity
-	OllamaStatus string `json:"ollama_status"`
+	// EmbedStatus describes embedding provider connectivity.
+	EmbedStatus string `json:"embed_status"`
 }
 
+// DefaultProbeTimeout bounds a capability probe so a status command cannot
+// hang on an unreachable provider.
+const DefaultProbeTimeout = 5 * time.Second
+
 // DetectCapabilities checks available search features.
-func DetectCapabilities(ctx context.Context, db *sql.DB) *Capabilities {
-	caps := &Capabilities{
-		EmbeddingModel: "nomic-embed-text",
-	}
+//
+// A nil embedder means embeddings are switched off (embed.provider = "none"),
+// which is a supported configuration and not an error: lexical search still
+// works and SemanticAvailable is simply false.
+func DetectCapabilities(ctx context.Context, db *sql.DB, embedder EmbedProbe) *Capabilities {
+	return DetectCapabilitiesWithTimeout(ctx, db, embedder, DefaultProbeTimeout)
+}
+
+// DetectCapabilitiesWithTimeout is DetectCapabilities with an explicit probe
+// budget. `conduit doctor` uses a longer one than `mcp status` because starting
+// a cold embedding sidecar is exactly what doctor is being asked to test.
+func DetectCapabilitiesWithTimeout(ctx context.Context, db *sql.DB, embedder EmbedProbe, probeTimeout time.Duration) *Capabilities {
+	caps := &Capabilities{}
 
 	// Check FTS5
 	caps.FTS5Available = checkFTS5(ctx, db)
@@ -40,12 +66,15 @@ func DetectCapabilities(ctx context.Context, db *sql.DB) *Capabilities {
 	vectorOK, vectorStatus := checkVectorIndex(ctx, db)
 	caps.VectorStatus = vectorStatus
 
-	// Check Ollama
-	ollamaOK, ollamaStatus := checkOllama(ctx)
-	caps.OllamaStatus = ollamaStatus
+	// Check the embedding provider
+	embedOK, embedStatus := checkEmbedder(ctx, embedder, probeTimeout)
+	caps.EmbedStatus = embedStatus
+	if embedder != nil {
+		caps.EmbeddingModel = embedder.Model()
+	}
 
 	// Semantic search needs somewhere to search and something to embed with.
-	caps.SemanticAvailable = vectorOK && ollamaOK
+	caps.SemanticAvailable = vectorOK && embedOK
 
 	return caps
 }
@@ -97,28 +126,24 @@ func checkVectorIndex(ctx context.Context, db *sql.DB) (bool, string) {
 	return true, fmt.Sprintf("ready (%d vectors)", count)
 }
 
-// checkOllama tests Ollama connectivity and model availability.
-func checkOllama(ctx context.Context) (bool, string) {
-	client := &http.Client{Timeout: 2 * time.Second}
-
-	// Check if Ollama is running
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost:11434/api/tags", nil)
-	if err != nil {
-		return false, "failed to create request"
+// checkEmbedder probes the configured embedding provider.
+func checkEmbedder(ctx context.Context, embedder EmbedProbe, timeout time.Duration) (bool, string) {
+	if embedder == nil {
+		return false, "disabled (embed.provider = none)"
+	}
+	if timeout <= 0 {
+		timeout = DefaultProbeTimeout
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, "not reachable"
-	}
-	defer resp.Body.Close()
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	if resp.StatusCode != http.StatusOK {
-		return false, fmt.Sprintf("status %d", resp.StatusCode)
+	if err := embedder.HealthCheck(probeCtx); err != nil {
+		if probeCtx.Err() != nil {
+			return false, fmt.Sprintf("not reachable (no response within %s)", timeout)
+		}
+		return false, fmt.Sprintf("not reachable: %v", err)
 	}
-
-	// Note: We could parse the response to check for nomic-embed-text,
-	// but for simplicity we just check if Ollama is responding
 	return true, "connected"
 }
 
@@ -135,8 +160,8 @@ func (c *Capabilities) Summary() string {
 	if c.SemanticAvailable {
 		status += fmt.Sprintf("Semantic: available (model: %s)\n", c.EmbeddingModel)
 	} else {
-		status += fmt.Sprintf("Semantic: not available (vectors: %s, Ollama: %s)\n",
-			c.VectorStatus, c.OllamaStatus)
+		status += fmt.Sprintf("Semantic: not available (vectors: %s, embeddings: %s)\n",
+			c.VectorStatus, c.EmbedStatus)
 	}
 
 	return status

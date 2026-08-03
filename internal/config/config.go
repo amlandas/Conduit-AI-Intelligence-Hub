@@ -4,10 +4,10 @@
 //
 // Values are resolved highest-wins in this order:
 //
-//	1. command-line flags   (bound explicitly via BindFlags)
-//	2. environment          (CONDUIT_* , nested keys use "_" for ".")
-//	3. configuration file   (~/.conduit/conduit.yaml, /etc/conduit, ./conduit.yaml)
-//	4. compiled defaults    (DefaultConfig)
+//  1. command-line flags   (bound explicitly via BindFlags)
+//  2. environment          (CONDUIT_* , nested keys use "_" for ".")
+//  3. configuration file   (~/.conduit/conduit.yaml, /etc/conduit, ./conduit.yaml)
+//  4. compiled defaults    (DefaultConfig)
 //
 // # One schema
 //
