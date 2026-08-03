@@ -24,17 +24,26 @@ machine.
 
 ### 1. Install
 
+From the latest release (no Go toolchain needed — downloads the prebuilt
+binary and verifies its SHA-256 checksum):
+
 ```bash
 git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub
 cd Conduit-AI-Intelligence-Hub
+./scripts/install.sh
+```
+
+Or build from source (requires Go 1.21+ and a C compiler):
+
+```bash
 ./scripts/install.sh --from-source
 ```
 
-This builds the binary, installs it to `~/.local/bin`, creates the data
+Either way the script installs the binary to `~/.local/bin`, creates the data
 directory, and registers the MCP server with Claude Code. Re-running it is safe
-and is the supported way to upgrade a source install.
+and is the supported way to upgrade.
 
-Full options, release-binary installs, and troubleshooting are in
+Full options and troubleshooting are in
 [docs/INSTALL_V2.md](docs/INSTALL_V2.md).
 
 **Requirements**
