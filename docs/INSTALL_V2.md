@@ -82,8 +82,21 @@ half-install anything.
 
 ### If `~/.local/bin` is not on your PATH
 
-The installer tells you, and prints the line to add for your shell. Nothing is
-appended to your shell profile without you doing it.
+The installer appends a two-line block to `~/.zshrc` or `~/.bashrc`:
+
+```bash
+# Conduit
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The `# Conduit` marker is the point of it. It is the only thing the uninstaller
+matches on, so a PATH line you wrote yourself is never touched even when it
+names the same directory — and without the marker, there would be no safe way to
+remove Conduit's line later without guessing.
+
+Re-running the installer does not add a second copy. For `fish`, or any shell
+whose rc file the installer does not recognise, it prints the line for you to add
+instead of writing syntax that would not parse.
 
 ---
 
@@ -281,12 +294,13 @@ conduit kb search "something you know is in there"
 ./scripts/uninstall.sh
 ```
 
-Removes the binary, Conduit's MCP entries from your AI clients, and the PATH
-lines it added. **Your data is kept.**
+Removes the binary, Conduit's MCP entries from your AI clients, and the marked
+PATH block the installer added. **Your data is kept.**
 
 ```bash
 ./scripts/uninstall.sh --dry-run        # preview
 ./scripts/uninstall.sh --remove-data    # also delete the knowledge base
+./scripts/uninstall.sh --manual         # skip the binary, remove files directly
 ```
 
 `--remove-data` prompts for confirmation unless you pass `--force`. The prompt
@@ -296,19 +310,38 @@ mind. Declining exits with status **3**, distinct from success and from failure,
 so a script wrapping this can tell a refusal from a completed uninstall.
 
 A directory holding no `conduit.db` or `conduit.yaml` is refused outright: that
-is far more likely to be a mistyped `--data-dir` than a real request.
+is far more likely to be a mistyped `--data-dir` than a real request. `--force`
+overrides this, but never the path guards below.
 
-The script delegates to `conduit uninstall`, which knows what it installed. If
-that binary is too old to understand the flags being used, or fails for any
-other reason, the script stops and says so rather than quietly falling back —
-the manual path is less careful, and downgrading to it after a failure is how a
-wrapper does damage the tool it wrapped had declined to do.
+`--data-dir` must be an absolute path, and is compared against a deny list **by
+identity, not by spelling** — device and inode, the same test the kernel uses.
+On a case-insensitive filesystem such as APFS, `/USERS/you` *is* your home
+directory; a string comparison would not notice, and the next step is a
+recursive delete. Symlinked data directories are refused rather than followed,
+and `/`, `/etc`, `/Users`, `/Volumes`, `/mnt` and their kin are never acceptable
+however they are spelled.
 
-The standalone path runs only when there is no binary at all. It will not edit
-your MCP JSON config files from shell, because those hold your other MCP servers
-and unrelated settings; it tells you which files to edit instead. It touches a
-shell profile only where it finds Conduit's own `# Conduit` marker, and copies
-the file to `.conduit-uninstall.bak` first.
+### How delegation works
+
+The script delegates to `conduit uninstall`, which knows what it installed. What
+happens when that goes wrong depends on *why*:
+
+| Situation | Behaviour |
+|---|---|
+| Binary cannot execute (wrong arch, missing library) | Falls back to manual removal, loudly. It never ran, so it had no opinion to respect — and this is exactly what the manual path is for. |
+| Binary ran and failed | **Stops.** That is its judgement about this machine, and the weaker path is not entitled to overrule it. |
+| Binary too old for a flag being used | Stops, naming the missing capability. |
+| You declined a confirmation | Stops, exit 3. |
+| No binary at all | Manual removal. |
+
+Pass `--manual` to skip delegation entirely — the escape hatch for a binary that
+runs but refuses.
+
+The manual path is deliberately less capable. It will not edit your MCP JSON
+config files from shell, because those hold your other MCP servers and unrelated
+settings; it tells you which files to edit instead. It touches a shell profile
+only where it finds Conduit's own `# Conduit` marker, and copies the file to
+`.conduit-uninstall.bak` first.
 
 `--prefix DIR` removes one install and only that one. Shell profiles, MCP
 entries and GUI state are per-user rather than per-install, so they are left
@@ -349,8 +382,9 @@ working setup rather than a consolation prize.
 `CGO_ENABLED=1 go build -tags fts5 ./cmd/conduit`, or use `install.sh
 --from-source`, which sets both.
 
-**`conduit: command not found` after installing** — `~/.local/bin` is not on
-your PATH. The installer prints the line to add.
+**`conduit: command not found` after installing** — the installer added
+`~/.local/bin` to your shell profile, but the shell you are already in has not
+read it. Open a new terminal, or run `export PATH="$HOME/.local/bin:$PATH"`.
 
 **An old `conduit` runs instead of the new one** — a stale symlink at
 `/usr/local/bin/conduit` from a 1.x install is shadowing it. The installer
