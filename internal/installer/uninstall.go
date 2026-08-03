@@ -60,6 +60,8 @@ type UninstallInfo struct {
 	SourceCount    int    `json:"sourceCount,omitempty"`
 
 	// Containers
+	// TODO(WP-3.2): remove the Qdrant fields with dead-stack teardown. They now
+	// only describe a container left behind by a pre-WP-2.1 install.
 	ContainerRuntime        string `json:"containerRuntime,omitempty"` // "docker", "podman", or ""
 	HasQdrantContainer      bool   `json:"hasQdrantContainer"`
 	QdrantContainerRunning  bool   `json:"qdrantContainerRunning"`
@@ -167,6 +169,7 @@ func (i *Installer) GetUninstallInfo(ctx context.Context) (*UninstallInfo, error
 	// Check container runtime and containers
 	info.ContainerRuntime = i.detectContainerRuntime()
 	if info.ContainerRuntime != "" {
+		// TODO(WP-3.2): remove with dead-stack teardown -- legacy container only.
 		info.HasQdrantContainer, info.QdrantContainerRunning = i.checkContainer(info.ContainerRuntime, "conduit-qdrant")
 		info.HasFalkorDBContainer, info.FalkorDBContainerRunning = i.checkContainer(info.ContainerRuntime, "conduit-falkordb")
 
@@ -600,6 +603,7 @@ func (i *Installer) PrintUninstallInfo(info *UninstallInfo) {
 	fmt.Println("\nContainers:")
 	if info.ContainerRuntime != "" {
 		fmt.Printf("  Runtime: %s\n", info.ContainerRuntime)
+		// TODO(WP-3.2): remove with dead-stack teardown -- legacy container only.
 		if info.HasQdrantContainer {
 			status := "stopped"
 			if info.QdrantContainerRunning {

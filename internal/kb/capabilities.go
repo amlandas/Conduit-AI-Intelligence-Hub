@@ -13,11 +13,12 @@ type Capabilities struct {
 	// FTS5Available indicates if SQLite FTS5 is available
 	FTS5Available bool `json:"fts5_available"`
 
-	// SemanticAvailable indicates if semantic search is available (Qdrant + Ollama)
+	// SemanticAvailable indicates if semantic search is available
+	// (vector index present + Ollama reachable for query embedding)
 	SemanticAvailable bool `json:"semantic_available"`
 
-	// QdrantStatus describes Qdrant connectivity
-	QdrantStatus string `json:"qdrant_status"`
+	// VectorStatus describes the state of the in-database vector index
+	VectorStatus string `json:"vector_status"`
 
 	// EmbeddingModel is the Ollama model used for embeddings
 	EmbeddingModel string `json:"embedding_model"`
@@ -35,16 +36,16 @@ func DetectCapabilities(ctx context.Context, db *sql.DB) *Capabilities {
 	// Check FTS5
 	caps.FTS5Available = checkFTS5(ctx, db)
 
-	// Check Qdrant
-	qdrantOK, qdrantStatus := checkQdrant(ctx)
-	caps.QdrantStatus = qdrantStatus
+	// Check the vector index
+	vectorOK, vectorStatus := checkVectorIndex(ctx, db)
+	caps.VectorStatus = vectorStatus
 
 	// Check Ollama
 	ollamaOK, ollamaStatus := checkOllama(ctx)
 	caps.OllamaStatus = ollamaStatus
 
-	// Semantic search requires both Qdrant and Ollama
-	caps.SemanticAvailable = qdrantOK && ollamaOK
+	// Semantic search needs somewhere to search and something to embed with.
+	caps.SemanticAvailable = vectorOK && ollamaOK
 
 	return caps
 }
@@ -66,25 +67,34 @@ func checkFTS5(ctx context.Context, db *sql.DB) bool {
 	return exists == 1
 }
 
-// checkQdrant tests Qdrant connectivity.
-func checkQdrant(ctx context.Context) (bool, string) {
-	client := &http.Client{Timeout: 2 * time.Second}
+// checkVectorIndex verifies the in-database vector table is usable.
+//
+// There is no service to reach: the index is a table in the knowledge base
+// file, so "available" means the schema is present. An empty table is still
+// available -- it just has nothing to return yet.
+func checkVectorIndex(ctx context.Context, db *sql.DB) (bool, string) {
+	if db == nil {
+		return false, "no database"
+	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", "http://localhost:6333/collections", nil)
+	var name string
+	err := db.QueryRowContext(ctx,
+		"SELECT name FROM sqlite_master WHERE type='table' AND name='kb_vectors'").Scan(&name)
+	if err == sql.ErrNoRows {
+		return false, "not initialized"
+	}
 	if err != nil {
-		return false, "failed to create request"
+		return false, "unavailable"
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		return false, "not reachable"
+	var count int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_vectors").Scan(&count); err != nil {
+		return false, "unavailable"
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusOK {
-		return true, "connected"
+	if count == 0 {
+		return true, "ready (empty)"
 	}
-	return false, fmt.Sprintf("status %d", resp.StatusCode)
+	return true, fmt.Sprintf("ready (%d vectors)", count)
 }
 
 // checkOllama tests Ollama connectivity and model availability.
@@ -125,8 +135,8 @@ func (c *Capabilities) Summary() string {
 	if c.SemanticAvailable {
 		status += fmt.Sprintf("Semantic: available (model: %s)\n", c.EmbeddingModel)
 	} else {
-		status += fmt.Sprintf("Semantic: not available (Qdrant: %s, Ollama: %s)\n",
-			c.QdrantStatus, c.OllamaStatus)
+		status += fmt.Sprintf("Semantic: not available (vectors: %s, Ollama: %s)\n",
+			c.VectorStatus, c.OllamaStatus)
 	}
 
 	return status

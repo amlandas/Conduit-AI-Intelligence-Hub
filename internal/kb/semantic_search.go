@@ -13,39 +13,58 @@ import (
 
 // SemanticSearcher provides semantic search over the knowledge base.
 // It combines embedding generation and vector similarity search.
+//
+// Both collaborators are interfaces so that retrieval can be exercised without
+// Ollama and without a live vector backend: tests inject deterministic
+// embeddings, or a deliberately failing index to drive the degraded path.
 type SemanticSearcher struct {
-	embeddings  *EmbeddingService
-	vectorStore *VectorStore
-	db          *sql.DB // For metadata lookups
-	logger      zerolog.Logger
+	embeddings Embedder
+	vectors    VectorIndex
+	db         *sql.DB // For metadata lookups
+	logger     zerolog.Logger
 }
 
 // SemanticSearchConfig configures the semantic searcher.
 type SemanticSearchConfig struct {
 	EmbeddingConfig   EmbeddingConfig
-	VectorStoreConfig VectorStoreConfig
+	VectorIndexConfig VectorIndexConfig
 }
 
-// NewSemanticSearcher creates a new semantic searcher.
+// NewSemanticSearcher creates a semantic searcher with the production wiring:
+// Ollama for embeddings and the SQLite vector index that shares the knowledge
+// base file.
+//
+// It does not contact Ollama and does not require the index to hold any data --
+// an empty knowledge base is a valid state, and an unreachable embedding
+// service surfaces later as a degraded search rather than a failed startup.
 func NewSemanticSearcher(db *sql.DB, cfg SemanticSearchConfig) (*SemanticSearcher, error) {
-	// Create embedding service
 	embeddings, err := NewEmbeddingService(cfg.EmbeddingConfig)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create embedding service: %w", err)
 	}
 
-	// Create vector store
-	vectorStore, err := NewVectorStore(cfg.VectorStoreConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create vector store: %w", err)
+	if cfg.VectorIndexConfig.Dimension <= 0 {
+		cfg.VectorIndexConfig.Dimension = embeddings.Dimension()
 	}
 
+	vectors, err := NewSQLiteVectorIndex(db, cfg.VectorIndexConfig)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create vector index: %w", err)
+	}
+
+	return NewSemanticSearcherWith(db, embeddings, vectors), nil
+}
+
+// NewSemanticSearcherWith builds a semantic searcher from supplied
+// collaborators. This is the injection seam used by tests and by any caller
+// that wants a non-default embedder or index.
+func NewSemanticSearcherWith(db *sql.DB, embeddings Embedder, vectors VectorIndex) *SemanticSearcher {
 	return &SemanticSearcher{
-		embeddings:  embeddings,
-		vectorStore: vectorStore,
-		db:          db,
-		logger:      observability.Logger("kb.semantic"),
-	}, nil
+		embeddings: embeddings,
+		vectors:    vectors,
+		db:         db,
+		logger:     observability.Logger("kb.semantic"),
+	}
 }
 
 // SemanticSearchOptions configures semantic search behavior.
@@ -108,7 +127,7 @@ func (ss *SemanticSearcher) Search(ctx context.Context, query string, opts Seman
 		MinScore:  opts.MinScore,
 	}
 
-	vectorResults, err := ss.vectorStore.Search(ctx, queryEmbedding, vectorOpts)
+	vectorResults, err := ss.vectors.Search(ctx, queryEmbedding, vectorOpts)
 	if err != nil {
 		return nil, fmt.Errorf("vector search failed: %w", err)
 	}
@@ -187,7 +206,7 @@ func (ss *SemanticSearcher) SearchSimilar(ctx context.Context, documentID string
 		MinScore:  opts.MinScore,
 	}
 
-	vectorResults, err := ss.vectorStore.Search(ctx, embedding, vectorOpts)
+	vectorResults, err := ss.vectors.Search(ctx, embedding, vectorOpts)
 	if err != nil {
 		return nil, fmt.Errorf("vector search failed: %w", err)
 	}
@@ -227,25 +246,34 @@ func (ss *SemanticSearcher) SearchSimilar(ctx context.Context, documentID string
 	}, nil
 }
 
-// IndexDocument indexes a document's chunks into the vector store.
-func (ss *SemanticSearcher) IndexDocument(ctx context.Context, doc *Document, chunks []Chunk) error {
+// EmbedChunks generates embeddings for a document's chunks.
+//
+// This is deliberately separate from the write: embedding is a network round
+// trip to Ollama that can take seconds, and holding a SQLite write transaction
+// open across it would block every other writer for the duration. Ingestion
+// calls this first, then writes the result inside its transaction.
+func (ss *SemanticSearcher) EmbedChunks(ctx context.Context, chunks []Chunk) ([][]float32, error) {
 	if len(chunks) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	// Extract chunk contents
 	contents := make([]string, len(chunks))
 	for i, chunk := range chunks {
 		contents[i] = chunk.Content
 	}
 
-	// Generate embeddings for all chunks
 	embeddings, err := ss.embeddings.EmbedBatch(ctx, contents)
 	if err != nil {
-		return fmt.Errorf("failed to generate embeddings: %w", err)
+		return nil, fmt.Errorf("failed to generate embeddings: %w", err)
 	}
+	if len(embeddings) != len(chunks) {
+		return nil, fmt.Errorf("embedder returned %d vectors for %d chunks", len(embeddings), len(chunks))
+	}
+	return embeddings, nil
+}
 
-	// Create vector points
+// vectorPoints assembles the rows for a document's chunks and their embeddings.
+func vectorPoints(doc *Document, chunks []Chunk, embeddings [][]float32) []VectorPoint {
 	points := make([]VectorPoint, len(chunks))
 	for i, chunk := range chunks {
 		points[i] = VectorPoint{
@@ -262,9 +290,36 @@ func (ss *SemanticSearcher) IndexDocument(ctx context.Context, doc *Document, ch
 			},
 		}
 	}
+	return points
+}
 
-	// Upsert to vector store
-	if err := ss.vectorStore.UpsertBatch(ctx, points); err != nil {
+// IndexVectorsTx writes precomputed embeddings inside a caller-supplied
+// transaction, so that chunk text, vector and metadata commit atomically.
+func (ss *SemanticSearcher) IndexVectorsTx(ctx context.Context, tx *sql.Tx, doc *Document, chunks []Chunk, embeddings [][]float32) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+	if len(embeddings) != len(chunks) {
+		return fmt.Errorf("have %d vectors for %d chunks", len(embeddings), len(chunks))
+	}
+	return ss.vectors.UpsertTx(ctx, tx, vectorPoints(doc, chunks, embeddings))
+}
+
+// IndexDocument embeds a document's chunks and writes them in one step.
+// Ingestion uses the EmbedChunks/IndexVectorsTx pair instead so the write can
+// join the surrounding transaction; this remains for standalone callers such as
+// the FTS backfill.
+func (ss *SemanticSearcher) IndexDocument(ctx context.Context, doc *Document, chunks []Chunk) error {
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	embeddings, err := ss.EmbedChunks(ctx, chunks)
+	if err != nil {
+		return err
+	}
+
+	if err := ss.vectors.Upsert(ctx, vectorPoints(doc, chunks, embeddings)); err != nil {
 		return fmt.Errorf("failed to upsert vectors: %w", err)
 	}
 
@@ -278,13 +333,13 @@ func (ss *SemanticSearcher) IndexDocument(ctx context.Context, doc *Document, ch
 
 // DeleteDocument removes a document's vectors from the store.
 func (ss *SemanticSearcher) DeleteDocument(ctx context.Context, documentID string) error {
-	return ss.vectorStore.DeleteByDocument(ctx, documentID)
+	return ss.vectors.DeleteByDocument(ctx, documentID)
 }
 
 // DeleteBySource removes all vectors for a source (all documents in a KB).
 // Returns the number of vectors deleted.
 func (ss *SemanticSearcher) DeleteBySource(ctx context.Context, sourceID string) (int, error) {
-	deleted, err := ss.vectorStore.DeleteBySource(ctx, sourceID)
+	deleted, err := ss.vectors.DeleteBySource(ctx, sourceID)
 	if err != nil {
 		return 0, err
 	}
@@ -373,14 +428,14 @@ func containsString(slice []string, s string) bool {
 	return false
 }
 
-// EmbeddingService returns the embedding service for external use.
-func (ss *SemanticSearcher) EmbeddingService() *EmbeddingService {
+// EmbeddingService returns the embedder for external use.
+func (ss *SemanticSearcher) EmbeddingService() Embedder {
 	return ss.embeddings
 }
 
-// VectorStore returns the vector store for external use.
-func (ss *SemanticSearcher) VectorStore() *VectorStore {
-	return ss.vectorStore
+// VectorIndex returns the vector index for external use.
+func (ss *SemanticSearcher) VectorIndex() VectorIndex {
+	return ss.vectors
 }
 
 // HealthCheck verifies both embedding service and vector store are operational.
@@ -388,7 +443,7 @@ func (ss *SemanticSearcher) HealthCheck(ctx context.Context) error {
 	if err := ss.embeddings.HealthCheck(ctx); err != nil {
 		return fmt.Errorf("embedding service: %w", err)
 	}
-	if err := ss.vectorStore.HealthCheck(ctx); err != nil {
+	if err := ss.vectors.HealthCheck(ctx); err != nil {
 		return fmt.Errorf("vector store: %w", err)
 	}
 	return nil
@@ -396,7 +451,7 @@ func (ss *SemanticSearcher) HealthCheck(ctx context.Context) error {
 
 // GetStats returns combined statistics.
 func (ss *SemanticSearcher) GetStats(ctx context.Context) (*SemanticSearchStats, error) {
-	vsStats, err := ss.vectorStore.GetStats(ctx)
+	vsStats, err := ss.vectors.GetStats(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -421,7 +476,7 @@ type SemanticSearchStats struct {
 
 // Close closes the semantic searcher and its resources.
 func (ss *SemanticSearcher) Close() error {
-	return ss.vectorStore.Close()
+	return ss.vectors.Close()
 }
 
 // MigrateFromFTS migrates existing FTS-indexed documents to vector search.

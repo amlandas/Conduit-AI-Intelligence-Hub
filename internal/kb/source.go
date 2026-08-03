@@ -134,7 +134,7 @@ func (sm *SourceManager) Add(ctx context.Context, req AddSourceRequest) (*Source
 // RemoveResult contains information about a source removal operation.
 type RemoveResult struct {
 	DocumentsDeleted int // Number of documents deleted from SQLite
-	VectorsDeleted   int // Number of vectors deleted from Qdrant
+	VectorsDeleted   int // Number of vectors deleted from the vector index
 }
 
 // Remove removes a source and its indexed documents, including vectors.
@@ -149,7 +149,7 @@ func (sm *SourceManager) Remove(ctx context.Context, sourceID string) (*RemoveRe
 		result.DocumentsDeleted = docCount
 	}
 
-	// Delete vectors from Qdrant FIRST (while we still have source_id reference)
+	// Delete vectors FIRST (while we still have the source_id reference)
 	// This is done before SQLite deletion so the source_id filter still works
 	vectorsDeleted, err := sm.indexer.DeleteBySource(ctx, sourceID)
 	if err != nil {

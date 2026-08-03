@@ -107,6 +107,13 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Run migration 005 for in-database vector storage (WP-2.1)
+	if currentVersion < 5 {
+		if err := s.runMigration005(); err != nil {
+			return fmt.Errorf("run migration 005: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -489,6 +496,78 @@ func (s *Store) runMigration004() error {
 
 	// Record migration
 	_, err = tx.Exec("INSERT INTO migrations (version) VALUES (4)")
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// runMigration005 adds in-database vector storage (WP-2.1).
+//
+// Vectors live in the same SQLite file as FTS5 and the chunk metadata so that a
+// single transaction can write chunk text, its embedding, and its metadata
+// atomically. Embeddings are stored as little-endian float32 BLOBs alongside a
+// precomputed L2 norm, which turns cosine similarity into a dot product divided
+// by two scalars at query time.
+//
+// The foreign keys carry ON DELETE CASCADE, so deleting a chunk or an entity
+// reclaims its vector automatically -- the deletion path does not need to know
+// that vectors exist.
+func (s *Store) runMigration005() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	// Chunk embeddings, one row per chunk.
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS kb_vectors (
+			chunk_id    TEXT PRIMARY KEY REFERENCES kb_chunks(chunk_id) ON DELETE CASCADE,
+			document_id TEXT NOT NULL,
+			source_id   TEXT NOT NULL DEFAULT '',
+			dim         INTEGER NOT NULL,
+			norm        REAL NOT NULL,
+			embedding   BLOB NOT NULL,
+			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Entity embeddings for KAG semantic entity search.
+	_, err = tx.Exec(`
+		CREATE TABLE IF NOT EXISTS kb_entity_vectors (
+			entity_id   TEXT PRIMARY KEY REFERENCES kb_entities(entity_id) ON DELETE CASCADE,
+			name        TEXT NOT NULL DEFAULT '',
+			entity_type TEXT NOT NULL DEFAULT '',
+			description TEXT NOT NULL DEFAULT '',
+			source_ids  TEXT NOT NULL DEFAULT '',
+			confidence  REAL NOT NULL DEFAULT 0.0,
+			dim         INTEGER NOT NULL,
+			norm        REAL NOT NULL,
+			embedding   BLOB NOT NULL,
+			created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+		)
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Indexes for the filtered-scan and delete-by-* paths.
+	_, err = tx.Exec(`
+		CREATE INDEX IF NOT EXISTS idx_vectors_document ON kb_vectors(document_id);
+		CREATE INDEX IF NOT EXISTS idx_vectors_source ON kb_vectors(source_id);
+		CREATE INDEX IF NOT EXISTS idx_entity_vectors_type ON kb_entity_vectors(entity_type);
+	`)
+	if err != nil {
+		return err
+	}
+
+	// Record migration
+	_, err = tx.Exec("INSERT INTO migrations (version) VALUES (5)")
 	if err != nil {
 		return err
 	}

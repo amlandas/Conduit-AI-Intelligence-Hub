@@ -126,8 +126,8 @@ func calculateMatchScore(entity EntityResult, tokens []string) float64 {
 type KAGSearcher struct {
 	db               *sql.DB
 	graphStore       *FalkorDBStore
-	vectorStore      *VectorStore
-	embeddingService *EmbeddingService
+	entityVectors    EntityVectorIndex
+	embeddingService Embedder
 	logger           zerolog.Logger
 }
 
@@ -135,8 +135,8 @@ type KAGSearcher struct {
 type KAGSearcherConfig struct {
 	DB               *sql.DB
 	GraphStore       *FalkorDBStore
-	VectorStore      *VectorStore      // Optional: enables semantic entity search
-	EmbeddingService *EmbeddingService // Optional: enables semantic entity search
+	EntityVectors    EntityVectorIndex // Optional: enables semantic entity search
+	EmbeddingService Embedder          // Optional: enables semantic entity search
 }
 
 // NewKAGSearcher creates a new KAG searcher.
@@ -153,7 +153,7 @@ func NewKAGSearcherWithConfig(cfg KAGSearcherConfig) *KAGSearcher {
 	return &KAGSearcher{
 		db:               cfg.DB,
 		graphStore:       cfg.GraphStore,
-		vectorStore:      cfg.VectorStore,
+		entityVectors:    cfg.EntityVectors,
 		embeddingService: cfg.EmbeddingService,
 		logger:           observability.Logger("kb.kag_search"),
 	}
@@ -161,7 +161,7 @@ func NewKAGSearcherWithConfig(cfg KAGSearcherConfig) *KAGSearcher {
 
 // HasSemanticSearch returns true if semantic entity search is available.
 func (s *KAGSearcher) HasSemanticSearch() bool {
-	return s.vectorStore != nil && s.embeddingService != nil
+	return s.entityVectors != nil && s.embeddingService != nil
 }
 
 // KAGSearchRequest represents a KAG search request.
@@ -622,7 +622,7 @@ func (s *KAGSearcher) GetStats(ctx context.Context) (map[string]interface{}, err
 // Returns entities sorted by semantic similarity to the query.
 func (s *KAGSearcher) searchEntitiesSemantic(ctx context.Context, query string, limit int) ([]EntityResult, error) {
 	if !s.HasSemanticSearch() {
-		return nil, fmt.Errorf("semantic search not available: vectorStore or embeddingService not configured")
+		return nil, fmt.Errorf("semantic search not available: entity vector index or embedding service not configured")
 	}
 
 	// Generate query embedding
@@ -632,7 +632,7 @@ func (s *KAGSearcher) searchEntitiesSemantic(ctx context.Context, query string, 
 	}
 
 	// Search entity vectors
-	vectorResults, err := s.vectorStore.SearchEntities(ctx, queryVector, VectorEntitySearchOptions{
+	vectorResults, err := s.entityVectors.SearchEntities(ctx, queryVector, VectorEntitySearchOptions{
 		Limit:    limit,
 		MinScore: 0.0, // Return all results for RRF fusion
 	})
