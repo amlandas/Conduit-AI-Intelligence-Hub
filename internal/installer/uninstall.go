@@ -603,6 +603,7 @@ func (i *Installer) PrintUninstallInfo(info *UninstallInfo) {
 	fmt.Println("\nContainers:")
 	if info.ContainerRuntime != "" {
 		fmt.Printf("  Runtime: %s\n", info.ContainerRuntime)
+		// TODO(WP-3.2): remove with dead-stack teardown -- legacy container only.
 		if info.HasQdrantContainer {
 			status := "stopped"
 			if info.QdrantContainerRunning {
