@@ -1,5 +1,9 @@
 # KAG Implementation Quality Audit
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../CONTEXT.md) for v2.**
+>
+> A quality audit of the v1 FalkorDB-backed knowledge graph. Retained because its findings motivated demoting the graph to opt-in in Conduit 2.0.
+
 **Date**: January 2026
 **Auditor**: Claude Code (Autonomous)
 **Status**: PASSED

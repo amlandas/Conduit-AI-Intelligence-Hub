@@ -1,5 +1,9 @@
 # Knowledge-Augmented Generation (KAG) - Low-Level Design
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../CONTEXT.md) for v2.**
+>
+> The v1 knowledge graph low-level design, built on FalkorDB. Conduit 2.0 uses SQLite edge tables and a pattern-based extractor by default. See [ADMIN_GUIDE.md](ADMIN_GUIDE.md#the-knowledge-graph).
+
 **Version**: 1.0
 **Date**: January 2026
 **Status**: Implemented

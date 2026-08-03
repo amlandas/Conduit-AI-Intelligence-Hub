@@ -1,5 +1,9 @@
 # Conduit Design Document
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> This is the v1 system design: a background daemon, a container runtime, Qdrant for vectors and FalkorDB for the graph. None of those exist in Conduit 2.0, which is a single binary storing everything in one SQLite file. Retained for design lineage only.
+
 **Version**: 1.0.42
 **Status**: Production
 **Last Updated**: January 2026
@@ -649,9 +653,11 @@ sequenceDiagram
 | [HLD V0.5 — Secure Link](HLD-V0.5-Secure-Link.md) | Deferred remote access features |
 | [HLD V1 — Desktop GUI](HLD-V1-Desktop-GUI.md) | GUI layer implementation |
 | [Implementation Status](IMPLEMENTATION_STATUS.md) | Feature completion matrix |
-| [PROJECT_LEARNINGS.md](../PROJECT_LEARNINGS.md) | Detailed development journey |
 | [KB Search Architecture](../KB_SEARCH_HLD.md) | Search system deep dive |
 | [KAG Architecture](../KAG_HLD.md) | Knowledge graph design |
+
+For Conduit 2.0, see [CONTEXT.md](../../CONTEXT.md) (architecture) and
+[CHANGELOG.md](../../CHANGELOG.md) (what changed and why).
 
 ---
 

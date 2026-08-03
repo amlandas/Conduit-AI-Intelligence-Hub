@@ -1,5 +1,9 @@
 # Knowledge Base Search - High-Level Design
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../CONTEXT.md) for v2.**
+>
+> The v1 search design: Qdrant for vectors, and weighted fusion with MMR and reranking. Conduit 2.0 stores vectors in SQLite and uses RRF as its only fusion method; the MMR, rerank and semantic-weight options were removed because the engine did not honour them (issue #69). See [ADMIN_GUIDE.md](ADMIN_GUIDE.md#retrieval).
+
 **Version**: 1.0
 **Date**: January 2026
 **Status**: Implemented

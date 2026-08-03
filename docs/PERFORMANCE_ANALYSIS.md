@@ -1,5 +1,9 @@
 # Conduit Performance Analysis: Timeout & Latency Configuration
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../CONTEXT.md) for v2.**
+>
+> Performance analysis of the v1 stack, whose hot path crossed a daemon socket and a Qdrant container. Conduit 2.0's retrieval characteristics are different in kind; see [ADMIN_GUIDE.md](ADMIN_GUIDE.md#performance).
+
 **Version**: 1.0
 **Date**: January 2026
 **Status**: Analysis Complete, Implementation Pending

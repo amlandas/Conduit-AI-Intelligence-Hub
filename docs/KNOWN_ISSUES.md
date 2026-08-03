@@ -1,26 +1,53 @@
-# Known Issues and Workarounds
+# Known Issues and Limitations
 
-This document lists known issues in Conduit along with their workarounds.
+Security advisories, and an honest list of what Conduit 2.0 does not do.
+
+**Last Updated**: August 2026 (Conduit 2.0.0-beta)
 
 ---
 
-## SEC-001: Knowledge Base Data Stores Exposed to the Local Network (SECURITY)
+## Contents
+
+- [Security advisories](#security-advisories) — SEC-001, SEC-002, SEC-003
+- [Conduit 2.0 limitations](#conduit-20-limitations)
+- [Historical: Conduit 1.x issues](#historical-conduit-1x-issues)
+- [Reporting new issues](#reporting-new-issues)
+
+---
+
+## Security advisories
+
+### SEC-001: Knowledge Base Data Stores Exposed to the Local Network
 
 **Severity**: High
-**Affects**: All releases up to and including v1.0.42 / desktop v0.1.43
-**Status**: Fixed in source (2026-07); existing installs must apply the workaround below
+**Affects**: All Conduit 1.x releases up to and including v1.0.42 / desktop v0.1.43
+**Status**: **Not applicable to Conduit 2.0** — resolved by removal. Existing 1.x installs must act.
 
-### Description
+#### Description
 
 The Qdrant (ports 6333/6334) and FalkorDB (port 6379) containers created by the
-installer, the CLI, and the daemon publish their ports on **all network
-interfaces** (`0.0.0.0`), and neither service is configured with
-authentication. Any device on the same network can read, modify, or delete the
-entire vector store and knowledge graph, bypassing the daemon's Unix-socket
-security and policy engine. The Qdrant HTTP API is additionally reachable from
-malicious webpages via DNS rebinding.
+v1 installer, CLI and daemon publish their ports on **all network interfaces**
+(`0.0.0.0`), and neither service is configured with authentication. Any device
+on the same network can read, modify, or delete the entire vector store and
+knowledge graph, bypassing the daemon's Unix-socket security and policy engine.
+The Qdrant HTTP API is additionally reachable from malicious webpages via DNS
+rebinding.
 
-### Workaround (existing installs)
+#### Resolution in Conduit 2.0
+
+There are no containers and no network listeners. Vectors and the graph live in
+the knowledge base SQLite file. The only local service is the optional
+embedding sidecar, which binds to `127.0.0.1` on a port Conduit picks and shuts
+down after an idle timeout.
+
+**The recommended fix is to move to 2.0 and tear the v1 stack down:**
+
+```bash
+./scripts/remove-v1.sh          # dry run — reports, changes nothing
+./scripts/remove-v1.sh --yes    # remove daemon + containers, keep all data
+```
+
+#### Workaround (if you must stay on 1.x)
 
 Recreate the containers with loopback-only bindings:
 
@@ -44,171 +71,240 @@ volumes are unchanged. Verify with `docker ps`: the port column should show
 
 ---
 
-## SEC-002: Desktop App (Electron GUI) Is Unsupported — Do Not Use (SECURITY)
+### SEC-002: Desktop App (Electron GUI) Is Unsupported — Do Not Use
 
 **Severity**: High
 **Affects**: All desktop releases (v0.1.0–v0.1.43)
-**Status**: Development halted; no fix planned
+**Status**: Development halted; no fix planned, ever
 
-### Description
+#### Description
 
 Desktop GUI development is halted. The published DMGs are unsigned, run an
 end-of-life Electron/Chromium version with years of unpatched CVEs, and contain
 an IPC handler (`terminal:spawn`) that allows the renderer process to execute
-arbitrary shell commands, meaning any renderer compromise leads to code
+arbitrary shell commands — meaning any renderer compromise leads to code
 execution as the user.
 
-### Workaround
+**This advisory still applies.** The DMGs remain downloadable from the releases
+page and will never be patched. Conduit 2.0 has no GUI and no replacement is
+planned.
 
-Uninstall the desktop app and use the CLI, which is the source of truth for all
-functionality:
+#### Workaround
+
+Delete it and use the CLI, which together with the MCP server is the supported
+interface:
 
 ```bash
 rm -rf /Applications/Conduit.app
 ```
 
-All features remain available via `conduit` commands (see docs/CLI reference).
+The source is retained frozen at `apps/conduit-desktop/` for historical
+reference only. Do not build or ship it.
 
 ---
 
-## SEC-003: Indexed Documents Flow Verbatim to AI Clients (Prompt-Injection Caveat)
+### SEC-003: Indexed Documents Flow Verbatim to AI Clients (Prompt Injection)
 
 **Severity**: Informational (by design)
-**Affects**: All versions
-**Status**: Documented behavior
+**Affects**: All versions, including 2.0
+**Status**: Documented behaviour, not a defect
 
-### Description
+#### Description
 
-By design ("no LLM in the hot path"), MCP search tools return raw chunks of
-your indexed documents directly to the connected AI client. If you index
-untrusted content (third-party PDFs, scraped pages, shared docs), instructions
-embedded in that content will reach your AI assistant as tool output and may
-influence its behavior (prompt injection). Conduit sanitizes input to its own
+By design ("no LLM in the hot path"), Conduit's MCP search tools return raw
+chunks of your indexed documents directly to the connected AI client. That is
+what makes retrieval fast, private and predictable — no model sits between your
+documents and the answer.
+
+It also means **an indexed document is a prompt-injection vector.** If you index
+untrusted content (third-party PDFs, scraped pages, shared drives, a
+dependency's documentation), instructions embedded in that content will reach
+your AI assistant as tool output and may influence its behaviour, including its
+use of other tools available to it. Conduit sanitizes input to its own
 entity-extraction pipeline, but does not — and cannot meaningfully — sanitize
 what your AI client chooses to trust.
 
-### Recommendation
+#### Recommendation
 
-Only index content you trust, treat KB search results in agent transcripts
-with the same skepticism as web content, and prefer AI clients that attribute
-tool output distinctly from user instructions.
-
----
-
-## KB-001: Silent Fallback to FTS When Qdrant Fails
-
-**Severity**: Medium
-**Affects**: v0.1.41 and earlier
-**Status**: Mitigated in v0.1.42+
-**GitHub Issue**: [#41](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/41)
-
-### Description
-
-When Qdrant is unavailable or experiencing errors during `conduit kb sync`, the system silently falls back to FTS5 (keyword-only) indexing. Users are not warned that semantic search is degraded, and the sync reports success.
-
-This can happen when:
-- Qdrant container has storage mount issues (directories created after container start)
-- Qdrant is temporarily unavailable
-- Ollama embedding model fails
-
-### How to Detect
-
-Run `conduit status` and check the Vector Database line:
-
-```bash
-conduit status
-```
-
-If you see:
-```
-Vector Database: ✓ Qdrant (missing, 0 vectors)
-```
-
-This indicates FTS5 is working but Qdrant has 0 vectors - semantic search is not functional.
-
-### Workaround
-
-**Step 1**: Diagnose the issue
-```bash
-conduit doctor
-```
-
-**Step 2**: Restart Qdrant (fixes most container issues)
-```bash
-conduit qdrant stop
-conduit qdrant start
-```
-
-**Step 3**: Rebuild vectors for all sources
-```bash
-conduit kb sync --rebuild-vectors
-```
-
-Or for a specific source:
-```bash
-conduit kb sync <source-id> --rebuild-vectors
-```
-
-**Step 4**: Verify vectors were created
-```bash
-conduit status
-```
-
-You should see non-zero vector count:
-```
-Vector Database: ✓ Qdrant (running, 195 vectors)
-```
-
-### Mitigation in v0.1.42+
-
-- Exit code 2 returned when sync completes with semantic indexing failures
-- Clear warning message with remediation steps
-- `--rebuild-vectors` flag to force re-indexing
+- Index content you trust. Treat adding a source as a trust decision, like
+  installing a dependency.
+- Use `--db` to keep untrusted corpora in a knowledge base separate from the
+  one your coding agent has open.
+- Keep `policy.forbidden_paths` tight — it is the one automated control here,
+  and it is enforced on `conduit kb add` after symlink resolution.
+- Treat KB search results in agent transcripts with the same skepticism as
+  fetched web content.
+- Prefer AI clients that visually attribute tool output distinctly from user
+  instructions.
 
 ---
 
-## KB-002: Container Storage Mount Issues
+## Conduit 2.0 limitations
 
-**Severity**: Low
-**Affects**: First-time installations
-**Status**: Documented workaround
+Things Conduit 2.0 genuinely does not do. None of these are secretly fine.
 
-### Description
+### Platform support: no Windows
 
-When Qdrant or FalkorDB containers are installed, they may fail to initialize storage properly if the data directories were created after the container started.
+**Status**: Deliberate scope decision, not an oversight.
 
-The daemon logs will show errors like:
-```
-Can't create directory for collection conduit_kb. Error: failed to create directory `./storage/collections/conduit_kb`: No such file or directory
-```
+macOS arm64 (Apple Silicon) and Linux x86_64 are supported and have published
+binaries. Intel Macs and Linux arm64 can build from source; there are no
+published binaries for them.
 
-### Workaround
+Windows is not supported. `scripts/install-windows.ps1` exists only to say so
+rather than leaving a plausible-looking installer that wastes your time. The
+specific gaps:
 
-Restart the affected container:
+- The embedding sidecar is supervised with POSIX process groups and `flock`
+  (`internal/embed/sysutil_unix.go`). The Windows half of that file is a stub
+  that has never been exercised.
+- Data directory, executable discovery and config location conventions all
+  differ.
+- There is no signed Windows artifact.
 
-```bash
-# For Qdrant
-conduit qdrant stop
-conduit qdrant start
+**Workaround**: WSL2, treated as Linux.
 
-# For FalkorDB
-conduit falkordb stop
-conduit falkordb start
-```
+### Binaries are unsigned and un-notarized
 
-The container will properly mount the storage volumes on restart.
+**Status**: Open. No timeline.
+
+Published binaries are not code-signed on any platform and are not notarized on
+macOS. Gatekeeper will object to a downloaded binary, and you will have to
+clear it manually.
+
+Building from source (`./scripts/install.sh --from-source`) sidesteps this
+entirely and is the recommended path until signing exists.
+
+Note the asymmetry: **embedding models are hash-verified but the binary that
+verifies them is not signed.** Model integrity is enforced; binary provenance
+is not.
+
+### Unfiltered search latency on large corpora and slower machines
+
+**Status**: Known characteristic of the design. Watch it; do not be surprised
+by it.
+
+Vector search is an exact brute-force cosine scan rather than an approximate
+index. Cost grows **linearly** with the number of chunks.
+
+At the design target — roughly 5–50K chunks at 768 dimensions — a scan costs
+tens of milliseconds, well inside budget. But that figure comes from
+benchmarking on developer-grade hardware
+(`.eng-lead-kb/BENCH-WP-2.1.md`). **An unfiltered query against a corpus at the
+top of that range, on a slower machine, is the case where p95 latency becomes
+noticeable.**
+
+Mitigations, in order of effectiveness:
+
+- Filter by source. Filters are SQL predicates evaluated *before* the distance
+  computation, so a selective filter cuts scan cost proportionally. This is the
+  main reason the design chose exactness over an approximate index.
+- Split unrelated corpora across separate `--db` files.
+- Use `kb_lexical_search` / `--fts5` for exact-identifier lookups; FTS5 is
+  indexed and does not scan.
+
+Beyond ~50K chunks, expect to feel it. An approximate index has not been added
+because it would trade away the exact-filtering guarantee, and no evidence yet
+says that trade is worth making.
+
+### The fallback ladder's level-2 rung is a deletion candidate
+
+**Status**: Under review for removal.
+
+Search never returns zero results: it relaxes the query in stages. The ladder
+has four rungs (0 primary, 1 relaxed, 2 partial, 3 none).
+
+After the [#73](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/73)
+fix, the relaxed rung already covers the union of single-term searches. Level 2
+(`searchPartial`) is therefore reachable only when the relaxed rung fails
+outright, rather than merely matching nothing — a much narrower case than it
+was written for.
+
+It is retained for now because deleting a safety net on the strength of an
+argument rather than evidence is how v1 accumulated features nobody could
+justify. It is flagged here so its eventual removal is not a surprise.
+
+### Knowledge graph value is unproven
+
+**Status**: Deliberately gated on evidence.
+
+KAG is off by default (`kb.kag.enabled: false`). The default extraction
+provider is `pattern` — no LLM, no network — and it is modest in what it finds.
+
+Whether multi-hop graph retrieval earns its complexity is an open question. The
+project measures it with the local query-shape log rather than guessing (see
+the [Admin Guide](ADMIN_GUIDE.md#the-query-shape-log)). Do not build on KAG
+expecting it to grow; it may be removed.
+
+### Semantic search requires two things Conduit does not bundle
+
+A `llama-server` binary and a model file. Neither ships with Conduit. Without
+them, search runs on FTS5 keyword matching — a supported mode, not a broken
+install. Set `embed.provider: none` to make that explicit and silence the
+probe.
+
+### No data migration from Conduit 1.x
+
+A v1 knowledge base cannot be read by v2, and no converter exists or is planned.
+Re-add your sources and re-index. Source documents are untouched; only derived
+data is rebuilt.
+
+### Open issues
+
+Additional tracked work, including issues
+[#85](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/85),
+[#86](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/86) and
+[#87](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/87), is
+tracked on the
+[issue tracker](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues).
+Check there for current status rather than relying on this file.
 
 ---
 
-## Reporting New Issues
+## Historical: Conduit 1.x issues
+
+> **HISTORICAL — these describe Conduit 1.x, retired August 2026.** They are
+> retained because 1.x installs still exist in the wild. Neither applies to
+> Conduit 2.0, which has no containers, no Qdrant and no FalkorDB.
+
+### KB-001: Silent Fallback to FTS When Qdrant Fails
+
+**Affects**: v0.1.41 and earlier · **Status**: Mitigated in v0.1.42+ ·
+**Issue**: [#41](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/41)
+
+When Qdrant was unavailable during `conduit kb sync`, the system silently fell
+back to FTS5-only indexing and reported success, leaving semantic search
+degraded with no warning.
+
+Mitigated in v0.1.42+ by exit code 2 on partial success, a warning with
+remediation steps, and the `--rebuild-vectors` flag. On 1.x, diagnose with
+`conduit status` (a `0 vectors` reading means FTS5 works but semantic search
+does not), restart Qdrant, then `conduit kb sync --rebuild-vectors`.
+
+Conduit 2.0 keeps the honest exit code and drops the cause: there is no Qdrant
+to fail.
+
+### KB-002: Container Storage Mount Issues
+
+**Affects**: First-time 1.x installations · **Status**: Documented workaround
+
+Qdrant or FalkorDB containers could fail to initialise storage when data
+directories were created after the container started, logging
+`Can't create directory for collection conduit_kb`. Restarting the affected
+container remounted the volumes correctly.
+
+Conduit 2.0 has no containers.
+
+---
+
+## Reporting new issues
 
 If you encounter an issue not listed here:
 
 1. Check the [GitHub Issues](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues) for existing reports
-2. Run `conduit doctor` and include the output in your report
-3. Include relevant daemon logs: `conduit daemon logs`
+2. Run `conduit doctor` and include the output (`--json` is fine)
+3. Include `conduit version` and `conduit status`
 4. Create a new issue with reproduction steps
 
----
-
-**Last Updated**: January 2026
+For MCP integration problems, set `mcp.kb.logging.to_stderr: true` and include
+the server log from your AI client.

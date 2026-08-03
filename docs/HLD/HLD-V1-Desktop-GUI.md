@@ -1,5 +1,9 @@
 # High-Level Design V1 — Desktop GUI & Intelligence Hub
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> Describes the Electron desktop GUI, which was frozen in July 2026 and is unsupported. See SEC-002 in [docs/KNOWN_ISSUES.md](../KNOWN_ISSUES.md) before running any published build.
+
 **Version**: 1.0.42 (Updated)
 **Status**: SUBSTANTIALLY IMPLEMENTED
 **Last Updated**: January 2026

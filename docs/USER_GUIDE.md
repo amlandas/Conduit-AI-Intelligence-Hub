@@ -1,1066 +1,657 @@
 # Conduit User Guide
 
-**Version**: 0.1.0
-**Last Updated**: December 2025
+**Version**: 2.0.0-beta
+**Last Updated**: August 2026
 
 ---
 
-## Table of Contents
+## Contents
 
-1. [Introduction](#introduction)
+1. [The mental model](#the-mental-model)
 2. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [Service Management](#service-management)
-5. [Managing Connectors](#managing-connectors)
-6. [Binding to AI Clients](#binding-to-ai-clients)
-7. [Knowledge Base](#knowledge-base)
-8. [Security & Permissions](#security--permissions)
-9. [Troubleshooting](#troubleshooting)
-10. [Command Reference](#command-reference)
+3. [Quick start](#quick-start)
+4. [Managing sources](#managing-sources)
+5. [Searching](#searching)
+6. [Connecting AI clients](#connecting-ai-clients)
+7. [The embedding model](#the-embedding-model)
+8. [Workspaces](#workspaces)
+9. [The knowledge graph (optional)](#the-knowledge-graph-optional)
+10. [Checking on things](#checking-on-things)
+11. [Backup](#backup)
+12. [Privacy and safety](#privacy-and-safety)
+13. [Troubleshooting](#troubleshooting)
+14. [Command reference](#command-reference)
 
 ---
 
-## Introduction
+## The mental model
 
-### What is Conduit?
+Conduit is **one binary**. There is no service to start, nothing running in the
+background, and nothing that starts at login.
 
-Conduit is a local-first AI intelligence hub that connects your AI coding assistants (Claude Code, Cursor, VS Code, Gemini CLI) to external tools through MCP (Model Context Protocol) servers. Think of it as a secure bridge between your AI tools and the services they need to access.
+Every command opens one SQLite file, does its work, and exits. That file —
+`~/.conduit/conduit.db` by default — holds everything: the keyword index, the
+vectors, your document metadata, and optionally a graph. Backing up Conduit
+means copying one file.
 
-### Why Use Conduit?
+You point Conduit at folders. It reads the files, splits them into chunks, and
+indexes them. Then you point an AI client at `conduit mcp kb`, and the
+assistant gets a set of search tools it can call while answering you.
 
-- **Security First**: All connectors run in isolated containers with minimal permissions
-- **Unified Management**: Manage all your MCP servers from one place
-- **Knowledge Base**: Index your documents for AI-powered search
-- **Multi-Client Support**: Works with Claude Code, Cursor, VS Code, and Gemini CLI
-- **Local First**: Your data stays on your machine
-
-### Key Concepts
-
-| Term | Description |
-|------|-------------|
-| **Connector** | An MCP server packaged in a container |
-| **Instance** | A running copy of a connector |
-| **Binding** | Connection between a connector and an AI client |
-| **Knowledge Base** | Indexed documents for AI search |
+Nothing is uploaded. The only time Conduit uses the network is to download
+itself and to download the embedding model.
 
 ---
 
 ## Installation
 
-### One-Click Installation (Recommended)
+See [INSTALL_V2.md](INSTALL_V2.md) for the full guide, including release-binary
+installs, upgrades, and moving from Conduit 1.x.
 
-Install Conduit with a single command:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
-```
-
-The installer automatically:
-- Detects your operating system and architecture
-- Installs missing dependencies (Go, Git, Docker/Podman, Ollama)
-- Installs document extraction tools (pdftotext, antiword, unrtf)
-- Builds and installs Conduit binaries
-- Sets up the daemon as a background service
-- Downloads the default AI model (qwen2.5-coder:7b)
-- Verifies the installation
-
-**Installation Options**:
+The short version:
 
 ```bash
-# Custom install location
-curl -fsSL ... | bash -s -- --install-dir ~/.local/bin
-
-# Skip daemon service setup
-curl -fsSL ... | bash -s -- --no-service
-
-# Verbose output
-curl -fsSL ... | bash -s -- --verbose
-
-# Skip AI model download
-curl -fsSL ... | bash -s -- --skip-model
-```
-
-After installation, add the install location to your PATH if prompted.
-
-### Manual Installation
-
-If you prefer manual installation or the automated installer doesn't work:
-
-```bash
-# Clone the repository
-git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git
+git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub
 cd Conduit-AI-Intelligence-Hub
-
-# Build the binaries
-make build
-
-# Install to PATH
-sudo cp bin/conduit bin/conduit-daemon /usr/local/bin/
-
-# Install runtime dependencies
-conduit install-deps
-
-# Set up daemon service
-conduit service install
-conduit service start
+./scripts/install.sh --from-source
 ```
 
-**Building without Make**:
-```bash
-mkdir -p bin
-go build -tags "fts5" -o bin/conduit ./cmd/conduit
-go build -tags "fts5" -o bin/conduit-daemon ./cmd/conduit-daemon
-```
-
-### Verify Installation
-
-```bash
-# Check status
-conduit status
-
-# Run diagnostics
-conduit doctor
-```
-
-### Uninstalling
-
-To completely remove Conduit and optionally its dependencies:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
-```
-
-The uninstall script will interactively ask you about each component:
-- Stop and remove the daemon service
-- Remove Conduit binaries
-- Remove data directory (`~/.conduit`)
-- Clean up shell configuration (PATH entries)
-- Optionally remove Docker/Podman
-- Optionally remove Ollama and AI models
-- Optionally remove Go
-
-**Uninstall Options:**
-```bash
-# Skip all confirmations
-curl -fsSL ... | bash -s -- --force
-
-# Remove everything automatically
-curl -fsSL ... | bash -s -- --remove-all
-
-# Specify custom paths
-bash uninstall.sh --install-dir ~/.local/bin --conduit-home ~/.conduit
-```
-
-The script gracefully handles errors and continues with remaining components. Backups of shell configurations are created with `.conduit-backup` extension
+> **Coming from Conduit 1.x?** Installing v2 does not remove the v1 daemon or
+> its containers. Run `./scripts/remove-v1.sh` (dry run by default) first, and
+> read the security advisories in [KNOWN_ISSUES.md](KNOWN_ISSUES.md). There is
+> no data migration — you re-add your sources and re-index.
 
 ---
 
-## Quick Start
-
-After installation, Conduit is ready to use. The daemon starts automatically as a background service.
-
-### Step 1: Verify Installation
+## Quick start
 
 ```bash
-# Check Conduit status
-conduit status
-
-# Run diagnostics
-conduit doctor
-```
-
-Expected output:
-```
-Daemon Status: Running
-Socket: /Users/you/.conduit/conduit.sock
-Uptime: 5m30s
-Instances: 0 running, 0 total
-```
-
-### Step 2: Run Setup Wizard (Optional)
-
-If you want to reconfigure or add more options:
-
-```bash
+# 1. Prepare the machine and configure Claude Code
 conduit setup
+
+# 2. Get the embedding model (optional; enables semantic search)
+conduit model download
+
+# 3. Add a folder
+conduit kb add ./docs --name "Project Docs"
+
+# 4. Index it
+conduit kb sync
+
+# 5. Try it
+conduit kb search "how does authentication work"
 ```
 
-The setup wizard will guide you through:
-- Checking dependencies
-- Setting up the daemon service
-- Configuring AI clients
+Then restart your AI client. Ask it something answerable from your documents
+and it will call the search tools.
 
-### Step 3: Install Your First Connector
+---
+
+## Managing sources
+
+A *source* is a folder Conduit indexes.
+
+### Adding
 
 ```bash
-# Install a filesystem connector (example)
-conduit install \
-  --package-id "mcp/filesystem" \
-  --name "My Files" \
-  --image "ghcr.io/mcp/filesystem:latest"
+conduit kb add ./docs --name "Project Docs"
+conduit kb add /path/to/notes --patterns "*.md,*.txt"
+conduit kb add ./src --excludes "node_modules,dist"
+conduit kb add ./docs --sync auto
 ```
 
-### Step 4: Start the Connector
+| Flag | Meaning |
+|---|---|
+| `--name` | Display name for the source |
+| `--patterns` | File patterns to index, comma-separated |
+| `--excludes` | Directories to exclude, comma-separated |
+| `--sync` | `manual` (default) or `auto` |
+| `--json` | Machine-readable output |
+
+**Default patterns.** With no `--patterns`, Conduit indexes documentation
+(`*.md`, `*.txt`, `*.rst`), source code (`*.go`, `*.py`, `*.js`, `*.ts`,
+`*.java`, `*.rs`, `*.rb`, `*.c`, `*.cpp`, `*.h`, `*.hpp`, `*.cs`, `*.swift`,
+`*.kt`, and shell/batch scripts), config (`*.json`, `*.yaml`, `*.yml`, `*.xml`,
+`*.jsonld`, `*.toml`, `*.ini`, `*.cfg`), data (`*.csv`, `*.tsv`), and documents
+(`*.pdf`, `*.doc`, `*.docx`, `*.odt`, `*.rtf`).
+
+PDF and office formats need external extraction tools; `conduit setup` offers
+to install them, and `conduit doctor` tells you if they are missing.
+
+**Default excludes.** `node_modules`, `.git`, `.svn`, `.hg`, `__pycache__`,
+`.pytest_cache`, `vendor`, `dist`, `build`, `target`, `.DS_Store`,
+`Thumbs.db`.
+
+**Paths Conduit will refuse.** Some directories are blocked outright because
+indexing them would copy secrets into a searchable database that the MCP server
+hands to AI clients. By default: `/`, `/etc`, `/var`, `/usr`, `~/.ssh`,
+`~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `~/.kube`. Symlinks are resolved
+first, so you cannot get around it with a link.
+
+Others warn but proceed: `~/.config`, `~/Documents`, `~/Desktop`.
+
+Both lists are configuration (`policy.forbidden_paths`, `policy.warn_paths`)
+and you can edit them — see the [Admin Guide](ADMIN_GUIDE.md).
+
+### Listing and removing
 
 ```bash
-# List instances
-conduit list
-
-# Start the instance
-conduit start <instance-id>
+conduit kb list                    # alias: conduit kb ls
+conduit kb list --json
+conduit kb remove "Project Docs"
+conduit kb remove test --force
 ```
 
-### Step 5: Bind to Claude Code
+### Indexing
 
 ```bash
-# List detected clients
-conduit client list
+conduit kb sync                      # sync all sources
+conduit kb sync <source-id>          # sync one source
+conduit kb sync --rebuild-vectors    # force rebuild of the vector index
+```
 
-# Bind the connector to Claude Code
-conduit client bind <instance-id> --client claude-code
+**Exit codes matter here.** `kb sync` tells you the truth rather than reporting
+success for work that did not happen:
+
+| Code | Meaning |
+|---|---|
+| 0 | Full success — keyword and semantic indexing both completed |
+| 1 | Error — the sync failed |
+| 2 | **Partial success** — keyword indexing worked, semantic indexing failed |
+
+Exit code 2 means search still works, but only on keywords. Run
+`conduit doctor` to find out why the embedding step failed.
+
+If you enabled semantic search *after* indexing documents, existing documents
+have no vectors. Backfill them:
+
+```bash
+conduit kb migrate
+```
+
+This requires an embedding provider and fails when `embed.provider` is `none`.
+
+---
+
+## Searching
+
+```bash
+conduit kb search "how does authentication work"
+```
+
+### How it works
+
+Every query runs twice — once against the FTS5 keyword index, once against the
+vector index — and the two ranked lists are combined with Reciprocal Rank
+Fusion (RRF). Keyword search finds the exact identifier you typed; vector
+search finds the paragraph that means the same thing in other words. RRF is the
+only fusion method, so results are deterministic: the same query against the
+same index returns the same ranking every time.
+
+Hybrid mode adapts to what you typed. Quoted phrases push toward exact lexical
+matching; proper nouns boost exact matches; natural-language questions balance
+the two.
+
+### Modes
+
+```bash
+conduit kb search "authentication"                  # hybrid (default)
+conduit kb search "authentication" --semantic       # vectors only
+conduit kb search "class AuthProvider" --fts5       # keywords only
+```
+
+`--semantic` needs an embedding provider. `--fts5` always works.
+
+### Tuning
+
+```bash
+conduit kb search "ASL-3 safeguards" --recall high        # widen recall
+conduit kb search "authentication" --recall precise       # fewer, more distinct
+conduit kb search "AI safety" --semantic --min-score 0.0  # pure semantic, no floor
+```
+
+| Flag | Meaning |
+|---|---|
+| `--recall` | `high`, `balanced` (default), or `precise` |
+| `--min-score` | Minimum similarity for `--semantic` (0.0–1.0) |
+| `--limit` | Maximum results (default 10) |
+| `--context` | Include N adjacent chunks around each hit |
+| `--raw` | Raw chunks, skipping merge and boilerplate filtering |
+| `--json` | Machine-readable output |
+
+`--recall high` disables diversity filtering and keeps everything similar;
+`precise` deduplicates aggressively. If a search feels like it is hiding
+results, try `--recall high` first.
+
+By default results are processed: chunks from the same document are merged and
+boilerplate is filtered. `--raw` turns that off.
+
+### Search always returns something
+
+If your query matches nothing directly, Conduit relaxes it in stages rather
+than handing back an empty list. Results from a relaxed stage are still real
+matches, just for a looser interpretation of what you asked.
+
+---
+
+## Connecting AI clients
+
+### The easy way
+
+```bash
+conduit setup                            # configures Claude Code by default
+conduit setup --client cursor
+conduit mcp configure                    # just the MCP step
+conduit mcp configure --client vscode
+conduit mcp configure --check            # is it already configured?
+conduit mcp configure --force            # overwrite existing config
+```
+
+Supported clients:
+
+| Client | Config file |
+|---|---|
+| `claude-code` (default) | `~/.claude.json` |
+| `cursor` | `.cursor/settings/extensions.json` |
+| `vscode` | `.vscode/settings.json` |
+
+Restart the client afterwards.
+
+### By hand
+
+The server runs over stdio:
+
+```json
+{
+  "mcpServers": {
+    "conduit-kb": {
+      "command": "conduit",
+      "args": ["mcp", "kb"]
+    }
+  }
+}
+```
+
+To point a client at a specific knowledge base, add `--db`:
+
+```json
+{
+  "mcpServers": {
+    "conduit-work": {
+      "command": "conduit",
+      "args": ["--db", "/Users/you/work.db", "mcp", "kb"]
+    }
+  }
+}
+```
+
+### What the AI can do
+
+Seven tools:
+
+| Tool | What it does |
+|---|---|
+| `kb_search` | Hybrid search (keyword + semantic, RRF-fused). The default. |
+| `kb_lexical_search` | Pure FTS5/BM25 keyword search — no vectors, no fusion, no filtering. The grep of the knowledge base. Best for hunting an exact identifier, error string, symbol or config key, and for iterative refinement loops. |
+| `kb_search_with_context` | Merged, boilerplate-filtered, citation-ready passages. Best when the assistant is going to quote sources. |
+| `kb_list_sources` | Sources with IDs, paths, document counts, sync status. |
+| `kb_get_document` | Full content of one document by ID. |
+| `kb_stats` | Source, document and chunk counts; search capability status. |
+| `kag_query` | Entities and relationships from the knowledge graph (if enabled). |
+
+You rarely need to name these — a well-behaved client picks the right one. If
+your assistant is struggling to find something you know is indexed, asking it
+to "use the lexical search tool for the exact string X" usually works.
+
+### Checking the connection
+
+```bash
+conduit mcp status
+conduit mcp status --json
 ```
 
 ---
 
-## Service Management
+## The embedding model
 
-Conduit runs as a background daemon service. On macOS, it uses launchd; on Linux, it uses systemd.
-
-### Service Commands
+Semantic search needs a model. Without one, Conduit runs on keyword search
+alone — **a supported mode, not a broken install.**
 
 ```bash
-# Check daemon status
-conduit service status
-
-# Stop the daemon
-conduit service stop
-
-# Start the daemon
-conduit service start
-
-# Reinstall the service (if needed)
-conduit service remove
-conduit service install
+conduit model list        # what's available and what's downloaded
+conduit model download    # fetch the configured (or default) model
+conduit model verify      # re-hash a local file against the registry pin
+conduit model path        # where a model lives on disk
 ```
 
-### Manual Daemon Control
+Available models:
 
-For development or troubleshooting, you can run the daemon manually:
+| Model | Dimensions | Context | Size |
+|---|---|---|---|
+| `nomic-embed-text-v1.5` (default) | 768 | 2048 tokens | 261.6 MB |
+| `mxbai-embed-large-v1` | 1024 | 512 tokens | 638.6 MB |
+| `qwen3-embedding-0.6b` | 1024 | 32768 tokens | 609.5 MB |
+
+All Apache-2.0.
 
 ```bash
-# Run in foreground with debug logging
-conduit-daemon --foreground --log-level=debug
+conduit model download qwen3-embedding-0.6b
+conduit model download --force              # re-fetch even if valid
+conduit model download --timeout 30m
 ```
 
-### Service Locations
+Every model is pinned to an exact file in an exact repository with an exact
+SHA-256. The download goes to a temporary name and is only renamed into place
+once the hash matches; a mismatch deletes it and fails. There is no flag to
+install an unverified model. Re-running `download` is safe and idempotent.
 
-| Platform | Service File |
-|----------|-------------|
-| macOS | `~/Library/LaunchAgents/dev.simpleflo.conduit.plist` |
-| Linux | `~/.config/systemd/user/conduit.service` |
-
-### Viewing Logs
+**Changing models changes vector dimensions.** After switching, rebuild:
 
 ```bash
-# macOS
-cat ~/Library/Logs/conduit/conduit.log
-
-# Linux (systemd)
-journalctl --user -u conduit -f
+conduit kb sync --rebuild-vectors
 ```
 
 ---
 
-## Managing Connectors
+## Workspaces
 
-### Installing a Connector
-
-```bash
-./bin/conduit install \
-  --package-id "vendor/connector-name" \
-  --name "Display Name" \
-  --image "registry/image:tag" \
-  --config KEY=VALUE
-```
-
-**Options**:
-- `--package-id`: Unique identifier for the connector package
-- `--name`: Human-readable display name
-- `--image`: Container image reference
-- `--config`: Configuration key-value pairs (can be repeated)
-
-### Listing Connectors
+The global `--db` flag selects a knowledge base file. One binary, many
+independent knowledge bases that never see each other:
 
 ```bash
-# List all instances
-./bin/conduit list
+conduit --db ~/work.db kb add ./work-docs --name "Work"
+conduit --db ~/work.db kb sync
+conduit --db ~/work.db kb search "Q3 planning"
 
-# Output:
-# ID                                    NAME           STATUS     PACKAGE
-# a1b2c3d4-e5f6-7890-abcd-ef1234567890  My Files       RUNNING    mcp/filesystem
-# b2c3d4e5-f6a7-8901-bcde-f12345678901  GitHub Tools   STOPPED    mcp/github
+conduit --db ~/personal.db kb add ~/notes --name "Notes"
+conduit --db ~/personal.db kb search "sourdough"
 ```
 
-### Starting and Stopping
+This is the recommended way to keep untrusted or unrelated content away from
+the knowledge base your coding assistant has open. See
+[Privacy and safety](#privacy-and-safety).
 
-```bash
-# Start an instance
-./bin/conduit start <instance-id>
-
-# Stop an instance
-./bin/conduit stop <instance-id>
-```
-
-### Viewing Logs
-
-```bash
-# View recent logs
-./bin/conduit logs <instance-id>
-
-# Follow logs in real-time
-./bin/conduit logs <instance-id> --follow
-
-# Show last N lines
-./bin/conduit logs <instance-id> --lines 100
-```
-
-### Removing a Connector
-
-```bash
-# Remove an instance (stops if running)
-./bin/conduit remove <instance-id>
-
-# Force remove without confirmation
-./bin/conduit remove <instance-id> --force
-```
+A project directory can also carry its own `conduit.yaml`, which is read in
+preference to `~/.conduit/conduit.yaml`.
 
 ---
 
-## Binding to AI Clients
+## The knowledge graph (optional)
 
-### Supported Clients
+KAG extracts named entities and the relationships between them, for questions
+that need connecting two facts rather than finding one passage.
 
-| Client | Config Location | Status |
-|--------|-----------------|--------|
-| Claude Code | `~/.claude.json` | Supported |
-| Cursor | `~/.cursor/mcp.json` | Supported |
-| VS Code | `~/.vscode/mcp.json` | Supported |
-| Gemini CLI | `~/.gemini/mcp.json` | Supported |
-
-### Listing Detected Clients
+**It is off by default.** No graph tables exist in your database until you turn
+it on:
 
 ```bash
-./bin/conduit client list
-
-# Output:
-# CLIENT        INSTALLED    CONFIG PATH
-# claude-code   Yes          /Users/you/.claude.json
-# cursor        Yes          /Users/you/.cursor/mcp.json
-# vscode        No           -
-# gemini-cli    Yes          /Users/you/.gemini/mcp.json
-```
-
-### Creating a Binding
-
-```bash
-# Bind a connector to a client
-./bin/conduit client bind <instance-id> --client claude-code
-
-# Bind with specific scope
-./bin/conduit client bind <instance-id> --client cursor --scope project
-```
-
-**Scope Options**:
-- `user` (default): Available globally for the user
-- `project`: Available only in the current project
-- `workspace`: Available in the workspace
-
-### Viewing Bindings
-
-```bash
-# List all bindings for an instance
-./bin/conduit client bindings <instance-id>
-```
-
-### Removing a Binding
-
-```bash
-# Unbind from a client
-./bin/conduit client unbind <instance-id> --client claude-code
-```
-
-### What Happens During Binding?
-
-1. Conduit reads your AI client's config file
-2. Creates a backup of the original config
-3. Injects the MCP server configuration
-4. Validates the modified config
-5. Writes the updated config
-
-Your AI client will automatically detect the new MCP server.
-
----
-
-## Knowledge Base
-
-The Knowledge Base allows you to index documents for AI-powered search. It supports a wide variety of document formats.
-
-### Supported Document Formats
-
-| Category | Extensions |
-|----------|------------|
-| Text | `.md`, `.txt`, `.rst` |
-| Code | `.go`, `.py`, `.js`, `.ts`, `.java`, `.rs`, `.rb`, `.c`, `.cpp`, `.h`, `.hpp`, `.cs`, `.swift`, `.kt` |
-| Scripts | `.sh`, `.bash`, `.zsh`, `.fish`, `.ps1`, `.bat`, `.cmd` |
-| Config | `.json`, `.yaml`, `.yml`, `.xml`, `.jsonld`, `.toml`, `.ini`, `.cfg` |
-| Data | `.csv`, `.tsv` |
-| Documents | `.pdf`, `.doc`, `.docx`, `.odt`, `.rtf` |
-
-**Note**: PDF, DOC, and RTF files require external extraction tools (installed automatically). DOCX and ODT files are supported natively without external tools.
-
-### Installing Document Extraction Tools
-
-If document tools weren't installed during initial setup:
-
-```bash
-# Install document extraction tools
-conduit install --document-tools
-```
-
-### Adding a Document Source
-
-```bash
-# Add a directory as a source
-./bin/conduit kb add /path/to/docs --name "Project Docs"
-
-# Add with specific sync mode
-./bin/conduit kb add /path/to/docs --name "Project Docs" --sync manual
-```
-
-**Sync Modes**:
-- `manual`: Sync only when requested
-- `auto`: Sync periodically (future feature)
-
-### Listing Sources
-
-```bash
-./bin/conduit kb list
-
-# Output:
-# SOURCE ID                              NAME           PATH                    DOCUMENTS
-# abc123-def456-...                      Project Docs   /path/to/docs           42
-```
-
-### Syncing Documents
-
-```bash
-# Sync all sources
-./bin/conduit kb sync
-
-# Sync a specific source
-./bin/conduit kb sync <source-id>
-```
-
-### Searching
-
-Conduit supports three search modes:
-
-| Mode | Flag | Description |
-|------|------|-------------|
-| Hybrid (default) | none | Tries semantic first, falls back to keyword |
-| Semantic | `--semantic` | Vector-based search using AI embeddings |
-| Keyword | `--fts5` | Full-text keyword search using SQLite FTS5 |
-
-```bash
-# Hybrid search (default) - best of both worlds
-./bin/conduit kb search "how to configure authentication"
-
-# Semantic search - understands meaning, not just keywords
-./bin/conduit kb search "securing user login" --semantic
-
-# Keyword search - exact term matching
-./bin/conduit kb search "OAuth2 client" --fts5
-
-# Search with limit
-./bin/conduit kb search "API endpoints" --limit 10
-```
-
-### Advanced Search Options (RAG Tuning)
-
-For power users and AI integrations, Conduit provides fine-grained control over retrieval:
-
-```bash
-# Widen recall: keep everything potentially relevant, no diversity filtering
-./bin/conduit kb search "ASL-3 safeguards" --recall high
-
-# Narrow to fewer, more distinct results
-./bin/conduit kb search "API design" --recall precise
-
-# Lower the similarity threshold for pure semantic search
-./bin/conduit kb search "AI safety deployment" --semantic --min-score 0.0 --limit 20
-```
-
-**Available Flags**:
-
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--recall` | balanced | Precision/recall preset: `high`, `balanced`, `precise` |
-| `--min-score` | 0.0 | Minimum similarity threshold for `--semantic` (0.0-1.0) |
-| `--limit` | 10 | Maximum results to return |
-
-The `--semantic-weight`, `--mmr-lambda`, `--no-mmr` and `--no-rerank` flags were
-removed in v2. They fed engine settings that were either never read or
-overwritten by the recall preset before use, so setting them changed nothing.
-`--recall` is the single control that replaces them.
-
-**When to use lower thresholds**: If you're searching for domain-specific terminology (e.g., "ASL-3", "CBRN") that the embedding model wasn't trained on, use `--min-score 0.0` or `--min-score 0.05` to ensure results aren't filtered out. The consuming AI (Claude, GPT) has world knowledge and can determine true relevance from the returned chunks.
-
-**Semantic vs Keyword Search**:
-- **Semantic**: Finds documents based on meaning. "understanding text with computers" matches documents about "natural language processing" even without exact keyword matches.
-- **Keyword**: Fast, exact matching. Best for specific terms, function names, or code symbols.
-- **Hybrid**: Automatically uses semantic when available (Qdrant + Ollama running), falls back to keyword otherwise.
-
-**Search Output**:
-```
-Results for "how to configure authentication" (3 hits) [semantic]
-
-• /docs/auth/setup.md [high]
-   "...configure authentication using OAuth2. First, set up your client..."
-
-• /docs/security/overview.md [medium]
-   "...authentication mechanisms supported include JWT tokens and..."
-
-• /docs/api/auth-endpoints.md [medium]
-   "...authentication endpoint accepts POST requests with..."
-```
-
-### Migrating Existing Documents to Vector Search
-
-If you indexed documents before semantic search was enabled, migrate them:
-
-```bash
-# Migrate existing FTS documents to vector store
-./bin/conduit kb migrate
-```
-
-This generates embeddings for all existing documents. New documents are automatically indexed in both FTS5 and vector search.
-
-### Viewing Statistics
-
-```bash
-./bin/conduit kb stats
-
-# Output:
-# Knowledge Base Statistics
-# -------------------------
-# Total Sources:    3
-# Total Documents:  156
-# Total Chunks:     1,247
-# Database Size:    12.5 MB
-# Last Sync:        2024-12-28 15:30:00
-```
-
-### Removing a Source
-
-When you remove a KB source, Conduit cleans up all associated data:
-- FTS5 full-text index entries
-- Document chunks in SQLite
-- Vector embeddings in Qdrant (if semantic search is enabled)
-
-```bash
-# Remove a source by name or ID
-./bin/conduit kb remove "Project Docs"
-
-# Force remove without confirmation
-./bin/conduit kb remove <source-id> --force
-```
-
-**Example Output**:
-```
-Source 'Project Docs' has 42 indexed documents.
-Remove source and all documents? [y/N]: y
-✓ Removed source: Project Docs (42 documents, 420 vectors)
-```
-
-The output shows both documents and vectors deleted, confirming complete cleanup.
-
----
-
-## Knowledge Graph (KAG)
-
-Conduit includes an optional Knowledge-Augmented Generation (KAG) feature that extracts entities and relationships from your documents, enabling queries like "What technologies are mentioned?" or "How does X relate to Y?".
-
-### Enabling KAG
-
-KAG is disabled by default (privacy-first). To enable it:
-
-```bash
-# Edit configuration
-cat >> ~/.conduit/conduit.yaml << 'EOF'
-kb:
-  kag:
-    enabled: true
-    provider: ollama
-    ollama:
-      model: mistral:7b-instruct-q4_K_M
-EOF
-
-# Restart daemon
-conduit service restart
-```
-
-### Prerequisites
-
-KAG requires an LLM for entity extraction. The default uses Ollama with Mistral 7B:
-
-```bash
-# Ensure Ollama is running
-ollama serve
-
-# Pull the extraction model (if not already)
-ollama pull mistral:7b-instruct-q4_K_M
-```
-
-### Extracting Entities
-
-After indexing documents, extract entities and relationships:
-
-```bash
-# Sync entities from all indexed documents
+conduit config set kb.kag.enabled true
 conduit kb kag-sync
-
-# Force re-extraction of all chunks
-conduit kb kag-sync --force
-
-# Check extraction status dashboard
-conduit kb kag-status
-
-# Retry failed extractions
-conduit kb kag-retry
-
-# Preview failed chunks before retrying
-conduit kb kag-retry --dry-run
-
-# Retry with custom max attempts (default: 2, max: 5)
-conduit kb kag-retry --max-retries 3
+conduit kb kag-query "threat models"
 ```
 
-**Example Dashboard Output** (`conduit kb kag-status`):
-```
-KAG Extraction Status
-═══════════════════════════════════════════════════════════
-
-Progress:
-  ████████████████████████████████████████ 1039/1039 chunks (100.0%)
-
-  Completed:  1039 (100.0%)
-  Errors:     0 (0.0%)
-  Pending:    0 (0.0%)
-
-Entities & Relations:
-───────────────────────────────────────────────────────────
-  Entities:   2313 extracted
-  Relations:  602 extracted
-  Avg/chunk:  2.2 entities, 0.6 relations
-
-System Resources:
-───────────────────────────────────────────────────────────
-  RAM:        0.9 MB (Go process)
-  Storage:    334.3 MB (~/.conduit/)
-  CPU Cores:  12 available
-
-Ollama Status:
-───────────────────────────────────────────────────────────
-  Model:      mistral:7b-instruct-q4_K_M
-  Status:     loaded (GPU 100%)
-
-Commands:
-───────────────────────────────────────────────────────────
-  conduit kb kag-retry        # Retry failed chunks
-  conduit kb kag-sync --force # Re-extract all chunks
-```
-
-### Querying the Knowledge Graph
-
-Use the `kag-query` command to search entities and relationships. Queries are **tokenized** for better matching - each word is searched separately, and common words like "summary", "information", "the" are filtered out.
+The default extraction provider is `pattern` — no LLM, no network, no model
+download. It is fast and modest in what it finds. Ollama-based extraction is
+available if you already run Ollama.
 
 ```bash
-# Basic query
-conduit kb kag-query "Kubernetes"
-
-# Natural language queries work well (tokenized matching)
-conduit kb kag-query "threat model summary in ASL-3 deployment"
-
-# Query with entity hints
-conduit kb kag-query "container orchestration" --entities Docker,Kubernetes
-
-# Include relationships
-conduit kb kag-query "authentication" --relations
-
-# Limit results
-conduit kb kag-query "machine learning" --limit 20
+conduit kb kag-sync                  # extract from unprocessed chunks
+conduit kb kag-sync --force          # re-extract everything
+conduit kb kag-status                # progress dashboard
+conduit kb kag-retry                 # retry failed extractions
+conduit kb kag-dedupe                # merge duplicate entities
+conduit kb kag-vectorize             # embed entities (enables --hybrid)
+conduit kb kag-query "API security" --max-hops 3
+conduit kb kag-query "threat model" --hybrid --format json
 ```
 
-**Query Matching Features:**
-- **Tokenized search**: Queries are split into words, matching ANY word
-- **Stopword removal**: Common words filtered for better precision
-- **Case-insensitive**: "Kubernetes" matches "kubernetes"
-- **Match scoring**: Exact matches ranked higher than partial matches
+`kag_query` reports its state honestly. "The graph is disabled", "the graph is
+empty", and "nothing matched" are three different answers, and you will be told
+which one you got.
 
-**Example Output**:
-```
-Knowledge Graph Results for: Kubernetes
-
-## Entities
-- **Kubernetes** (technology): Container orchestration platform
-- **Docker** (technology): Container runtime
-- **Container** (concept): Isolated process environment
-
-## Relationships
-- Kubernetes → uses → Docker
-- Kubernetes → contains → Pod
-- Docker → creates → Container
-
-Found 3 entities, 3 relationships
-```
-
-### Entity Deduplication
-
-During extraction, entities with similar names may be created from different document chunks. Use `kag-dedupe` to merge duplicates:
-
-```bash
-# Preview duplicates without making changes
-conduit kb kag-dedupe --dry-run
-
-# Example output:
-# Found 2313 entities in 1949 groups
-# Duplicate groups: 327 (containing 364 extra entities)
-# --dry-run: Showing what would be merged:
-#   "threat models" (concept): 2 entities → 1
-#   "Kubernetes" (technology): 3 entities → 1
-
-# Merge all duplicates
-conduit kb kag-dedupe
-```
-
-**Merge Strategy:**
-- **Highest confidence**: Keeps the version with highest extraction confidence
-- **Best description**: Uses the longest (most informative) description
-- **Combined sources**: Preserves references to all source documents
-
-### Entity Vectorization for Semantic Search
-
-For improved query recall, you can generate vector embeddings for entities. This enables semantic search that finds entities by meaning, not just exact text matches.
-
-**Prerequisites:**
-- Ollama running with `nomic-embed-text` model
-- Qdrant running (for vector storage)
-
-```bash
-# Vectorize all entities (generates embeddings and stores in Qdrant)
-conduit kb kag-vectorize
-
-# With custom batch size
-conduit kb kag-vectorize --batch-size 50
-
-# Connect to remote services
-conduit kb kag-vectorize --ollama-host http://192.168.1.60:11434 --qdrant-host 192.168.1.60
-
-# Example output:
-# Connecting to Ollama...
-# Connecting to Qdrant...
-# Loading entities from database...
-# Found 1949 entities to vectorize
-#   Vectorized 1949/1949 entities
-#
-# Vectorization Summary
-# ───────────────────────────────────────
-# Total entities:   1949
-# Vectorized:       1949
-#
-# Entity Collection: conduit_entities
-#   Vectors: 1949
-#   Status:  Green
-```
-
-### Hybrid Entity Search
-
-Once entities are vectorized, you can use **hybrid search** which combines lexical (token-based) and semantic (vector-based) search using RRF (Reciprocal Rank Fusion):
-
-```bash
-# Enable hybrid search with --hybrid flag
-conduit kb kag-query "threat model summary" --hybrid
-
-# Queries that previously returned 0 results now find related entities
-conduit kb kag-query "AI safety deployment safeguards" --hybrid
-
-# Connect to remote services
-conduit kb kag-query "CBRN risks" --hybrid \
-  --ollama-host http://192.168.1.60:11434 \
-  --qdrant-host 192.168.1.60
-```
-
-**How Hybrid Search Works:**
-1. **Lexical Search**: Tokenizes query, matches words in entity names/descriptions
-2. **Semantic Search**: Embeds query, finds similar entity vectors in Qdrant
-3. **RRF Fusion**: Combines both result sets using rank-based scoring
-4. **Agreement Boost**: Entities found by both methods get a 20% score boost
-
-**Benefits:**
-- **Better recall**: Finds entities even when exact words don't match
-- **Synonym matching**: "AI" finds "Artificial Intelligence" entities
-- **Graceful fallback**: Uses lexical-only if Qdrant/Ollama unavailable
-
-### KAG vs RAG: When to Use Each
-
-| Query Type | Use This | Example |
-|------------|----------|---------|
-| Find relevant text | `kb search` (RAG) | "How to configure OAuth2" |
-| List entities | `kb kag-query` (KAG) | "What technologies are mentioned?" |
-| Find relationships | `kb kag-query` (KAG) | "How does Kubernetes relate to Docker?" |
-| Semantic search | `kb search --semantic` | "Authentication mechanisms" |
-| Exact phrase | `kb search --fts5` | "func NewHandler" |
-
-### Advanced: Using FalkorDB for Graph Traversal
-
-For advanced multi-hop queries, you can optionally use FalkorDB:
-
-```bash
-# Install FalkorDB (Docker required)
-conduit falkordb install
-
-# Start FalkorDB
-conduit falkordb start
-
-# Check status
-conduit falkordb status
-```
-
-Once running, KAG will automatically use FalkorDB for graph traversal queries.
-
-### KAG Configuration Options
-
-| Setting | Default | Description |
-|---------|---------|-------------|
-| `kag.enabled` | false | Enable/disable KAG |
-| `kag.provider` | ollama | LLM provider (ollama, openai, anthropic) |
-| `kag.ollama.model` | mistral:7b-instruct-q4_K_M | Ollama model for extraction |
-| `kag.extraction.confidence_threshold` | 0.6 | Minimum confidence for entities |
-| `kag.extraction.max_entities_per_chunk` | 20 | Max entities per chunk |
-| `kag.extraction.enable_background` | true | Background extraction |
+Whether the graph is worth its cost is an open question the project is
+deliberately measuring rather than guessing at — see
+[Privacy and safety](#privacy-and-safety).
 
 ---
 
-## Security & Permissions
-
-### Permission Model
-
-Conduit uses a layered permission model:
-
-1. **Forbidden Paths**: Always blocked (credentials, system files)
-2. **Allowed Paths**: Explicitly permitted (temp directories)
-3. **User Grants**: Explicit user approval for other paths
-
-### Viewing Current Permissions
+## Checking on things
 
 ```bash
-# Show permissions for an instance
-./bin/conduit permissions show <instance-id>
+conduit status              # what's in the knowledge base
+conduit status --json
+conduit doctor              # diagnose problems, with remedies
+conduit doctor --json
+conduit doctor --probe-timeout 30
+conduit kb stats
+conduit config              # current configuration
+conduit version
 ```
 
-### Granting Permissions
+`status` reports the file and its contents. There is no service that can be
+"down", so there is nothing to report about one.
 
-When a connector requests access to a resource, you'll be prompted:
+`doctor` checks that configuration loads and contains no keys Conduit no longer
+understands; the knowledge base file is present, readable and writable; FTS5 is
+compiled in; the embedding provider is reachable (skipped when
+`embed.provider` is `none`); the vector index exists and is populated; and at
+least one AI client has the MCP server configured. It exits 0 if everything
+needed works and 1 if a check failed.
 
-```
-Connector "My Files" requests:
-  - Read access to: /Users/you/projects
-  - Write access to: /Users/you/projects/output
+Use `--probe-timeout` when the embedding model is cold and needs longer than
+the default 15 seconds to answer.
 
-Allow? [y/N/details]
-```
+---
 
-To pre-grant permissions:
+## Backup
+
+The knowledge base is one file:
 
 ```bash
-./bin/conduit permissions grant <instance-id> \
-  --readonly /path/to/read \
-  --readwrite /path/to/write
+cp ~/.conduit/conduit.db ~/backups/conduit-$(date +%F).db
 ```
 
-### Revoking Permissions
+Or use the built-in command, which archives the data directory (database,
+configuration, knowledge base data) as a compressed tarball:
 
 ```bash
-./bin/conduit permissions revoke <instance-id> --type filesystem
+conduit backup
+conduit backup --output ~/backups/conduit.tar.gz
 ```
 
-### What's Always Blocked?
+Your original documents are never modified and do not need backing up on
+Conduit's account.
 
-These paths are **never** accessible to connectors:
+---
 
-- Root filesystem (`/`)
-- System directories (`/etc`, `/var`, `/root`)
-- SSH keys (`~/.ssh`)
-- Cloud credentials (`~/.aws`, `~/.config/gcloud`, `~/.azure`, `~/.kube`)
-- GPG keys (`~/.gnupg`)
-- Docker/Podman configs (`~/.docker`)
-- macOS Keychain (`~/Library/Keychains`)
+## Privacy and safety
+
+**Nothing leaves the machine.** Documents, index, vectors and embeddings stay
+local. Conduit opens no listening socket for its own API — the MCP server talks
+over stdio to the client that launched it. When semantic search is enabled with
+the default provider, Conduit runs a `llama-server` sidecar bound to
+`127.0.0.1` and shuts it down after an idle period. The only network use is
+downloading the binary and the model.
+
+**Path safety.** Directories in `policy.forbidden_paths` are refused by
+`kb add`, after resolving symlinks.
+
+**The query-shape log.** Conduit keeps a local file,
+`~/.conduit/query-shape.jsonl`, with one line per query. It records the
+*shape* of the query — how many tokens, whether it looks like it names an
+entity, how many hops were requested — and **cannot contain the query itself.**
+The record type has no field capable of holding your query text, entity names,
+document titles, paths, snippets or results; that is enforced structurally and
+guarded by a test, not by redaction at write time.
+
+The file is mode 0600, Conduit never reads it back, and nothing uploads it
+anywhere. It exists to answer one question with evidence instead of opinion:
+does anyone actually ask multi-hop questions? The knowledge graph's future
+depends on the answer, and it cannot be answered retroactively.
+
+Turn it off and no file is created:
+
+```bash
+conduit config set telemetry.local_query_log false
+```
+
+### Prompt injection: the one caveat worth understanding
+
+Conduit's MCP tools return **raw chunks of your indexed documents directly to
+the AI client.** No model summarises them first — that is what keeps search
+fast, private and predictable.
+
+It also means **an indexed document is a prompt-injection vector.** If you index
+untrusted content — a third-party PDF, a scraped web page, a shared drive, a
+dependency's documentation — instructions hidden in that content arrive at your
+assistant as tool output and may influence what it does, including what it does
+with your other tools. Conduit cannot meaningfully sanitize this and does not
+claim to.
+
+What to do about it:
+
+- Index content you trust. Treat adding a source like installing a dependency.
+- Use `--db` to keep untrusted corpora in a separate knowledge base from the
+  one your coding agent has open.
+- Read search results in agent transcripts with the same skepticism you apply
+  to a fetched web page.
+- Prefer AI clients that visually distinguish tool output from your own
+  instructions.
+
+Tracked as SEC-003 in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ---
 
 ## Troubleshooting
 
-### Daemon Won't Start
+### "no such module: fts5"
 
-**Problem**: `Error: create daemon: ...`
-
-**Solutions**:
-1. Check if another daemon is running: `pgrep conduit-daemon`
-2. Remove stale socket: `rm ~/.conduit/conduit.sock`
-3. Check permissions: `ls -la ~/.conduit/`
-
-### FTS5 Not Available
-
-**Problem**: `no such module: fts5`
-
-**Solution**: Ensure you build with FTS5 enabled:
-```bash
-make clean
-make build  # Uses -tags "fts5" automatically
-```
-
-### Connector Won't Start
-
-**Problem**: `Error: container start: ...`
-
-**Solutions**:
-1. Check if Podman/Docker is running: `podman info` or `docker info`
-2. Pull the image manually: `podman pull <image>`
-3. Check container logs: `./bin/conduit logs <instance-id>`
-
-### Client Config Not Updated
-
-**Problem**: AI client doesn't see the connector
-
-**Solutions**:
-1. Restart the AI client
-2. Check the config file: `cat ~/.claude.json`
-3. Verify the binding: `./bin/conduit client bindings <instance-id>`
-
-### Permission Denied Errors
-
-**Problem**: Connector can't access files
-
-**Solutions**:
-1. Check if path is forbidden: see "What's Always Blocked?" above
-2. Grant explicit permission: `./bin/conduit permissions grant ...`
-3. Check container mounts: `./bin/conduit inspect <instance-id>`
-
-### Running Diagnostics
+The binary was built without FTS5. Rebuild with both flags:
 
 ```bash
-./bin/conduit doctor
-
-# Checks:
-# ✓ Daemon running
-# ✓ Database accessible
-# ✓ Container runtime available
-# ✓ FTS5 extension loaded
-# ✓ Client configs writable
+CGO_ENABLED=1 go build -tags fts5 -o conduit ./cmd/conduit
 ```
+
+Or re-run `./scripts/install.sh --from-source`, which sets them.
+
+### Search returns nothing useful
+
+1. Is anything indexed? `conduit kb stats`
+2. Did the last sync fully succeed? Re-run `conduit kb sync` and check the exit
+   code — 2 means semantic indexing failed.
+3. Are there vectors? `conduit status`. If not, `conduit model download` then
+   `conduit kb migrate`.
+4. Try `--recall high` to stop diversity filtering from hiding near-duplicates.
+5. For an exact string, use `--fts5`.
+
+### Semantic search is unavailable
+
+`conduit doctor` will say why. Usually: no model downloaded
+(`conduit model download`), or `embed.provider` is set to `none`.
+
+### `kb sync` exits 2
+
+Keyword indexing worked; the embedding step did not. Search works on keywords
+meanwhile. `conduit doctor --probe-timeout 30` — a cold model often just needs
+longer than the default probe.
+
+### The AI client doesn't see the tools
+
+```bash
+conduit mcp status
+conduit mcp configure --check
+```
+
+Restart the client after configuring. Confirm `conduit` is on your `PATH` in
+the environment the client launches from — `~/.local/bin` is not always there.
+
+### Config warnings about unrecognised keys
+
+You have a config file from Conduit 1.x. The named keys are ignored and it is
+safe to delete them; see the Admin Guide for the current schema.
+
+### A source path was refused
+
+It is inside `policy.forbidden_paths`. That is deliberate. If you genuinely
+need to index it, edit the list in the config — but understand that everything
+in it becomes searchable by any AI client you connect.
 
 ---
 
-## Command Reference
+## Command reference
 
-### Global Options
+Global flags, available on every command:
 
-| Option | Description |
-|--------|-------------|
-| `--help` | Show help for any command |
-| `--version` | Show version information |
-| `--config` | Path to config file |
-| `--socket` | Path to daemon socket |
+| Flag | Meaning |
+|---|---|
+| `--db` | Path to the knowledge base file (default `<data-dir>/conduit.db`) |
+| `--data-dir` | Conduit data directory (default `~/.conduit`) |
+| `--log-level` | `debug`, `info`, `warn`, `error` |
 
-### Installation & Setup Commands
-
-| Command | Description |
-|---------|-------------|
-| `conduit setup` | Run interactive setup wizard |
-| `conduit install-deps` | Install runtime dependencies |
-| `conduit install --document-tools` | Install document extraction tools |
-| `conduit doctor` | Run diagnostics |
-| `conduit uninstall` | Uninstall Conduit completely |
-
-### Service Commands
-
-| Command | Description |
-|---------|-------------|
-| `conduit service install` | Install daemon as system service |
-| `conduit service start` | Start the daemon service |
-| `conduit service stop` | Stop the daemon service |
-| `conduit service status` | Show service status |
-| `conduit service remove` | Remove daemon service |
-
-### Instance Commands
-
-| Command | Description |
-|---------|-------------|
-| `conduit install` | Install a new connector |
-| `conduit list` | List all instances |
-| `conduit start <id>` | Start an instance |
-| `conduit stop <id>` | Stop an instance |
-| `conduit remove <id>` | Remove an instance |
-| `conduit logs <id>` | View instance logs |
-| `conduit inspect <id>` | Show instance details |
-
-### Client Commands
-
-| Command | Description |
-|---------|-------------|
-| `conduit client list` | List detected AI clients |
-| `conduit client bind` | Bind instance to client |
-| `conduit client unbind` | Remove binding |
-| `conduit client bindings` | Show instance bindings |
-
-### Knowledge Base Commands
-
-| Command | Description |
-|---------|-------------|
-| `conduit kb add <path>` | Add document source |
+| Command | Purpose |
+|---|---|
+| `conduit setup` | Prepare the machine, configure an AI client |
+| `conduit status` | Knowledge base state |
+| `conduit doctor` | Diagnose problems with remedies |
+| `conduit config` | Show configuration (`get` / `set` / `unset` subcommands) |
+| `conduit version` | Version information |
+| `conduit backup` | Archive the data directory |
+| `conduit uninstall` | Remove Conduit |
+| `conduit kb add` | Add a folder |
 | `conduit kb list` | List sources |
-| `conduit kb sync` | Sync documents |
-| `conduit kb search <query>` | Search documents (hybrid by default) |
-| `conduit kb search --semantic` | Force semantic search |
-| `conduit kb search --fts5` | Force keyword search |
-| `conduit kb search --min-score 0.0` | Set similarity threshold |
-| `conduit kb stats` | Show statistics |
-| `conduit kb remove <id>` | Remove source |
-| `conduit kb migrate` | Migrate docs to vector store |
+| `conduit kb remove` | Remove a source |
+| `conduit kb sync` | Index new and changed documents |
+| `conduit kb search` | Search |
+| `conduit kb stats` | Statistics |
+| `conduit kb migrate` | Backfill vectors for already-indexed documents |
+| `conduit kb kag-*` | Knowledge graph operations (opt-in) |
+| `conduit mcp kb` | Run the MCP server over stdio |
+| `conduit mcp configure` | Configure an AI client |
+| `conduit mcp status` | MCP configuration and capabilities |
+| `conduit mcp logs` | MCP-related log output |
+| `conduit model list` | Pinned embedding models |
+| `conduit model download` | Download and verify a model |
+| `conduit model verify` | Re-hash a local model against its pin |
+| `conduit model path` | Path of a model artifact |
+| `conduit ollama status` | Ollama status and loaded models |
+| `conduit ollama models` | Available Ollama models |
+| `conduit ollama pull` | Pull an Ollama model |
+| `conduit ollama warmup` | Preload Ollama models into memory |
 
-### System Commands
+Commands from Conduit 1.x that no longer exist (`start`, `stop`, `service`,
+`qdrant`, `falkordb`, `deps`, and others) still respond, with an explanation of
+what was removed and what to use instead. See
+[CHANGELOG.md](../CHANGELOG.md#breaking-changes).
 
-| Command | Description |
-|---------|-------------|
-| `conduit status` | Show daemon status |
-| `conduit config show` | Show configuration |
-| `conduit backup` | Backup data |
+Every command accepts `--help`.
 
 ---
 
-## Getting Help
+## Uninstalling
 
-- **Documentation**: See `docs/` directory
-- **Issues**: Report bugs at https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues
-- **Logs**: Check `~/.conduit/logs/` for detailed logs
+```bash
+conduit uninstall --dry-run     # preview
+conduit uninstall --info        # what's installed
+conduit uninstall               # interactive; keeps your data
+conduit uninstall --keep-data   # remove binary and PATH entries, keep the index
+conduit uninstall --all         # remove data too (prompts unless --force)
+```
+
+`--all` is the only thing that deletes your knowledge base. Shared tools
+(Ollama, poppler) are never removed.
+
+A machine that once ran a Conduit 1.x installer also has a daemon service and
+container leftovers that `conduit uninstall` knows nothing about. Remove those
+with `./scripts/remove-v1.sh` (dry run by default).
 
 ---
 
-## Appendix: Environment Variables
+## See also
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `CONDUIT_DATA_DIR` | Data directory path | `~/.conduit` |
-| `CONDUIT_SOCKET` | Socket file path | `~/.conduit/conduit.sock` |
-| `CONDUIT_LOG_LEVEL` | Log level (debug/info/warn/error) | `info` |
-| `CONDUIT_RUNTIME` | Container runtime (podman/docker/auto) | `auto` |
+| Document | Contents |
+|---|---|
+| [INSTALL_V2.md](INSTALL_V2.md) | Installation, upgrade, moving from 1.x |
+| [ADMIN_GUIDE.md](ADMIN_GUIDE.md) | Full configuration schema, diagnostics, tuning |
+| [KNOWN_ISSUES.md](KNOWN_ISSUES.md) | Security advisories and current limitations |
+| [EMBEDDING_SIDECAR.md](EMBEDDING_SIDECAR.md) | How the sidecar works |
+| [../CHANGELOG.md](../CHANGELOG.md) | What changed from v1 |

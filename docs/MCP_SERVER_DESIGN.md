@@ -1,5 +1,9 @@
 # Conduit MCP Server Design Document
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../CONTEXT.md) for v2.**
+>
+> Describes the hand-rolled JSON-RPC MCP server pinned to protocol revision 2024-11-05. Conduit 2.0 uses the official MCP Go SDK, negotiates spec revision 2026-07-28, and adds a seventh tool (`kb_lexical_search`). Tool descriptions were carried over verbatim. See `internal/mcpserver/tools.go`.
+
 **Version**: 1.0.0
 **Last Updated**: January 2026
 **Status**: Active

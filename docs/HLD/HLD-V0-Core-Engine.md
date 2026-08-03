@@ -1,5 +1,9 @@
 # High-Level Design V0 — Conduit Core Engine
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> Describes the v0/v1 daemon core engine and its connector instance lifecycle. The daemon and the connector subsystem were removed in Conduit 2.0.
+
 **Version**: 1.0.42 (Updated)
 **Status**: IMPLEMENTED
 **Last Updated**: January 2026

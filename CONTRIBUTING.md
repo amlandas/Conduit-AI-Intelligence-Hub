@@ -49,9 +49,11 @@ This project follows a standard code of conduct. Please be respectful and constr
 ### Prerequisites
 
 - Go 1.21+
+- A C compiler — **CGO is mandatory** (SQLite with the FTS5 extension)
 - Git
-- Docker or Podman (for running tests with containers)
-- Node.js 18+ (for desktop app development)
+
+No container runtime, no external databases, no Node.js. Conduit 2.0 is one
+binary with no daemon and no services.
 
 ### Clone and Build
 
@@ -60,34 +62,57 @@ This project follows a standard code of conduct. Please be respectful and constr
 git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub.git
 cd Conduit-AI-Intelligence-Hub
 
-# Build CLI and daemon
+# Build the binary
 make build
+# equivalently:
+CGO_ENABLED=1 go build -tags fts5 -o conduit ./cmd/conduit
 
 # Run tests
 make test
+# equivalently:
+CGO_ENABLED=1 go test -tags fts5 ./...
 
-# Run linter
+# Format, vet, lint
+make fmt
+make vet
 make lint
+
+# List all targets
+make help
 ```
+
+**`CGO_ENABLED=1` and `-tags fts5` are not optional.** A build missing either
+compiles cleanly, starts cleanly, and then fails every search at runtime with
+`no such module: fts5`. Any build command, script or CI job you touch must set
+both.
 
 ### Project Structure
 
 ```
 conduit/
 ├── cmd/
-│   ├── conduit/          # CLI tool
-│   └── conduit-daemon/   # Background daemon
+│   └── conduit/          # The one binary
 ├── internal/
-│   ├── adapters/         # Client adapters (Claude Code, Cursor, etc.)
-│   ├── daemon/           # Daemon core and HTTP handlers
-│   ├── kb/               # Knowledge base (indexer, searcher, MCP)
-│   └── ...               # Other internal packages
+│   ├── cli/              # Command surface (Cobra); thin over kbservice
+│   ├── kbservice/        # The in-process knowledge base library
+│   ├── kb/               # Retrieval engine: chunking, FTS5, vectors, RRF, graph
+│   ├── embed/            # Embedding providers: llama-server, ollama, none
+│   ├── mcpserver/        # MCP server on the official Go SDK
+│   ├── setup/            # Machine preparation, MCP client config, uninstall
+│   ├── config/           # The configuration schema (single source of truth)
+│   ├── store/            # SQLite open and migrations
+│   ├── querylog/         # Local-only query-shape log
+│   └── observability/    # Logging helpers
+├── pkg/models/           # Shared types
 ├── apps/
-│   └── conduit-desktop/  # Electron desktop app
+│   └── conduit-desktop/  # FROZEN — Electron app, unsupported. Do not build.
 ├── docs/                 # Documentation
-├── scripts/              # Build and utility scripts
-└── tests/                # Integration tests
+├── scripts/              # install.sh, uninstall.sh, remove-v1.sh
+└── tests/                # Integration and script tests
 ```
+
+See [CONTEXT.md](CONTEXT.md) for what each package is responsible for and the
+invariants it carries.
 
 ---
 
@@ -150,10 +175,10 @@ type(scope): description
 
 Examples:
 feat(kb): add --rebuild-vectors flag to sync command
-fix(daemon): resolve race condition in startup
+fix(kb): honour source filter in hybrid search
 docs(readme): update installation instructions
 test(kb): add integration tests for search
-refactor(adapters): simplify client binding logic
+refactor(cli): move search formatting out of the command handler
 ```
 
 ### Types
@@ -197,12 +222,22 @@ if err != nil {
 result, _ := doSomething()
 ```
 
-### TypeScript/React (Desktop App)
+### Architecture rules
 
-- Use TypeScript strict mode
-- Follow the existing component patterns
-- Use functional components with hooks
-- Keep components focused and small
+Two rules matter more than style. Both are covered in [CONTEXT.md](CONTEXT.md):
+
+- **Library-first.** Business logic belongs in `internal/kbservice`, not in a
+  Cobra `RunE`. The CLI and the MCP server are peers over the same library; a
+  capability available in one and not the other means the code is in the wrong
+  place.
+- **Honest degradation.** Never report success for work that did not happen.
+  `embed.provider: none` is a supported mode, not an error path. `kb sync`
+  exits 2 on partial success for a reason.
+
+> The Electron desktop app under `apps/conduit-desktop/` is **frozen and
+> unsupported** — no feature work, no dependency bumps, no security patches.
+> Do not build or ship it. See SEC-002 in
+> [docs/KNOWN_ISSUES.md](docs/KNOWN_ISSUES.md).
 
 ### Commit Messages
 
@@ -219,21 +254,22 @@ Closes #123
 
 **Good examples:**
 ```
-feat(kb): add semantic search with Qdrant integration
+feat(kb): store vectors in SQLite behind a VectorIndex interface
 
-Adds vector-based search using Qdrant for improved result relevance.
-Falls back to FTS5 when Qdrant is unavailable.
+Vectors move into the knowledge base file as float32 BLOBs with a
+precomputed L2 norm, searched by an exact cosine scan. Removes the
+external vector server and the network listener that came with it.
 
 Closes #42
 ```
 
 ```
-fix(daemon): prevent panic on nil pointer in status handler
+fix(kb): quote FTS5 operator characters instead of deleting them
 
-The status handler could panic when Qdrant was unavailable.
-Now returns graceful error message instead.
+Query construction stripped quotes, parentheses and hyphens, which made
+filenames and version strings unsearchable. They are now quoted.
 
-Fixes #78
+Fixes #70
 ```
 
 ---
@@ -247,21 +283,31 @@ Fixes #78
 make test
 
 # With coverage
-make test-coverage
+make test-cover
 
-# Specific package
-go test ./internal/kb/...
+# Specific package (remember the build tags)
+CGO_ENABLED=1 go test -tags fts5 ./internal/kb/...
 
 # Verbose output
-go test -v ./internal/kb/...
+CGO_ENABLED=1 go test -tags fts5 -v ./internal/kb/...
 ```
+
+`make test` sets `CGO_ENABLED=1` and `-tags fts5` for you. If you invoke
+`go test` directly, set them yourself or the FTS5-backed tests will fail.
 
 ### Writing Tests
 
 - Place tests in `_test.go` files next to the code they test
 - Use table-driven tests for multiple scenarios
-- Mock external dependencies (Qdrant, FalkorDB, Ollama)
+- Mock external dependencies (the embedding provider, Ollama). `internal/embed`
+  ships a fake provider for this.
 - Test both success and error paths
+
+**Retrieval changes have an extra bar.** `internal/kb` carries a golden
+retrieval harness (`golden_retrieval_test.go`, `retrieval_test_suite.go`) and
+regression tests for issues #69–#77 (`known_bugs_test.go`). A change in ranking
+must appear there as a deliberate, explained diff. Regenerating goldens to make
+a failure disappear is not an acceptable fix.
 
 ```go
 func TestSearch(t *testing.T) {
@@ -289,17 +335,29 @@ func TestSearch(t *testing.T) {
 
 ### When to Update Docs
 
-- New CLI commands or flags → Update `docs/CLI_COMMAND_INDEX.md`
-- New features → Update `README.md` and relevant guides
-- Bug fixes with workarounds → Update `docs/KNOWN_ISSUES.md`
-- API changes → Update relevant technical docs
+- New CLI commands or flags → `docs/CLI_COMMAND_INDEX.md` and `docs/USER_GUIDE.md`
+- New features → `README.md` and the relevant guide
+- New config keys → `docs/ADMIN_GUIDE.md`
+- Bug fixes with workarounds → `docs/KNOWN_ISSUES.md`
+- Any user-visible change → `CHANGELOG.md`
+- Architecture changes → `CONTEXT.md`
 
 ### Documentation Standards
 
+Documentation is held to the same standard as code: **every claim must be
+verifiable against the source.**
+
+- **Never document a flag, command or config key you have not seen** in
+  `--help` output or in the code. Describing features that do not exist is the
+  specific failure that made the v1 documentation untrustworthy, and undoing it
+  cost more than writing it did.
+- Do not promise timings you have not measured. "5 minutes" was in the v1 quick
+  start and was not true.
+- State limitations plainly. A documented limitation is cheaper than a
+  surprised user.
 - Use clear, concise language
-- Include code examples where helpful
+- Include code examples where helpful, and run them
 - Keep formatting consistent with existing docs
-- Test any code examples you provide
 
 ---
 

@@ -1,6 +1,12 @@
 # Conduit - Claude Code Project Guidelines
 
-This document provides guidelines for Claude Code when working on the Conduit project.
+This document provides guidelines for Claude Code when working on the Conduit
+project.
+
+**Architecture context**: read [CONTEXT.md](CONTEXT.md) first. Conduit 2.0 is a
+single binary with no daemon, no containers and no external services. If you
+find a document describing a daemon, Qdrant, FalkorDB, Podman or the Electron
+GUI as a current feature, it is stale — check [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
@@ -28,7 +34,7 @@ For feature updates and new feature requests:
 After the initial repository setup:
 - **Reference the bug report or PR number** in commit messages
 - Use conventional commit format when appropriate
-- Example: `fix: resolve daemon startup race condition (#42)`
+- Example: `fix(kb): honour source filter in hybrid search (#76)`
 - Example: `feat: add one-click installation script (#15)`
 - **Close bug reports** when a commit has resolved the issue
 - **Mark PRs as ready for review** when feature work is complete
@@ -51,62 +57,82 @@ After making code changes:
 
 ---
 
-## GUI-to-CLI Compliance Rules (Design Principle)
+## Library-First Architecture (Design Principle)
 
-> **CLI is the single source of truth. GUI is a thin wrapper over CLI.**
+> **`internal/kbservice` is the single source of truth. Every frontend is a
+> thin shell over it.**
 
-This is the **ABSOLUTE** architectural principle for Conduit. No exceptions.
+This is the **ABSOLUTE** architectural principle for Conduit 2.0. No
+exceptions.
+
+It replaces v1's "GUI must call the CLI" rule. That rule existed because the
+daemon held the real logic and the GUI kept reaching around the CLI to talk to
+it directly. There is no daemon now, and no GUI. The logic lives in a library,
+in process, and the rule is correspondingly simpler.
 
 ### Core Rules
 
-1. **ALL GUI operations MUST call CLI commands** (no direct HTTP API to daemon)
-   - Never implement business logic in the GUI
-   - If the CLI doesn't have a command for something, add it to CLI first
-   - NO exceptions - not even for "real-time" or "performance" reasons
-   - CLI and GUI user experience MUST be identical
+1. **Business logic goes in `internal/kbservice`, not in a command handler.**
+   - A Cobra `RunE` should parse flags, call one library method, and format the
+     result. If it contains branching business logic, that logic belongs one
+     layer down.
+   - The MCP server (`internal/mcpserver`) and the CLI (`internal/cli`) are
+     peers. Both call the same library methods. Neither may hold behaviour the
+     other cannot reach.
+   - If a capability exists in one frontend and not the other, that is a bug in
+     where the code was placed.
 
-2. **GUI state MUST be removed by `conduit uninstall`**
-   - Electron userData directory is removed on uninstall
-   - User gets a clean slate on reinstall
-   - Only RAG/KAG data can be preserved with `--keep-data`
+2. **Output is an API contract.**
+   - Human-readable output and every `--json` shape are consumed by scripts and
+     by the frozen desktop GUI. Do not change them casually.
+   - When a command's backend is genuinely removed, document the removal in
+     `internal/cli/removed.go` rather than silently changing behaviour.
 
-3. **GUI MUST NOT compensate for missing CLI functionality**
-   - If CLI uninstall is incomplete, fix CLI, not GUI
-   - If CLI doesn't report status, add CLI command, don't inspect files directly
+3. **Never add a process boundary.**
+   - No daemon, no socket, no HTTP API, no background service. A command opens
+     the SQLite file, does its work, and exits.
+   - Concurrency is SQLite's job: WAL mode plus a busy timeout. Do not
+     introduce a coordinating process to serialise access.
 
-4. **GUI localStorage is ephemeral**
-   - Used only for session optimization (avoid re-fetching)
-   - Must not be treated as authoritative state
-   - CLI/daemon is the authoritative source
+4. **`internal/kb` invariants are load-bearing.**
+   - RRF is the only fusion method. Do not add a second one.
+   - If you add a retrieval option, prove with a test that changing it changes
+     an observable result. v1 shipped 13 option fields the engine ignored.
+   - The golden harness (`internal/kb/golden_retrieval_test.go`,
+     `known_bugs_test.go`) must show any ranking change as a deliberate diff.
+     Do not weaken the regression tests for issues #69–#77.
 
 ### Violation Examples (Don't Do This)
 
-```typescript
-// WRONG: GUI calls HTTP API directly
-const response = await fetch('http://localhost:8080/api/v1/kb/sources')
-const sources = await response.json()
+```go
+// WRONG: business logic in the command handler
+RunE: func(cmd *cobra.Command, args []string) error {
+    rows, _ := db.Query("SELECT ...")
+    for rows.Next() { /* ranking, filtering, merging ... */ }
+}
 
-// CORRECT: GUI calls CLI
-const { stdout } = await execFile('conduit', ['kb', 'list', '--json'])
-const sources = JSON.parse(stdout)
+// CORRECT: the handler calls the library and formats
+RunE: func(cmd *cobra.Command, args []string) error {
+    res, err := svc.Search(ctx, query, opts)
+    if err != nil { return err }
+    return printResults(res)
+}
 ```
 
-```typescript
-// WRONG: GUI checks files directly
-const configPath = path.join(os.homedir(), '.claude.json')
-const configured = fs.existsSync(configPath)
+```go
+// WRONG: a frontend reaching past the library to the database
+func (s *Server) toolStats(...) { db.QueryRow("SELECT COUNT(*) FROM kb_chunks") }
 
-// CORRECT: GUI calls CLI
-const { stdout } = await execFile('conduit', ['mcp', 'status', '--json'])
-const configured = JSON.parse(stdout)['claude-code'].configured
+// CORRECT: both frontends call the same method
+func (s *Server) toolStats(...) { return s.svc.Stats(ctx, sourceID) }
 ```
 
 ### Why This Matters
 
-- **Consistency**: CLI and GUI behave identically
-- **Testability**: Test CLI, GUI inherits behavior
-- **Maintainability**: Single implementation of business logic
-- **User Choice**: Power users can use CLI, others use GUI - same experience
+- **Consistency**: the CLI and the MCP server behave identically because they
+  run identical code.
+- **Testability**: the library is testable without spawning a process.
+- **Maintainability**: one implementation of every behaviour.
 
 ---
 
@@ -114,15 +140,32 @@ const configured = JSON.parse(stdout)['claude-code'].configured
 
 ### Build Requirements
 
+Conduit is **one binary**: `cmd/conduit`. There is nothing else to build.
+
 - Go 1.21+
-- CGO enabled (required for SQLite FTS5)
-- Build with: `make build` or `go build -tags "fts5"`
+- A C compiler. **CGO is mandatory** — the knowledge base is SQLite with the
+  FTS5 extension.
+- Build with `make build`, or:
+
+  ```bash
+  CGO_ENABLED=1 go build -tags fts5 -o conduit ./cmd/conduit
+  ```
+
+**Both `CGO_ENABLED=1` and `-tags fts5` are required.** A build missing either
+compiles cleanly, starts cleanly, and then fails every search at runtime with
+`no such module: fts5`. Any build command, script or CI job you touch must set
+both.
 
 ### Basic Testing
 
-- Run tests before committing: `make test`
-- Ensure all tests pass
-- Add tests for new features
+```bash
+CGO_ENABLED=1 go test -tags fts5 ./...   # or: make test
+```
+
+- Run tests before committing. Ensure all pass.
+- Add tests for new features.
+- Retrieval changes must be reflected in the golden harness deliberately, not
+  by regenerating goldens to make a failure disappear.
 
 ### Bug Investigation & Fix Validation (CRITICAL)
 
@@ -131,52 +174,84 @@ const configured = JSON.parse(stdout)['claude-code'].configured
 - **Never assume, guess, or use trial-and-error methods** for bug fixes
 - Only proceed with a fix when you have **high confidence** in the root cause analysis
 - **Maintain transparency** with the user about findings and reasoning
+- Fix at the root cause, not at the symptom. If the correct fix is deleting a
+  feature that never worked, delete it and say so.
 
-**Ivestigation workflow**
+**Investigation workflow**
 1. Investigate and identify root cause with high confidence
 2. Implement the fix
 
 ### END-TO-END TESTING (MANDATORY)
 
-**End-to-End User Experience Testing:**
-- **Always perform full-loop UX testing on this local machine** for any new features or bug fixes to validate they work
-- **Always perform full-loop UX testing on the remote machine** (`amlandas@192.168.1.60`) to validate features/fixes work on other machines
-- Testing must simulate actual user workflows, not just verify code compiles
+**Local machine testing is mandatory.**
+- **Always perform full-loop UX testing on this local machine** for any new
+  feature or bug fix, to validate that it actually works
+- Testing must simulate actual user workflows, not just verify that code
+  compiles
 - Document test results before marking work as complete
+
+**Remote machine testing is deferred.**
+- Testing against the remote machine (`amlandas@192.168.1.60`) is **deferred by
+  owner decision, 2026-08-03**, and is not a gate on completing work
+- Do not block a change on remote validation, and do not claim remote
+  validation was performed
 
 **Testing Workflow:**
 1. Test on local machine (full user workflow)
-2. Test on remote machine (full user workflow)
-3. Only then commit and push changes
+2. Then commit
 
 ### POST END-TO-END TESTING TASKS (REQUIRED)
 
 **Post-Fix Completion:**
-- **Always merge changes with main** in GitHub by opening, updating, and closing PRs or bug reports
-- **Always update the GitHub README**, the learnings doc locally, and any other related local docs as needed
-- **Always update the GitHub install scripts** and the `conduit uninstall` command if needed
+- **Always merge changes** in GitHub by opening, updating, and closing PRs or bug reports
+- **Always update the README**, the changelog, and any other affected docs
+- **Always update the install scripts** (`scripts/install.sh`) and the
+  `conduit uninstall` command if the change affects what lands on a machine
 
 ### Documentation
 
-When updating features, ensure documentation is updated:
-- README.md - Installation and quick start
-- docs/USER_GUIDE.md - User-facing features
-- docs/ADMIN_GUIDE.md - Administration and configuration
-- docs/V0_OUTCOME.md - Implementation tracking
+Documentation is held to the same standard as code: **every claim must be
+verifiable against the source.** Do not document a flag, command or config key
+you have not seen in `--help` output or in the code. Describing features that
+do not exist is the specific failure that made the v1 docs untrustworthy.
+
+When updating features, ensure these are updated:
+- `README.md` — what Conduit is, quick start, security posture
+- `CHANGELOG.md` — every user-visible change
+- `docs/USER_GUIDE.md` — user-facing features
+- `docs/ADMIN_GUIDE.md` — configuration and administration
+- `docs/KNOWN_ISSUES.md` — new limitations and advisories
+- `CONTEXT.md` — architecture changes
 
 ### Code Style
 
 - Follow Go best practices
 - Use meaningful variable names
-- Add comments for complex logic
+- Add comments for complex logic, and for any non-obvious invariant a future
+  reader could break silently
 - Keep functions focused and small
 
 ### Security
 
 - Never commit secrets or credentials
 - Follow the mandatory security rules in `~/.claude/CLAUDE.md`
-- All connectors run in isolated containers
 - Implement principle of least privilege
+- **Conduit opens no listening socket for its own API.** The MCP server talks
+  over stdio. The only local service is the optional embedding sidecar, which
+  must stay bound to `127.0.0.1`. Do not bind anything to `0.0.0.0` — that was
+  SEC-001 in v1.
+- **`policy.forbidden_paths` is enforced on `conduit kb add`** after symlink
+  resolution. Do not add an ingest path that bypasses `internal/kbservice`
+  path safety; the failure mode is indexing private keys into a database the
+  MCP server hands to AI clients.
+- **Model downloads are SHA-256 verified** against the pinned registry. Never
+  add an override that installs an unverified artifact.
+- **`internal/querylog` must never gain a field that can hold query text**,
+  entity names, paths, snippets or results. Its privacy guarantee is
+  structural, and a test enforces it.
+- Remember SEC-003: indexed document content flows verbatim to AI clients, so
+  an indexed document is a prompt-injection vector. Anything that widens what
+  reaches the client deserves explicit thought.
 
 ---
 
@@ -206,7 +281,7 @@ Use conventional commits for consistency:
 feat(installer): add one-click installation script
 
 Implement automated installation with dependency detection,
-service setup, and AI model download.
+model download and MCP client configuration.
 
 Closes #15
 ```
@@ -215,7 +290,8 @@ Closes #15
 
 ## Branch Strategy
 
-- `main` - Production-ready code
+- `main` - Conduit 1.x (frozen; security backports only)
+- `v2` - Conduit 2.0 development line
 - `feature/*` - New features
 - `bugfix/*` - Bug fixes
 - `docs/*` - Documentation updates
@@ -227,8 +303,10 @@ Always create feature branches for non-trivial changes.
 ## Review Checklist
 
 Before requesting review on a PR:
-- [ ] All tests pass
-- [ ] Documentation updated
+- [ ] All tests pass (`CGO_ENABLED=1 go test -tags fts5 ./...`)
+- [ ] Local end-to-end testing performed and documented
+- [ ] Documentation updated, and every documented flag/command/key verified
+      against `--help` or source
 - [ ] No secrets committed
 - [ ] Code follows project style
 - [ ] Commit messages are clear
@@ -236,4 +314,4 @@ Before requesting review on a PR:
 
 ---
 
-**Last Updated**: January 2026
+**Last Updated**: August 2026 (Conduit 2.0.0-beta)

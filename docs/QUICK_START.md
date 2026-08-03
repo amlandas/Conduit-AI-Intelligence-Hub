@@ -1,220 +1,207 @@
 # Conduit Quick Start Guide
 
-Get your private knowledge base up and running in 5 minutes.
+Getting a private knowledge base your AI tools can search.
+
+**How long this takes**: the build is a minute or two. The embedding model is a
+262 MB download, so that step depends entirely on your connection. Indexing
+time depends on how much you index. Plan on a coffee, not five minutes.
+
+For the full installation guide — release binaries, options, upgrading, moving
+from Conduit 1.x — see [INSTALL_V2.md](INSTALL_V2.md).
 
 ---
 
-## Step 1: Install Conduit
+## Step 1: Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
+git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub
+cd Conduit-AI-Intelligence-Hub
+./scripts/install.sh --from-source
 ```
 
-**What this installs:**
-- Conduit CLI and daemon
-- Container runtime (Podman or Docker)
-- Ollama for local AI models
-- Qdrant vector database
-- FalkorDB graph database
-- Required AI models
+**What this does:**
 
-**After installation, restart your terminal** (or run `source ~/.zshrc`).
+- Builds one binary (`conduit`) with `CGO_ENABLED=1 -tags fts5`
+- Installs it to `~/.local/bin`
+- Creates the data directory `~/.conduit`
+- Registers the MCP server with Claude Code
+- Prints diagnostics
+
+**What it does not do:** there is no daemon, no background service, no
+containers, and nothing that starts at login. Conduit runs when you call it and
+exits.
+
+**Requirements:** macOS arm64 or Linux x86_64, Go 1.21+, and a C compiler.
+About 13 MB for the binary.
+
+Restart your terminal afterwards, or `source ~/.zshrc`, so `~/.local/bin` is on
+your `PATH`.
+
+> **Coming from Conduit 1.x?** Installing v2 does not remove the v1 daemon or
+> its containers. Run `./scripts/remove-v1.sh` first — it is a dry run by
+> default. There is no data migration; you re-add your sources below.
 
 ---
 
-## Step 2: Verify Installation
+## Step 2: Verify
 
 ```bash
 conduit doctor
 ```
 
-You should see all checks passing:
-
-```
-Conduit Doctor
-──────────────────────────────────────────
-✓ Daemon running
-✓ Database accessible
-✓ Container runtime available
-✓ Ollama available
-✓ Qdrant available
-✓ FalkorDB available
-```
-
-If any checks fail, see [Troubleshooting](#troubleshooting).
+Exit code 0 means everything needed works. Exit code 1 means a check failed,
+and `doctor` will tell you which one and what to do about it.
 
 ---
 
-## Step 3: Add Your Documents
+## Step 3: Get the embedding model (optional)
 
 ```bash
-# Add a folder to your knowledge base
-conduit kb add ~/Documents/my-project --name "My Project"
+conduit model download
 ```
 
-**Supported formats:**
-- Documentation: `.md`, `.txt`, `.rst`
-- Code: `.go`, `.py`, `.js`, `.ts`, `.java`, `.rb`, `.rs`
-- Documents: `.pdf`, `.doc`, `.docx`
-- Config: `.json`, `.yaml`, `.xml`, `.toml`
+This fetches `nomic-embed-text-v1.5` (262 MB) and verifies its SHA-256 against
+a pinned registry entry. A mismatch deletes the download and fails.
+
+**You can skip this.** Without a model, Conduit searches with FTS5 keyword
+matching, which is a supported mode and not a broken install. Semantic search
+also needs a `llama-server` binary on your `PATH`; see
+[EMBEDDING_SIDECAR.md](EMBEDDING_SIDECAR.md).
+
+To make lexical-only the intended configuration rather than a fallback:
+
+```bash
+conduit config set embed.provider none
+```
 
 ---
 
-## Step 4: Index Documents
+## Step 4: Add your documents
 
 ```bash
-# Sync and index all documents
+conduit kb add ~/Documents/notes --name "Notes"
+conduit kb add ./docs --name "Project Docs"
+```
+
+By default Conduit indexes documentation, source code, config, CSV/TSV, and
+PDF/Word/RTF documents, skipping `node_modules`, `.git`, `vendor`, `dist`,
+`build` and similar.
+
+Some directories are refused outright because indexing them would copy secrets
+into a database your AI client can search — `~/.ssh`, `~/.aws`, `~/.gnupg`,
+`/etc` and others. That is deliberate. See the
+[User Guide](USER_GUIDE.md#managing-sources).
+
+---
+
+## Step 5: Index
+
+```bash
 conduit kb sync
 ```
 
-This creates:
-- Full-text search index (FTS5) for keyword search
-- Vector embeddings (Qdrant) for semantic search
+Watch the exit code:
 
-**First sync may take a few minutes** depending on document count.
+| Code | Meaning |
+|---|---|
+| 0 | Full success |
+| 1 | Error |
+| 2 | Partial — keyword indexing worked, semantic indexing failed |
+
+Code 2 means search works on keywords. Run `conduit doctor` to find out why the
+embedding step failed; a cold model often just needs
+`conduit doctor --probe-timeout 30`.
 
 ---
 
-## Step 5: Test Search
+## Step 6: Try it
 
 ```bash
-# Hybrid search (keyword + semantic)
 conduit kb search "how does authentication work"
+conduit kb stats
+```
 
-# Semantic search (meaning-based)
-conduit kb search "user login security" --semantic
+If results look thin, try `--recall high` — it turns off diversity filtering.
+For an exact identifier, use `--fts5`.
 
-# Keyword search (exact matches)
-conduit kb search "OAuth2 client_id" --fts5
+---
+
+## Step 7: Connect your AI client
+
+```bash
+conduit setup                            # Claude Code (default)
+conduit setup --client cursor
+conduit mcp configure --client vscode
+```
+
+Then **restart the client**. Verify with:
+
+```bash
+conduit mcp status
+```
+
+Your assistant now has seven tools: `kb_search`, `kb_lexical_search`,
+`kb_search_with_context`, `kb_list_sources`, `kb_get_document`, `kb_stats` and
+`kag_query`. You do not need to name them — ask a question your documents can
+answer and a well-behaved client will reach for them.
+
+---
+
+## One thing worth knowing
+
+Conduit hands **raw chunks of your indexed documents** straight to the AI
+client. That is what keeps it fast and private — no model in between.
+
+It also means an indexed document can carry instructions to your assistant. If
+you index untrusted content (third-party PDFs, scraped pages, shared drives),
+treat it the way you would treat a fetched web page. Keep untrusted corpora in
+a separate knowledge base with `--db`.
+
+See SEC-003 in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
+
+---
+
+## Common next steps
+
+**Separate knowledge bases** — one binary, many indexes:
+
+```bash
+conduit --db ~/work.db kb add ./work-docs --name "Work"
+conduit --db ~/work.db kb search "Q3 planning"
+```
+
+**Backup** — it is one file:
+
+```bash
+cp ~/.conduit/conduit.db ~/backups/conduit.db
+```
+
+**Check configuration**:
+
+```bash
+conduit config
+```
+
+If you carried a config file over from Conduit 1.x, you will see a warning
+naming keys that no longer exist. The file still loads; delete those keys to
+silence it.
+
+**Uninstall**:
+
+```bash
+conduit uninstall --dry-run
+conduit uninstall            # keeps your data
+conduit uninstall --all      # removes data too
 ```
 
 ---
 
-## Step 6: Use with AI Tools
+## Where to go next
 
-### Claude Code (Auto-configured)
-
-Your knowledge base is automatically available in Claude Code after `conduit kb sync`.
-
-### Other AI Tools
-
-Add to your tool's MCP configuration:
-
-```json
-{
-  "mcpServers": {
-    "conduit-kb": {
-      "command": "conduit",
-      "args": ["mcp", "kb"]
-    }
-  }
-}
-```
-
-**Configuration locations:**
-| Tool | Config File |
-|------|-------------|
-| Claude Desktop | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Cursor | `.cursor/mcp.json` |
-| VS Code | `.vscode/settings.json` (under `mcp.servers`) |
-
----
-
-## Optional: Enable Knowledge Graph (KAG)
-
-For multi-hop reasoning queries:
-
-```bash
-# Extract entities and relationships
-conduit kb kag-sync
-
-# Query the knowledge graph
-conduit kb kag-query "Kubernetes"
-```
-
----
-
-## Common Workflows
-
-### Check System Status
-
-```bash
-conduit status              # Quick status
-conduit doctor              # Full diagnostics
-conduit kb stats            # Knowledge base statistics
-```
-
-### Manage Sources
-
-```bash
-conduit kb list             # List all sources
-conduit kb sync             # Sync all sources
-conduit kb remove <id>      # Remove a source
-```
-
-### Update Documents
-
-```bash
-# After adding/changing documents, re-sync
-conduit kb sync
-
-# Force rebuild vectors (after Qdrant issues)
-conduit kb sync --rebuild-vectors
-```
-
----
-
-## Troubleshooting
-
-### Daemon Not Running
-
-```bash
-conduit service start
-```
-
-### 0 Vectors in Status
-
-```bash
-conduit qdrant status              # Check Qdrant
-conduit qdrant start               # Start if stopped
-conduit kb sync --rebuild-vectors  # Rebuild vectors
-```
-
-### MCP Server Not Working
-
-```bash
-conduit mcp status     # Check configuration
-conduit mcp configure  # Reconfigure for Claude Code
-```
-
-### Slow First KAG Query
-
-The extraction model (~4GB) loads on first use. To preload:
-
-```bash
-conduit ollama warmup
-```
-
-Or enable in config (`~/.conduit/conduit.yaml`):
-
-```yaml
-kb:
-  kag:
-    preload_model: true
-```
-
----
-
-## Next Steps
-
-- **[CLI Command Index](CLI_COMMAND_INDEX.md)** - Complete command reference
-- **[User Guide](USER_GUIDE.md)** - Detailed usage instructions
-- **[Known Issues](KNOWN_ISSUES.md)** - Issues and workarounds
-
----
-
-## Getting Help
-
-- **Questions**: [GitHub Discussions](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/discussions)
-- **Bug Reports**: [GitHub Issues](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues)
-- **Documentation**: [CLI Command Index](CLI_COMMAND_INDEX.md)
+| Document | Contents |
+|---|---|
+| [USER_GUIDE.md](USER_GUIDE.md) | Sources, search tuning, MCP tools, workspaces |
+| [ADMIN_GUIDE.md](ADMIN_GUIDE.md) | Full configuration schema, diagnostics, backup |
+| [INSTALL_V2.md](INSTALL_V2.md) | Installation options, upgrades, 1.x migration |
+| [KNOWN_ISSUES.md](KNOWN_ISSUES.md) | Security advisories and current limitations |
+| [../README.md](../README.md) | What Conduit is, and what changed in v2 |
