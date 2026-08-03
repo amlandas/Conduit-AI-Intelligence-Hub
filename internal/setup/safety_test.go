@@ -46,6 +46,17 @@ func TestAssertSafeDataDir_RejectsCatastrophicPaths(t *testing.T) {
 		{"media", "/media"},
 		{"net", "/net"},
 		{"srv", "/srv"},
+
+		// #87: on macOS Catalina and later the system volume is read-only and
+		// everything writable lives on a second volume mounted here -- every
+		// user's home included. "/System" was already listed, but this list is
+		// matched by exact path and by device:inode, and neither catches a
+		// child. The data volume is its own mount with its own inode, distinct
+		// from both "/" and "/Users", so nothing here resembled it.
+		{"macos data volume", "/System/Volumes/Data"},
+		{"macos data volume trailing separator", "/System/Volumes/Data/"},
+		{"macos data volume via dot", "/System/Volumes/Data/."},
+		{"macos data volume via dot-dot", "/System/Volumes/Data/Users/.."},
 	}
 
 	for _, c := range cases {

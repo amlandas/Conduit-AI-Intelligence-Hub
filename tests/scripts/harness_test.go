@@ -303,14 +303,23 @@ func (e *env) run(t *testing.T, script string, args ...string) result {
 // runWithStdin is run with something on standard input.
 func (e *env) runWithStdin(t *testing.T, stdin, script string, args ...string) result {
 	t.Helper()
+	return e.runWithEnv(t, nil, stdin, script, args...)
+}
+
+// runWithEnv is run with extra environment variables set.
+//
+// The base environment is still replaced rather than extended, so a variable
+// the caller does not name cannot leak in from the developer's shell.
+func (e *env) runWithEnv(t *testing.T, extra []string, stdin, script string, args ...string) result {
+	t.Helper()
 
 	cmd := exec.Command("bash", append([]string{scriptPath(t, script)}, args...)...)
-	cmd.Env = []string{
+	cmd.Env = append([]string{
 		"HOME=" + e.home,
 		"PATH=" + e.binDir + ":/usr/bin:/bin",
 		"SHELL=/bin/bash",
 		"TERM=dumb",
-	}
+	}, extra...)
 	cmd.Dir = e.home
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -388,23 +397,59 @@ func (e *env) withGNUStat(t *testing.T) bool {
 	return true
 }
 
-// runWithRealHome runs a script with the developer's actual HOME.
+// realHomeForbiddenFlags are the flags that must never appear in an invocation
+// pointed at the developer's actual home directory.
 //
-// Used only by the case-folding guard test, where the property under test is
-// how the real filesystem treats the real home directory's name. It is
-// restricted to --dry-run invocations for that reason: the whole point is that
-// the script must refuse before doing anything.
-func (e *env) runWithRealHome(t *testing.T, script string, args ...string) result {
-	t.Helper()
+// --dry-run is the property being relied on, but it is not the only thing that
+// decides whether a run is inert:
+//
+//   - --remove-data is the flag that selects the recursive delete. If a future
+//     edit ever let it past the guard, --dry-run would be the only thing
+//     between this suite and somebody's real knowledge base.
+//   - --force removes the confirmation prompt, which is the last human check.
+//   - --manual skips delegation and deletes files from the shell directly,
+//     which is a different and less careful code path from the one --dry-run
+//     was reasoned about on.
+//
+// Listing them is defence in depth: the intent is "this invocation cannot
+// touch anything", and --dry-run alone states that too narrowly.
+var realHomeForbiddenFlags = []string{"--remove-data", "--force", "-f", "--manual"}
 
+// assertRealHomeArgsSafe reports why an argument list is not safe to run
+// against the real home directory, or nil if it is.
+//
+// Split out as a pure function so the rule itself can be tested. A guard that
+// only ever runs inside a helper is a guard nothing verifies.
+func assertRealHomeArgsSafe(args []string) error {
 	dryRun := false
 	for _, a := range args {
 		if a == "--dry-run" {
 			dryRun = true
 		}
+		for _, bad := range realHomeForbiddenFlags {
+			if a == bad {
+				return fmt.Errorf("%s must never be run against the real home directory", bad)
+			}
+		}
 	}
 	if !dryRun {
-		t.Fatalf("runWithRealHome is only safe for --dry-run invocations; got %v", args)
+		return fmt.Errorf("only --dry-run invocations may be run against the real home directory")
+	}
+	return nil
+}
+
+// runWithRealHome runs a script with the developer's actual HOME.
+//
+// Used only by the case-folding guard test, where the property under test is
+// how the real filesystem treats the real home directory's name. Everything
+// about it is arranged so that the run cannot change anything: the arguments
+// are vetted before the script starts, and afterwards the stub records are
+// checked to prove no real work was attempted.
+func (e *env) runWithRealHome(t *testing.T, script string, args ...string) result {
+	t.Helper()
+
+	if err := assertRealHomeArgsSafe(args); err != nil {
+		t.Fatalf("runWithRealHome refused %v: %v", args, err)
 	}
 
 	realHome, err := os.UserHomeDir()
@@ -435,6 +480,19 @@ func (e *env) runWithRealHome(t *testing.T, script string, args ...string) resul
 		} else {
 			t.Fatalf("run %s: %v", script, runErr)
 		}
+	}
+
+	// The guard tests exist to prove the script refuses BEFORE it does
+	// anything. A run that reached the binary got past the refusal, and the
+	// only reason it changed nothing is that --dry-run happened to be set --
+	// which is exactly the thing that must not be the last line of defence.
+	//
+	// Checked after the fact rather than trusted, because it is the one
+	// assertion that can catch a guard regression while the test it belongs to
+	// still passes.
+	if invocations := e.realInvocations(t); len(invocations) != 0 {
+		t.Fatalf("a run against the REAL home directory invoked the binary %d time(s): %v\n%s",
+			len(invocations), invocations, out.String()+errOut.String())
 	}
 
 	return result{

@@ -35,11 +35,28 @@ readonly BINARY="conduit"
 # caller cannot tell a refusal from a completed uninstall.
 readonly EXIT_USER_CANCELLED=3
 
-DATA_DIR="${CONDUIT_DATA_DIR:-${HOME}/.conduit}"
-# Tracks whether the user named a data directory or we defaulted to one. The
-# distinction decides whether --data-dir is forwarded to the binary: forwarding
-# a default would override the user's configured data_dir.
+# Tracks whether the user named a data directory or we defaulted to one.
+#
+# The distinction decides two things: whether the absolute-path refusal applies
+# (a path we chose ourselves is not a typo waiting to happen), and whether
+# --data-dir is forwarded to the binary (forwarding a default would override the
+# user's configured data_dir).
+#
+# CONDUIT_DATA_DIR counts as the user naming one. It used to leave this false,
+# with two consequences. The absolute-path refusal was skipped, so
+# `CONDUIT_DATA_DIR=data ./uninstall.sh` was silently resolved against the
+# working directory -- exactly what that refusal exists to prevent, reached
+# through the other door. And because --data-dir was then not forwarded,
+# delegation ran against the binary's own default: the binary does NOT read
+# CONDUIT_DATA_DIR, only these scripts do, so the user named one directory and
+# Conduit removed ~/.conduit instead.
 DATA_DIR_EXPLICIT=false
+if [[ -n "${CONDUIT_DATA_DIR:-}" ]]; then
+    DATA_DIR="$CONDUIT_DATA_DIR"
+    DATA_DIR_EXPLICIT=true
+else
+    DATA_DIR="${HOME}/.conduit"
+fi
 PREFIX=""
 REMOVE_DATA=false
 FORCE=false
@@ -92,7 +109,8 @@ OPTIONS
                     configuration and any downloaded embedding models.
                     Without this flag, data is kept.
     --data-dir DIR  Conduit data directory (default: ~/.conduit,
-                    or $CONDUIT_DATA_DIR). Must be an absolute path.
+                    or $CONDUIT_DATA_DIR). Must be an absolute path, whether
+                    it comes from the flag or the environment variable.
     --prefix DIR    Remove the install at DIR instead of searching the usual
                     locations. Use this if you installed with
                     `install.sh --prefix DIR`.
@@ -275,9 +293,17 @@ path_identity() {
 # The mount points are here because an external disk, a network share or a
 # container bind mount is somebody's entire filesystem, and "--data-dir
 # /Volumes" differs from a real one by a single missing component.
+#
+# /System/Volumes/Data is listed separately from /System because the list is
+# matched by exact path and by device:inode, and neither of those catches a
+# CHILD of a protected directory. On macOS Catalina and later the system volume
+# is read-only and everything writable -- every user's home included -- lives on
+# a second volume mounted there. It is its own mount with its own inode,
+# distinct from both / and /Users, so nothing already in this list resembled it.
 protected_dirs() {
     printf '%s\n' / /usr /etc /var /opt /tmp /bin /sbin /home /Users /root \
-                  /System /Library /Applications /private /dev /proc /boot \
+                  /System /System/Volumes/Data \
+                  /Library /Applications /private /dev /proc /boot \
                   /Volumes /mnt /media /net /srv
 
     local home_canonical
