@@ -194,6 +194,15 @@ type UninstallOptions struct {
 	// RemoveDataDir removes ~/.conduit entirely, knowledge base included.
 	RemoveDataDir bool
 
+	// Prefix limits binary removal to a single directory.
+	//
+	// Empty means the conventional locations. A non-empty value is a promise
+	// that nothing outside it is touched: `--prefix /tmp/scratch` must never
+	// delete the copy in ~/.local/bin, which is exactly what would happen if
+	// this only *added* a path to the search list. Symlink cleanup is skipped
+	// too, since a symlink in /usr/local/bin is not part of that prefix.
+	Prefix string
+
 	// RemoveConfigOnly removes just the config file, keeping indexed data.
 	RemoveConfigOnly bool
 
@@ -269,6 +278,18 @@ func binaryPaths() []string {
 		filepath.Join(home, ".local", "bin", "conduit"),
 		filepath.Join(home, "bin", "conduit"),
 	}
+}
+
+// targetBinaryPaths returns the executables an uninstall should remove.
+//
+// A non-empty prefix replaces the default list rather than extending it. That
+// is the whole point of the flag: it names one install, and anything else on
+// the machine belongs to somebody else's.
+func targetBinaryPaths(prefix string) []string {
+	if prefix == "" {
+		return binaryPaths()
+	}
+	return []string{filepath.Join(prefix, "conduit")}
 }
 
 // symlinkPaths are the system-wide symlinks an install may create.
@@ -466,18 +487,22 @@ func Uninstall(ctx context.Context, dataDir string, opts UninstallOptions) (*Uni
 	}
 
 	if opts.RemoveBinaries {
-		for _, p := range binaryPaths() {
+		for _, p := range targetBinaryPaths(opts.Prefix) {
 			remove("binary", p, false)
 		}
 	}
 
-	if opts.RemoveSymlinks {
+	// A prefix-scoped uninstall must not reach outside that prefix, and
+	// /usr/local/bin is outside every prefix but its own.
+	if opts.RemoveSymlinks && opts.Prefix == "" {
 		for _, p := range symlinkPaths() {
 			remove("symlink", p, false)
 		}
 	}
 
-	if opts.RemoveShellConfig {
+	// The PATH line in a shell profile names the default prefix, so it belongs
+	// to the default install, not to whichever one --prefix selected.
+	if opts.RemoveShellConfig && opts.Prefix == "" {
 		for _, p := range shellConfigPaths() {
 			if err := stripShellConfig(p, opts.DryRun, result); err != nil {
 				result.Success = false

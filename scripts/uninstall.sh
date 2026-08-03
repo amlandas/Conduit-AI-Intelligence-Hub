@@ -1,477 +1,449 @@
-#!/bin/bash
+#!/usr/bin/env bash
 #
-# Conduit Uninstallation Script
+# uninstall.sh - remove Conduit 2.0.
 #
-# This script safely removes Conduit components:
-# 1. Stops and removes daemon service
-# 2. Removes binaries from PATH
-# 3. Optionally removes data directory
-# 4. Cleans up shell configuration
+# The binary knows better than this script does what it installed: which MCP
+# clients it configured, which shell profiles it edited, where its data lives.
+# So wherever a `conduit` binary is still present, this script delegates to
+# `conduit uninstall` and only cleans up what is left. The standalone path
+# exists for the case that actually needs a script -- a binary that is missing,
+# broken, or built for the wrong architecture.
 #
-# NOTE: Dependencies (Ollama, Podman/Docker, containers) are NOT removed.
-#       These may be shared with other projects. See manual cleanup below.
+# DATA SAFETY
+#
+#   Your indexed data is kept by default. Only --remove-data deletes it, and
+#   only after you confirm.
+#
+# This script does NOT remove the Conduit 1.x daemon, its service registration
+# or its containers. Use scripts/remove-v1.sh for that.
 #
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/uninstall.sh | bash
+#   ./uninstall.sh                  # remove the program, keep data
+#   ./uninstall.sh --remove-data    # remove everything
+#   ./uninstall.sh --dry-run        # show what would happen
 #
-# Or with options:
-#   bash uninstall.sh --force --remove-data
-#
+set -euo pipefail
 
-set -e
-
-# Colors for output
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
-NC='\033[0m' # No Color
-
+# ---------------------------------------------------------------------------
 # Configuration
-INSTALL_DIR="${HOME}/.local/bin"
-CONDUIT_HOME="${HOME}/.conduit"
-FORCE=false
+# ---------------------------------------------------------------------------
+
+readonly BINARY="conduit"
+
+DATA_DIR="${CONDUIT_DATA_DIR:-${HOME}/.conduit}"
+PREFIX=""
 REMOVE_DATA=false
-ERRORS=()
+FORCE=false
+DRY_RUN=false
 
-# Detect OS
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+FOUND=0
+REMOVED=0
+FAILED=0
 
-# Print functions
-print_banner() {
-    echo -e "${BLUE}"
-    echo "╔══════════════════════════════════════════════════════════════╗"
-    echo "║              Conduit Uninstallation                          ║"
-    echo "║       Remove Conduit and its dependencies                    ║"
-    echo "╚══════════════════════════════════════════════════════════════╝"
-    echo -e "${NC}"
+# Paths an install may have used. Kept in step with internal/setup/setup.go.
+BINARY_PATHS=(
+    "${HOME}/.local/bin/${BINARY}"
+    "${HOME}/bin/${BINARY}"
+)
+SYMLINK_PATHS=(
+    "/usr/local/bin/${BINARY}"
+    "/opt/homebrew/bin/${BINARY}"
+)
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
+if [[ -t 1 ]]; then
+    C_RESET=$'\033[0m'; C_RED=$'\033[0;31m'; C_GREEN=$'\033[0;32m'
+    C_YELLOW=$'\033[0;33m'; C_BLUE=$'\033[0;34m'; C_BOLD=$'\033[1m'
+else
+    C_RESET=''; C_RED=''; C_GREEN=''; C_YELLOW=''; C_BLUE=''; C_BOLD=''
+fi
+
+info() { printf '%s\n' "${C_BLUE}==>${C_RESET} $*"; }
+ok()   { printf '%s\n' "  ${C_GREEN}removed${C_RESET}  $*"; }
+plan() { printf '%s\n' "  ${C_YELLOW}would remove${C_RESET}  $*"; }
+warn() { printf '%s\n' "  ${C_YELLOW}!${C_RESET} $*" >&2; }
+bad()  { printf '%s\n' "  ${C_RED}failed${C_RESET}  $*" >&2; }
+die()  { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; exit 1; }
+
+usage() {
+    cat <<'EOF'
+uninstall.sh - remove Conduit 2.0
+
+USAGE
+    ./uninstall.sh [OPTIONS]
+
+OPTIONS
+    --remove-data   Also delete the data directory: the knowledge base, the
+                    configuration and any downloaded embedding models.
+                    Without this flag, data is kept.
+    --data-dir DIR  Conduit data directory (default: ~/.conduit,
+                    or $CONDUIT_DATA_DIR).
+    --prefix DIR    Remove the install at DIR instead of searching the usual
+                    locations. Use this if you installed with
+                    `install.sh --prefix DIR`.
+    --force         Skip confirmation prompts.
+    --dry-run       Show what would be removed and change nothing.
+    -h, --help      Show this help.
+
+WHAT IS REMOVED
+    - the conduit binary and any symlinks to it
+    - Conduit's MCP entries in Claude Code, Cursor and VS Code
+    - PATH lines Conduit added to your shell profile
+    - the data directory, but only with --remove-data
+
+WHAT IS NEVER REMOVED
+    Tools you may share with other projects: Ollama, poppler, llama.cpp,
+    Docker, Podman. Remove those yourself if nothing else needs them.
+
+CONDUIT 1.x
+    This script knows nothing about the v1 daemon, its launchd/systemd
+    registration or its containers. Remove those with:
+        ./scripts/remove-v1.sh --dry-run
+
+EXAMPLES
+    ./uninstall.sh                       # remove the program, keep data
+    ./uninstall.sh --dry-run             # preview
+    ./uninstall.sh --remove-data --force # remove everything, no prompts
+EOF
 }
 
-info() {
-    echo -e "${BLUE}ℹ${NC} $1"
-}
+# ---------------------------------------------------------------------------
+# Arguments
+# ---------------------------------------------------------------------------
 
-success() {
-    echo -e "${GREEN}✓${NC} $1"
-}
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --remove-data) REMOVE_DATA=true; shift ;;
+        --force|-f)    FORCE=true; shift ;;
+        --dry-run)     DRY_RUN=true; shift ;;
+        --data-dir)
+            [[ $# -ge 2 ]] || die "--data-dir requires a directory"
+            DATA_DIR="$2"; shift 2 ;;
+        --prefix)
+            [[ $# -ge 2 ]] || die "--prefix requires a directory"
+            PREFIX="$2"; shift 2 ;;
+        -h|--help)     usage; exit 0 ;;
+        *)             die "unknown option: $1 (try --help)" ;;
+    esac
+done
 
-warn() {
-    echo -e "${YELLOW}⚠${NC} $1"
-}
+# An explicit --prefix targets exactly one install and nothing else. Searching
+# the default locations as well would make `--prefix /tmp/test` quietly remove
+# the user's real installation, which is the opposite of what it asks for.
+if [[ -n "$PREFIX" ]]; then
+    BINARY_PATHS=("${PREFIX}/${BINARY}")
+    SYMLINK_PATHS=()
+fi
 
-error() {
-    echo -e "${RED}✗${NC} $1"
-    ERRORS+=("$1")
-}
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-# Prompt for confirmation
-confirm() {
-    local prompt="$1"
-    local default="${2:-n}"
+have() { command -v "$1" >/dev/null 2>&1; }
 
-    if [[ "$FORCE" == "true" ]]; then
+remove_path() {
+    local path="$1"
+
+    [[ -e "$path" || -L "$path" ]] || return 0
+    FOUND=$((FOUND + 1))
+
+    if [[ "$DRY_RUN" == true ]]; then
+        plan "$path"
         return 0
     fi
 
-    if [[ "$default" == "y" ]]; then
-        prompt="$prompt [Y/n]: "
-    else
-        prompt="$prompt [y/N]: "
+    if [[ ! -w "$(dirname "$path")" ]]; then
+        warn "$path is not writable by this user; remove it with:"
+        warn "    sudo rm -f $path"
+        return 0
     fi
 
-    # Use /dev/tty to read from terminal instead of stdin (fixes curl | bash)
-    read -r -p "$prompt" response </dev/tty
-    response=${response:-$default}
-
-    [[ "$response" =~ ^[Yy]$ ]]
+    if rm -rf -- "$path"; then
+        REMOVED=$((REMOVED + 1))
+        ok "$path"
+    else
+        FAILED=$((FAILED + 1))
+        bad "$path"
+    fi
 }
 
-# Check if a command exists
-command_exists() {
-    command -v "$1" >/dev/null 2>&1
+confirm() {
+    local prompt="$1" want="$2" answer
+
+    [[ "$FORCE" == true ]] && return 0
+    [[ "$DRY_RUN" == true ]] && return 0
+
+    if [[ ! -t 0 ]]; then
+        die "confirmation required but stdin is not a terminal; re-run with --force if you are sure"
+    fi
+
+    printf '%s' "$prompt"
+    read -r answer
+    [[ "$answer" == "$want" ]]
 }
 
-# Parse command line arguments
-parse_args() {
-    while [[ $# -gt 0 ]]; do
-        case $1 in
-            --force)
-                FORCE=true
-                shift
-                ;;
-            --remove-data)
-                REMOVE_DATA=true
-                shift
-                ;;
-            --install-dir)
-                INSTALL_DIR="$2"
-                shift 2
-                ;;
-            --conduit-home)
-                CONDUIT_HOME="$2"
-                shift 2
-                ;;
-            --help)
-                show_help
-                exit 0
-                ;;
-            *)
-                error "Unknown option: $1"
-                show_help
-                exit 1
-                ;;
-        esac
-    done
-}
-
-show_help() {
-    echo "Conduit Uninstallation Script"
-    echo ""
-    echo "Usage: uninstall.sh [OPTIONS]"
-    echo ""
-    echo "Options:"
-    echo "  --force              Skip confirmation prompts"
-    echo "  --remove-data        Also remove data directory (~/.conduit)"
-    echo "  --install-dir DIR    Binary installation directory (default: ~/.local/bin)"
-    echo "  --conduit-home DIR   Conduit data directory (default: ~/.conduit)"
-    echo "  --help               Show this help message"
-    echo ""
-    echo "NOTE: Dependencies (Ollama, Podman, containers) are NOT removed."
-    echo "      To remove manually:"
-    echo "        podman stop qdrant falkordb && podman rm qdrant falkordb"
-    echo "        rm -rf ~/.ollama && brew uninstall ollama"
-    echo "        podman machine stop && podman machine rm && brew uninstall podman"
-}
-
-# Stop Conduit daemon
-stop_daemon() {
-    echo ""
-    echo "Step 1: Stop Conduit Daemon"
-    echo "──────────────────────────────────────────────────────────────"
-
-    # Check if daemon is running
-    if curl -s --unix-socket "$CONDUIT_HOME/conduit.sock" http://localhost/api/v1/health >/dev/null 2>&1; then
-        warn "Conduit daemon is running"
-
-        if ! confirm "Stop the daemon?"; then
-            warn "Daemon left running. You may need to stop it manually later."
+# find_binary locates a usable conduit executable.
+#
+# The ${arr[@]+"${arr[@]}"} form is not decoration: under `set -u`, bash 3.2 --
+# which is still what /bin/bash is on macOS -- treats "${empty[@]}" as an
+# unbound variable and aborts. --prefix empties SYMLINK_PATHS.
+find_binary() {
+    local path
+    for path in "${BINARY_PATHS[@]}" ${SYMLINK_PATHS[@]+"${SYMLINK_PATHS[@]}"}; do
+        if [[ -x "$path" ]]; then
+            printf '%s' "$path"
             return 0
         fi
-
-        # Try to stop via service
-        case $OS in
-            darwin)
-                if launchctl list | grep -q "dev.simpleflo.conduit"; then
-                    info "Stopping launchd service..."
-                    launchctl stop dev.simpleflo.conduit 2>/dev/null || true
-                    success "Daemon stopped"
-                fi
-                ;;
-            linux)
-                if systemctl --user is-active conduit >/dev/null 2>&1; then
-                    info "Stopping systemd service..."
-                    systemctl --user stop conduit || error "Failed to stop systemd service"
-                    success "Daemon stopped"
-                fi
-                ;;
-        esac
-
-        # If still running, kill the process
-        sleep 1
-        if curl -s --unix-socket "$CONDUIT_HOME/conduit.sock" http://localhost/api/v1/health >/dev/null 2>&1; then
-            warn "Daemon still running. Attempting to terminate process..."
-            pkill -f "conduit-daemon" || error "Failed to kill daemon process"
-            sleep 1
-        fi
-
-        # Final check
-        if ! curl -s --unix-socket "$CONDUIT_HOME/conduit.sock" http://localhost/api/v1/health >/dev/null 2>&1; then
-            success "Daemon stopped successfully"
-        else
-            error "Failed to stop daemon. Please stop manually: pkill conduit-daemon"
-        fi
-    else
-        info "Daemon is not running"
-    fi
-}
-
-# Remove daemon service
-remove_service() {
-    echo ""
-    echo "Step 2: Remove Daemon Service"
-    echo "──────────────────────────────────────────────────────────────"
-
-    case $OS in
-        darwin)
-            local PLIST_PATH="$HOME/Library/LaunchAgents/dev.simpleflo.conduit.plist"
-            if [[ -f "$PLIST_PATH" ]]; then
-                if confirm "Remove launchd service?"; then
-                    info "Unloading service..."
-                    launchctl unload "$PLIST_PATH" 2>/dev/null || true
-                    rm -f "$PLIST_PATH" || error "Failed to remove $PLIST_PATH"
-                    success "Service removed"
-                else
-                    warn "Service configuration left in place"
-                fi
-            else
-                info "No launchd service found"
-            fi
-            ;;
-        linux)
-            local SERVICE_PATH="$HOME/.config/systemd/user/conduit.service"
-            if [[ -f "$SERVICE_PATH" ]]; then
-                if confirm "Remove systemd service?"; then
-                    info "Disabling and removing service..."
-                    systemctl --user disable conduit 2>/dev/null || true
-                    systemctl --user stop conduit 2>/dev/null || true
-                    rm -f "$SERVICE_PATH" || error "Failed to remove $SERVICE_PATH"
-                    systemctl --user daemon-reload || true
-                    success "Service removed"
-                else
-                    warn "Service configuration left in place"
-                fi
-            else
-                info "No systemd service found"
-            fi
-            ;;
-    esac
-}
-
-# Remove binaries
-remove_binaries() {
-    echo ""
-    echo "Step 3: Remove Binaries"
-    echo "──────────────────────────────────────────────────────────────"
-
-    local binaries=("$INSTALL_DIR/conduit" "$INSTALL_DIR/conduit-daemon")
-    local found=false
-
-    for binary in "${binaries[@]}"; do
-        if [[ -f "$binary" ]]; then
-            found=true
-            break
-        fi
     done
-
-    if [[ "$found" == "false" ]]; then
-        info "No Conduit binaries found in $INSTALL_DIR"
+    # An explicit --prefix means "this install and no other", so PATH is not
+    # consulted: it would find somebody else's copy.
+    if [[ -z "$PREFIX" ]] && have "$BINARY"; then
+        command -v "$BINARY"
         return 0
     fi
-
-    if ! confirm "Remove Conduit binaries from $INSTALL_DIR?"; then
-        warn "Binaries left in place"
-        return 0
-    fi
-
-    for binary in "${binaries[@]}"; do
-        if [[ -f "$binary" ]]; then
-            rm -f "$binary" || error "Failed to remove $binary"
-            success "Removed $(basename "$binary")"
-        fi
-    done
+    return 1
 }
 
-# Remove Conduit data directory
-remove_data() {
-    echo ""
-    echo "Step 4: Remove Conduit Data"
-    echo "──────────────────────────────────────────────────────────────"
+# ---------------------------------------------------------------------------
+# Delegation
+#
+# `conduit uninstall` removes its own MCP entries, shell PATH lines and GUI
+# state. Reimplementing that here would guarantee the two drift apart, and the
+# script would be the one that is wrong.
+# ---------------------------------------------------------------------------
 
-    if [[ ! -d "$CONDUIT_HOME" ]]; then
-        info "No data directory found at $CONDUIT_HOME"
-        return 0
-    fi
+delegate_to_binary() {
+    local conduit="$1"
+    local -a args=("uninstall" "--force")
 
-    local data_size=$(du -sh "$CONDUIT_HOME" 2>/dev/null | cut -f1 || echo "unknown")
-
-    if [[ "$REMOVE_DATA" == "true" ]] || [[ "$FORCE" == "true" ]]; then
-        if [[ "$FORCE" != "true" ]]; then
-            warn "This will permanently delete all Conduit data ($data_size)!"
-            read -r -p "Type 'DELETE' to confirm: " confirm_delete </dev/tty
-            if [[ "$confirm_delete" != "DELETE" ]]; then
-                warn "Deletion cancelled. Data preserved."
-                return 0
-            fi
-        fi
-        info "Removing data directory ($data_size)..."
-        rm -rf "$CONDUIT_HOME" || error "Failed to remove $CONDUIT_HOME"
-        success "Data directory removed"
+    if [[ "$REMOVE_DATA" == true ]]; then
+        args+=("--all")
     else
-        info "Data directory preserved at $CONDUIT_HOME ($data_size)"
-        echo "  Use --remove-data flag to remove data directory"
+        args+=("--keep-data")
     fi
-}
+    [[ "$DRY_RUN" == true ]] && args+=("--dry-run")
+    # Without this, `uninstall.sh --prefix /tmp/x` would delegate to a binary
+    # that then removes the copy in ~/.local/bin: the exact install the flag
+    # promised to leave alone.
+    [[ -n "$PREFIX" ]] && args+=("--prefix" "$PREFIX")
 
-# Clean up shell configuration
-cleanup_shell_config() {
-    echo ""
-    echo "Step 5: Clean Up Shell Configuration"
-    echo "──────────────────────────────────────────────────────────────"
+    info "Delegating to ${conduit} uninstall"
 
-    local shell_configs=("$HOME/.bashrc" "$HOME/.zshrc" "$HOME/.config/fish/config.fish")
-    local found=false
-
-    for config in "${shell_configs[@]}"; do
-        if [[ -f "$config" ]] && grep -q "$INSTALL_DIR" "$config" 2>/dev/null; then
-            found=true
-            break
-        fi
-    done
-
-    if [[ "$found" == "false" ]]; then
-        info "No Conduit PATH entries found in shell configs"
-        return 0
+    # A binary that cannot run -- wrong architecture, missing library, or
+    # simply broken -- must not stop the uninstall. Fall through to the manual
+    # path instead.
+    if ! "$conduit" "${args[@]}"; then
+        warn "'${conduit} uninstall' failed; falling back to manual removal"
+        return 1
     fi
-
-    if ! confirm "Remove Conduit PATH entries from shell configuration?"; then
-        warn "Shell configuration left unchanged"
-        return 0
-    fi
-
-    for config in "${shell_configs[@]}"; do
-        if [[ -f "$config" ]]; then
-            # Create backup
-            cp "$config" "$config.conduit-backup" 2>/dev/null || true
-
-            # Remove Conduit-related lines
-            if grep -q "$INSTALL_DIR" "$config" 2>/dev/null; then
-                # Remove the PATH export line and the "# Conduit" comment
-                sed -i.bak "/# Conduit/d; /export PATH.*${INSTALL_DIR////\\/}/d" "$config" 2>/dev/null || {
-                    # macOS sed requires empty string for -i
-                    sed -i '' "/# Conduit/d; /export PATH.*${INSTALL_DIR////\\/}/d" "$config" 2>/dev/null || error "Failed to update $config"
-                }
-                rm -f "$config.bak" 2>/dev/null || true
-                success "Cleaned up $(basename "$config")"
-            fi
-        fi
-    done
-
-    info "Backup copies saved with .conduit-backup extension"
-}
-
-# Print summary
-print_summary() {
-    echo ""
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo -e "${GREEN}               Uninstallation Complete!                        ${NC}"
-    echo -e "${GREEN}══════════════════════════════════════════════════════════════${NC}"
-    echo ""
-
-    if [[ ${#ERRORS[@]} -gt 0 ]]; then
-        echo -e "${YELLOW}Some errors occurred during uninstallation:${NC}"
-        echo ""
-        for err in "${ERRORS[@]}"; do
-            echo -e "  ${RED}✗${NC} $err"
-        done
-        echo ""
-        echo "You may need to manually clean up these components."
-        echo ""
-    else
-        echo "Conduit has been successfully removed from your system."
-        echo ""
-    fi
-
-    echo "Summary:"
-    echo ""
-    [[ ! -f "$INSTALL_DIR/conduit" ]] && echo -e "  ${GREEN}✓${NC} Binaries removed"
-    if [[ ! -d "$CONDUIT_HOME" ]]; then
-        echo -e "  ${GREEN}✓${NC} Data directory removed"
-    else
-        echo -e "  ${YELLOW}○${NC} Data directory preserved at $CONDUIT_HOME"
-    fi
-    echo ""
-
-    echo "To remove dependencies manually (if no longer needed):"
-    echo "  • Containers: podman stop qdrant falkordb && podman rm qdrant falkordb"
-    echo "  • Ollama: rm -rf ~/.ollama && brew uninstall ollama"
-    echo "  • Podman: podman machine stop && podman machine rm && brew uninstall podman"
-    echo ""
-
-    echo "You may want to:"
-    echo "  - Restart your terminal to apply shell configuration changes"
-    echo "  - Review backup files (*.conduit-backup) in your home directory"
-    echo ""
-    echo "Thank you for trying Conduit!"
-    echo ""
-}
-
-# Delegate to CLI if available (ensures consistent behavior)
-delegate_to_cli() {
-    local cli_path=""
-
-    # Find conduit CLI
-    if command_exists conduit; then
-        cli_path=$(command -v conduit)
-    elif [[ -f "$INSTALL_DIR/conduit" ]]; then
-        cli_path="$INSTALL_DIR/conduit"
-    fi
-
-    if [[ -z "$cli_path" ]]; then
-        return 1  # CLI not found, use fallback
-    fi
-
-    info "Using Conduit CLI for uninstallation..."
-    echo ""
-
-    # Build CLI flags
-    local cli_flags=""
-    if [[ "$FORCE" == "true" ]]; then
-        cli_flags="--force"
-    fi
-
-    # Add --all flag if removing data
-    if [[ "$REMOVE_DATA" == "true" ]]; then
-        cli_flags="$cli_flags --all"
-    fi
-
-    # Execute CLI uninstall for core components
-    if [[ -n "$cli_flags" ]]; then
-        "$cli_path" uninstall $cli_flags || true
-    else
-        "$cli_path" uninstall || true
-    fi
-
     return 0
 }
 
-# Main uninstallation flow
-main() {
-    parse_args "$@"
+# ---------------------------------------------------------------------------
+# Manual removal
+# ---------------------------------------------------------------------------
 
-    print_banner
+remove_binaries() {
+    info "Binaries"
 
-    echo ""
-    echo "This script will remove Conduit from your system."
-    echo ""
-    echo "  Installation directory: $INSTALL_DIR"
-    echo "  Data directory:         $CONDUIT_HOME"
-    echo "  Remove data:            $REMOVE_DATA"
-    echo ""
+    local path
+    for path in "${BINARY_PATHS[@]}"; do
+        remove_path "$path"
+    done
 
-    if [[ "$FORCE" != "true" ]] && ! confirm "Proceed with uninstallation?"; then
-        echo "Uninstallation cancelled."
-        exit 0
-    fi
-
-    # Try to delegate to CLI for core uninstall (consistent behavior)
-    # If CLI exists, it handles: daemon, service, binaries, data, shell config
-    if delegate_to_cli; then
-        info "Core uninstall completed via CLI"
-    else
-        # Fallback: CLI not available, use bash implementation
-        warn "Conduit CLI not found, using fallback uninstallation..."
-        echo ""
-
-        # Execute uninstallation steps (continue on error)
-        stop_daemon || true
-        remove_service || true
-        remove_binaries || true
-        remove_data || true
-        cleanup_shell_config || true
-    fi
-
-    print_summary
+    # Only remove a symlink that points at Conduit. A real binary somebody
+    # installed at /usr/local/bin/conduit by hand is theirs, not ours.
+    for path in ${SYMLINK_PATHS[@]+"${SYMLINK_PATHS[@]}"}; do
+        if [[ -L "$path" ]]; then
+            remove_path "$path"
+        elif [[ -e "$path" ]]; then
+            FOUND=$((FOUND + 1))
+            warn "$path exists but is not a symlink; left in place."
+            warn "    Remove it yourself if you no longer want it: sudo rm $path"
+        fi
+    done
 }
 
-# Run main
+remove_shell_path_lines() {
+    info "Shell profiles"
+
+    local files=(
+        "${HOME}/.zshrc"
+        "${HOME}/.bashrc"
+        "${HOME}/.bash_profile"
+        "${HOME}/.profile"
+    )
+
+    local file
+    for file in "${files[@]}"; do
+        [[ -f "$file" ]] || continue
+        grep -q 'conduit' "$file" 2>/dev/null || continue
+
+        FOUND=$((FOUND + 1))
+
+        if [[ "$DRY_RUN" == true ]]; then
+            plan "Conduit lines in $file"
+            grep -n 'conduit' "$file" | sed 's/^/      /'
+            continue
+        fi
+
+        # Never edit a profile in place without a copy: a broken .zshrc locks
+        # somebody out of their own shell.
+        local backup="${file}.conduit-uninstall.bak"
+        cp -- "$file" "$backup" || { bad "could not back up $file"; continue; }
+
+        local tmp
+        tmp="$(mktemp)"
+        grep -v 'conduit' "$file" > "$tmp" || true
+
+        if mv -f -- "$tmp" "$file"; then
+            REMOVED=$((REMOVED + 1))
+            ok "Conduit lines in $file  (backup: $backup)"
+        else
+            rm -f -- "$tmp"
+            FAILED=$((FAILED + 1))
+            bad "$file"
+        fi
+    done
+}
+
+remove_mcp_entries_manually() {
+    info "MCP client entries"
+
+    # Without a working binary there is no safe way to edit a JSON config from
+    # shell: these files hold the user's other MCP servers and unrelated
+    # settings, and a sed-based edit would eventually eat one of them.
+    local configs=(
+        "${HOME}/.claude.json"
+        "${HOME}/.cursor/settings/extensions.json"
+        "${HOME}/.vscode/settings.json"
+    )
+
+    local file listed=false
+    for file in "${configs[@]}"; do
+        [[ -f "$file" ]] || continue
+        grep -q 'conduit-kb' "$file" 2>/dev/null || continue
+
+        listed=true
+        FOUND=$((FOUND + 1))
+        warn "$file still registers the 'conduit-kb' MCP server."
+    done
+
+    if [[ "$listed" == true ]]; then
+        warn "No working conduit binary was available to remove these safely."
+        warn "  Delete the 'conduit-kb' entry from each file by hand: editing"
+        warn "  them from a shell script risks losing your other settings."
+    else
+        printf '%s\n' "  none found"
+    fi
+}
+
+remove_data_dir() {
+    if [[ "$REMOVE_DATA" != true ]]; then
+        info "Data"
+        if [[ -d "$DATA_DIR" ]]; then
+            printf '%s\n' "  ${C_GREEN}kept${C_RESET}  $DATA_DIR"
+            printf '%s\n' "  Your knowledge base, configuration and models are untouched."
+            printf '%s\n' "  Pass --remove-data to delete them."
+        else
+            printf '%s\n' "  no data directory at $DATA_DIR"
+        fi
+        return 0
+    fi
+
+    info "Data"
+
+    if [[ ! -d "$DATA_DIR" ]]; then
+        printf '%s\n' "  no data directory at $DATA_DIR"
+        return 0
+    fi
+
+    local size
+    size="$(du -sh "$DATA_DIR" 2>/dev/null | awk '{print $1}')"
+    printf '%s\n' "  ${C_BOLD}${DATA_DIR}${C_RESET} (${size:-unknown size})"
+
+    if ! confirm "  Permanently delete this? Type UNINSTALL to confirm: " "UNINSTALL"; then
+        printf '%s\n' "  ${C_YELLOW}kept${C_RESET}  $DATA_DIR (not confirmed)"
+        return 0
+    fi
+
+    remove_path "$DATA_DIR"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+main() {
+    printf '%s\n' "${C_BOLD}Conduit 2.0 uninstaller${C_RESET}"
+    printf '%s\n' "Data directory: ${DATA_DIR}"
+
+    if [[ "$DRY_RUN" == true ]]; then
+        printf '%s\n\n' "${C_YELLOW}DRY RUN - nothing will be removed.${C_RESET}"
+    else
+        printf '\n'
+    fi
+
+    local conduit delegated=false
+    if conduit="$(find_binary)"; then
+        if delegate_to_binary "$conduit"; then
+            delegated=true
+        fi
+    else
+        info "No conduit binary found; removing what is on disk"
+    fi
+
+    # Always sweep the filesystem afterwards. `conduit uninstall` removes the
+    # binary it knows about; a second copy at another prefix would otherwise
+    # survive and keep answering `conduit`.
+    remove_binaries
+
+    # Shell profiles and MCP entries are per-user, not per-install. Under
+    # --prefix they belong to whichever copy is on PATH -- the one the flag
+    # promised not to disturb -- so the fallback path must respect that scoping
+    # just as the delegated path does.
+    if [[ "$delegated" != true && -z "$PREFIX" ]]; then
+        remove_shell_path_lines
+        remove_mcp_entries_manually
+    elif [[ "$delegated" != true && -n "$PREFIX" ]]; then
+        info "Shell profiles and MCP entries"
+        printf '%s\n' "  skipped: --prefix targets one install, these are shared"
+    fi
+
+    remove_data_dir
+
+    printf '\n%s\n' "${C_BOLD}Summary${C_RESET}"
+    if [[ "$delegated" == true ]]; then
+        # The binary reported its own removals above. These counters cover only
+        # what was left for the script to clean up afterwards, and saying
+        # "0 removed" without that context reads like nothing happened.
+        printf '%s\n' "  conduit uninstall did the work; its report is above."
+    fi
+    if [[ "$DRY_RUN" == true ]]; then
+        printf '%s\n' "  $FOUND additional item(s) found, 0 removed (dry run)."
+    else
+        printf '%s\n' "  $FOUND additional found, $REMOVED removed, $FAILED failed."
+    fi
+
+    printf '\n%s\n' "Conduit never removes tools you may share with other projects."
+    printf '%s\n' "  Ollama:      rm -rf ~/.ollama && brew uninstall ollama"
+    printf '%s\n' "  poppler:     brew uninstall poppler"
+    printf '%s\n' "  llama.cpp:   brew uninstall llama.cpp"
+
+    if [[ -e "${HOME}/.local/bin/conduit-daemon" ]] ||
+       [[ -e "${HOME}/Library/LaunchAgents/dev.simpleflo.conduit.plist" ]] ||
+       [[ -e "${HOME}/Library/LaunchAgents/com.simpleflo.conduit.plist" ]] ||
+       [[ -e "${HOME}/.config/systemd/user/conduit.service" ]]; then
+        printf '\n'
+        warn "Conduit 1.x components are still installed on this machine."
+        warn "  Remove them with: ./scripts/remove-v1.sh --dry-run"
+    fi
+
+    [[ "$FAILED" -gt 0 ]] && return 1
+    return 0
+}
+
 main "$@"

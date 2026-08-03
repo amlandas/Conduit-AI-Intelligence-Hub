@@ -22,6 +22,7 @@ func uninstallCmd() *cobra.Command {
 		dryRun     bool
 		jsonOutput bool
 		showInfo   bool
+		prefix     string
 	)
 
 	cmd := &cobra.Command{
@@ -131,6 +132,7 @@ Examples:
 			opts.Force = force
 			opts.DryRun = dryRun
 			opts.JSON = jsonOutput
+			opts.Prefix = prefix
 
 			// Confirmation for data removal (unless --force or --dry-run)
 			if !force && !dryRun && opts.RemoveDataDir {
@@ -152,11 +154,20 @@ Examples:
 				return fmt.Errorf("uninstall failed: %w", err)
 			}
 
-			// ALWAYS strip the MCP entries. A client left pointing at a
-			// binary that no longer exists fails at every startup with an
-			// error the user cannot act on, so this is not optional and is not
-			// gated on --all: the entry describes the program, not the data.
-			if dryRun {
+			// Strip the MCP entries. A client left pointing at a binary that no
+			// longer exists fails at every startup with an error the user
+			// cannot act on, so this is not gated on --all: the entry describes
+			// the program, not the data.
+			//
+			// --prefix is the exception. It removes one install out of several,
+			// and an MCP entry says `command: conduit` -- it belongs to
+			// whichever copy is on PATH, which is exactly the one that flag
+			// promised to leave alone.
+			switch {
+			case prefix != "":
+				fmt.Fprintln(os.Stderr,
+					"Note: --prefix given; MCP client entries, shell PATH lines and GUI state were left alone.")
+			case dryRun:
 				for _, id := range setuppkg.MCPClientIDs() {
 					if client, lerr := setuppkg.LookupMCPClient(id); lerr == nil {
 						if configured, _ := setuppkg.IsMCPClientConfigured(client.ConfigPath); configured {
@@ -165,7 +176,7 @@ Examples:
 						}
 					}
 				}
-			} else {
+			default:
 				removals, rerrs := setuppkg.RemoveAllMCPClients()
 				for _, r := range removals {
 					if r.Removed {
@@ -182,10 +193,17 @@ Examples:
 			// ALWAYS remove GUI state (Electron app userData)
 			// This ensures a clean slate on reinstall, regardless of --keep-data flag
 			// GUI state should NEVER persist independently of CLI state
+			//
+			// Except under --prefix, for the same reason as the MCP entries:
+			// there is one GUI state directory per user, and it belongs to the
+			// install that is actually in use.
 			home, _ := os.UserHomeDir()
 			electronDataDirs := []string{
 				filepath.Join(home, "Library", "Application Support", "conduit-desktop"), // macOS
 				filepath.Join(home, ".config", "conduit-desktop"),                        // Linux
+			}
+			if prefix != "" {
+				electronDataDirs = nil
 			}
 
 			for _, dir := range electronDataDirs {
@@ -273,6 +291,8 @@ Examples:
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Show what would be removed without removing")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output results as JSON")
 	cmd.Flags().BoolVar(&showInfo, "info", false, "Show installation status without uninstalling")
+	cmd.Flags().StringVar(&prefix, "prefix", "",
+		"Remove only the install in this directory, leaving any other copy alone")
 
 	return cmd
 }
