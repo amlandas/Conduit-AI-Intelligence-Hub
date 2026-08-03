@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -330,14 +331,46 @@ func isMissingTableErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such table")
 }
 
+// ErrDocumentNotFound reports that no indexed document matched a lookup.
+//
+// It carries no detail about the lookup key or the corpus, so a caller can
+// decide for itself how much to say. Issue #91: the MCP server answers a path
+// miss with a fixed message rather than reflecting anything back to the client.
+var ErrDocumentNotFound = errors.New("document not found")
+
 // GetDocument retrieves a document by ID.
 func (idx *Indexer) GetDocument(ctx context.Context, documentID string) (*Document, error) {
+	doc, err := idx.getDocumentBy(ctx, "document_id", documentID)
+	if errors.Is(err, ErrDocumentNotFound) {
+		// Message text is unchanged from before this became a shared helper:
+		// "document not found: <id>".
+		return nil, fmt.Errorf("%w: %s", ErrDocumentNotFound, documentID)
+	}
+	return doc, err
+}
+
+// GetDocumentByPath retrieves a document by its indexed path (#91).
+//
+// kb_documents.path is UNIQUE, so at most one row can match. Paths are stored
+// absolute and matched exactly: no filesystem resolution, no cleaning, no
+// relative-path guessing happens here, because a lookup key must not be able to
+// reach outside what is already indexed. A miss returns ErrDocumentNotFound.
+func (idx *Indexer) GetDocumentByPath(ctx context.Context, path string) (*Document, error) {
+	return idx.getDocumentBy(ctx, "path", path)
+}
+
+// getDocumentBy loads one document row by a unique column.
+//
+// column is never caller-supplied: it comes from the fixed set of literals used
+// by GetDocument and GetDocumentByPath, both of which name a UNIQUE column. The
+// value is always bound as a parameter.
+func (idx *Indexer) getDocumentBy(ctx context.Context, column, value string) (*Document, error) {
 	row := idx.db.QueryRowContext(ctx, `
 		SELECT document_id, source_id, path, title, mime_type, size,
 		       modified_at, indexed_at, hash, metadata, chunk_count
 		FROM kb_documents
-		WHERE document_id = ?
-	`, documentID)
+		WHERE `+column+` = ?
+	`, value)
 
 	var doc Document
 	var modifiedAt, indexedAt sql.NullString
@@ -348,7 +381,7 @@ func (idx *Indexer) GetDocument(ctx context.Context, documentID string) (*Docume
 		&doc.Size, &modifiedAt, &indexedAt, &doc.Hash, &metadata, &doc.ChunkCount,
 	)
 	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("document not found: %s", documentID)
+		return nil, ErrDocumentNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("scan document: %w", err)

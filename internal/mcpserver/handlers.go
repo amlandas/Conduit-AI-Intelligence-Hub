@@ -2,6 +2,7 @@ package mcpserver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -48,10 +49,23 @@ func recallMode(mode string) kb.RecallMode {
 }
 
 // formatHit renders a single search hit. kb_search and kb_lexical_search share
-// this so citation fields (title, score, path, snippet) are identical.
+// this so citation fields (title, score, path, document_id, snippet) are
+// identical.
+//
+// The document_id line exists because of issue #91: a client that had just run
+// kb_search had no way to fetch the full document. The result text showed a
+// title and a path, kb_get_document wanted an opaque internal ID, and the ID
+// appeared nowhere -- so Claude Code concluded "the document ID isn't the path"
+// and fell back to reading the file off disk, which clients without filesystem
+// access (Claude Desktop, ChatGPT) cannot do.
+//
+// The label is deliberately the exact argument name kb_get_document takes, so
+// the value can be copied across without a translation step. It sits directly
+// under Path so the rest of the block stays byte-for-byte what scripts and
+// tuned client prompts already parse.
 func formatHit(hit kb.SearchHit) string {
-	return fmt.Sprintf("**%s** (score: %.4f)\nPath: %s\n\n%s",
-		hit.Title, hit.Score, hit.Path, hit.Snippet)
+	return fmt.Sprintf("**%s** (score: %.4f)\nPath: %s\ndocument_id: %s\n\n%s",
+		hit.Title, hit.Score, hit.Path, hit.DocumentID, hit.Snippet)
 }
 
 // degradedBanner renders the degraded-mode note for a hybrid result, or "" when
@@ -232,7 +246,12 @@ func (s *Server) toolSearchWithContext(ctx context.Context, _ *mcp.CallToolReque
 		if p.Source.Section != "" {
 			sb.WriteString(fmt.Sprintf(" - %s", p.Source.Section))
 		}
-		sb.WriteString("*\n\n")
+		sb.WriteString("*\n")
+		// #91: the retrieval key, under the citation line and labelled with the
+		// exact argument name kb_get_document takes. Without it this tool is a
+		// dead end -- Source shows a bare filename (ResultProcessor stores the
+		// basename), so there is not even a path to fall back to.
+		sb.WriteString(fmt.Sprintf("document_id: %s\n\n", p.DocumentID))
 		sb.WriteString(p.Content)
 		sb.WriteString("\n")
 
@@ -267,14 +286,54 @@ func (s *Server) toolListSources(ctx context.Context, _ *mcp.CallToolRequest, _ 
 	return textResult(text), nil, nil
 }
 
-// toolGetDocument gets a document by ID.
+// getDocumentKeyError is the message for a call that supplies neither key or
+// both. It names the flow rather than just the constraint, because the client
+// that hits it is usually one that never learned where document_id comes from.
+const getDocumentKeyError = "kb_get_document needs exactly one of document_id or path. " +
+	"Run kb_search first, then copy the value from the 'document_id:' line of the hit you want."
+
+// getDocumentPathMiss is the answer to a path that is not in the index.
+//
+// It is a fixed string: it does not echo the requested path and says nothing
+// about what the corpus does contain, so a wrong or probing path learns only
+// that it did not match.
+const getDocumentPathMiss = "No indexed document has that path. " +
+	"path must be the absolute path exactly as printed on a search hit's 'Path:' line. " +
+	"Run kb_search and use the 'document_id:' value from a hit instead."
+
+// toolGetDocument gets a document by ID, or by path (#91).
+//
+// Two keys, exactly one of them: document_id is the primary key search results
+// now carry, and path is the alternative for a caller holding only the location
+// (kb_documents.path is UNIQUE, so it identifies a document just as precisely).
 func (s *Server) toolGetDocument(ctx context.Context, _ *mcp.CallToolRequest, args getDocumentArgs) (*mcp.CallToolResult, any, error) {
-	doc, err := s.indexer.GetDocument(ctx, args.DocumentID)
-	if err != nil {
-		return nil, nil, fmt.Errorf("get document: %w", err)
+	documentID := strings.TrimSpace(args.DocumentID)
+	path := strings.TrimSpace(args.Path)
+
+	if (documentID == "") == (path == "") {
+		return nil, nil, errors.New(getDocumentKeyError)
 	}
 
-	chunks, err := s.indexer.GetChunks(ctx, args.DocumentID)
+	var doc *kb.Document
+	var err error
+	if documentID != "" {
+		doc, err = s.indexer.GetDocument(ctx, documentID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("get document: %w", err)
+		}
+	} else {
+		doc, err = s.indexer.GetDocumentByPath(ctx, path)
+		if errors.Is(err, kb.ErrDocumentNotFound) {
+			// Deliberately not wrapped: a relative path, a typo and a path
+			// belonging to another machine all get the same answer.
+			return nil, nil, errors.New(getDocumentPathMiss)
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("get document: %w", err)
+		}
+	}
+
+	chunks, err := s.indexer.GetChunks(ctx, doc.DocumentID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("get chunks: %w", err)
 	}

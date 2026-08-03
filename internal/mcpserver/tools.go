@@ -60,8 +60,14 @@ type searchWithContextArgs struct {
 
 type listSourcesArgs struct{}
 
+// getDocumentArgs takes two alternative keys, exactly one of which must be set.
+// The constraint is enforced in the handler rather than in the schema (#91):
+// JSON Schema oneOf/anyOf survives the round trip unevenly across MCP clients,
+// and a sentence in an error message teaches the calling model more than a
+// validation failure does.
 type getDocumentArgs struct {
 	DocumentID string `json:"document_id"`
+	Path       string `json:"path"`
 }
 
 type statsArgs struct {
@@ -142,9 +148,12 @@ func recallModeSchema() *jsonschema.Schema {
 // ---------------------------------------------------------------------------
 
 func (s *Server) registerTools() {
+	// The trailing sentence is the #91 addition: the first two sentences are the
+	// original wording, unchanged.
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        ToolSearch,
-		Description: "Search the knowledge base for relevant documents using hybrid search (FTS5 keyword matching + semantic similarity when available). Use short keyword phrases for best results.",
+		Name: ToolSearch,
+		Description: "Search the knowledge base for relevant documents using hybrid search (FTS5 keyword matching + semantic similarity when available). Use short keyword phrases for best results. " +
+			"Every hit prints a 'document_id:' line -- pass that value to kb_get_document to read the whole document.",
 		InputSchema: object(map[string]*jsonschema.Schema{
 			"query":       str("The search query. Use short keyword phrases (e.g., 'authentication JWT' rather than 'how does authentication work with JWT tokens')."),
 			"limit":       integer("Maximum number of results (default: 10, max: 50)"),
@@ -181,12 +190,19 @@ func (s *Server) registerTools() {
 		InputSchema: object(nil),
 	}, s.toolListSources)
 
+	// #91: kb_get_document used to require an internal document_id that no
+	// search result ever printed, so the retrieval flow dead-ended one step
+	// before the document. Both halves of the fix are visible here: the
+	// description now states the flow, and path is accepted as an alternative
+	// key for a caller that has a location but not an ID.
 	mcp.AddTool(s.mcp, &mcp.Tool{
-		Name:        ToolGetDocument,
-		Description: "Retrieve the full content of a specific document by its ID. Use document IDs from search results.",
+		Name: ToolGetDocument,
+		Description: "Retrieve the full content of a specific document. Supply exactly one of document_id or path. " +
+			"Flow: run kb_search (or kb_lexical_search / kb_search_with_context), copy the 'document_id:' value printed under the hit you want, then pass it here.",
 		InputSchema: object(map[string]*jsonschema.Schema{
-			"document_id": str("The document ID from search results"),
-		}, "document_id"),
+			"document_id": str("The value from the 'document_id:' line of a search hit. Preferred key."),
+			"path":        str("Absolute path of the document, exactly as printed on a search hit's 'Path:' line. Alternative to document_id."),
+		}),
 	}, s.toolGetDocument)
 
 	mcp.AddTool(s.mcp, &mcp.Tool{
