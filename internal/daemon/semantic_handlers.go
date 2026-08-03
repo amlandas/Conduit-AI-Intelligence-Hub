@@ -1,5 +1,17 @@
 package daemon
 
+// Runtime attach/detach/reindex for semantic search.
+//
+// These endpoints predate WP-2.1, when semantic search meant "a Qdrant
+// container that may or may not be running" and attaching was how you enabled
+// it without restarting the daemon. Vectors now live in the knowledge base file
+// itself, so attaching is only about (re)creating the searcher and rewiring the
+// indexers -- there is nothing external to wait for.
+//
+// TODO(WP-3.2): remove with dead-stack teardown. The route names and the CLI
+// verbs that call them are vestigial; the whole attach/detach concept goes away
+// once semantic search is unconditionally on.
+
 import (
 	"context"
 	"net/http"
@@ -8,11 +20,8 @@ import (
 	"github.com/simpleflo/conduit/pkg/models"
 )
 
-// handleQdrantAttach enables semantic search at runtime.
-// This allows the daemon to start using Qdrant without a restart.
-func (d *Daemon) handleQdrantAttach(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-
+// handleSemanticAttach enables semantic search at runtime.
+func (d *Daemon) handleSemanticAttach(w http.ResponseWriter, r *http.Request) {
 	// Check if already attached
 	d.mu.RLock()
 	if d.kbSemantic != nil {
@@ -25,37 +34,7 @@ func (d *Daemon) handleQdrantAttach(w http.ResponseWriter, r *http.Request) {
 	}
 	d.mu.RUnlock()
 
-	// Re-check if Qdrant is now available
-	if err := d.kbQdrant.EnsureReady(ctx); err != nil {
-		writeError(w, http.StatusServiceUnavailable, models.ErrRuntimeUnavailable,
-			"Qdrant not ready: "+err.Error())
-		return
-	}
-
-	if !d.kbQdrant.IsAvailable() {
-		writeError(w, http.StatusServiceUnavailable, models.ErrRuntimeUnavailable,
-			"No container runtime available for Qdrant")
-		return
-	}
-
-	// Initialize semantic search with the same config as in daemon.go New()
-	semanticCfg := kb.SemanticSearchConfig{
-		EmbeddingConfig: kb.EmbeddingConfig{
-			OllamaHost: "http://localhost:11434",
-			Model:      "nomic-embed-text",
-			Dimension:  768,
-			BatchSize:  10,
-		},
-		VectorStoreConfig: kb.VectorStoreConfig{
-			Host:           "localhost",
-			Port:           6334, // gRPC port
-			CollectionName: "conduit_kb",
-			Dimension:      768,
-			BatchSize:      100,
-		},
-	}
-
-	semantic, err := kb.NewSemanticSearcher(d.store.DB(), semanticCfg)
+	semantic, err := kb.NewSemanticSearcher(d.store.DB(), semanticSearchConfig())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, models.ErrIndexFailed,
 			"Failed to initialize semantic search: "+err.Error())
@@ -78,9 +57,9 @@ func (d *Daemon) handleQdrantAttach(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleQdrantDetach disables semantic search at runtime.
+// handleSemanticDetach disables semantic search at runtime.
 // This gracefully falls back to FTS5-only search.
-func (d *Daemon) handleQdrantDetach(w http.ResponseWriter, r *http.Request) {
+func (d *Daemon) handleSemanticDetach(w http.ResponseWriter, r *http.Request) {
 	d.mu.Lock()
 	if d.kbSemantic == nil {
 		d.mu.Unlock()
@@ -106,15 +85,15 @@ func (d *Daemon) handleQdrantDetach(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleQdrantReindex triggers re-indexing of all documents into vector store.
-func (d *Daemon) handleQdrantReindex(w http.ResponseWriter, r *http.Request) {
+// handleSemanticReindex triggers re-indexing of all documents into the vector index.
+func (d *Daemon) handleSemanticReindex(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
 	semantic := d.kbSemantic
 	d.mu.RUnlock()
 
 	if semantic == nil {
 		writeError(w, http.StatusServiceUnavailable, models.ErrRuntimeUnavailable,
-			"Semantic search not enabled. Run 'conduit qdrant attach' first.")
+			"Semantic search not enabled.")
 		return
 	}
 
@@ -140,36 +119,35 @@ func (d *Daemon) handleQdrantReindex(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleQdrantStatus returns the current Qdrant status.
-func (d *Daemon) handleQdrantStatus(w http.ResponseWriter, r *http.Request) {
+// handleSemanticStatus reports the state of the vector index.
+func (d *Daemon) handleSemanticStatus(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Get Qdrant health
-	health := d.kbQdrant.CheckHealth(ctx)
-
-	// Check if semantic search is enabled in daemon
 	d.mu.RLock()
-	semanticEnabled := d.kbSemantic != nil
+	semantic := d.kbSemantic
 	d.mu.RUnlock()
 
-	status := map[string]interface{}{
-		"qdrant": map[string]interface{}{
-			"container_running": health.ContainerRunning,
-			"api_reachable":     health.APIReachable,
-			"collection_status": health.CollectionStatus,
-			"indexed_vectors":   health.IndexedVectors,
-			"total_points":      health.TotalPoints,
-			"needs_recovery":    health.NeedsRecovery,
-		},
+	vectorInfo := map[string]interface{}{
+		"backend": "sqlite",
+	}
+
+	if semantic != nil {
+		if stats, err := semantic.VectorIndex().GetStats(ctx); err == nil {
+			vectorInfo["vector_count"] = stats.VectorCount
+			vectorInfo["status"] = stats.Status
+			vectorInfo["collection"] = stats.CollectionName
+		} else {
+			vectorInfo["status"] = "error"
+			vectorInfo["error"] = err.Error()
+		}
+	} else {
+		vectorInfo["status"] = "detached"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"vectors": vectorInfo,
 		"semantic_search": map[string]interface{}{
-			"enabled": semanticEnabled,
+			"enabled": semantic != nil,
 		},
-		"container_runtime": d.kbQdrant.GetContainerRuntime(),
-	}
-
-	if health.Error != "" {
-		status["qdrant"].(map[string]interface{})["error"] = health.Error
-	}
-
-	writeJSON(w, http.StatusOK, status)
+	})
 }

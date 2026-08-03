@@ -72,10 +72,17 @@ var (
 	}
 )
 
+// SemanticProvider is the semantic half of hybrid retrieval. *SemanticSearcher
+// is the production implementation; tests inject fakes to drive the fusion and
+// degraded-mode branches without an embedding service.
+type SemanticProvider interface {
+	Search(ctx context.Context, query string, opts SemanticSearchOptions) (*SemanticSearchResult, error)
+}
+
 // HybridSearcher combines FTS5 (lexical) and vector (semantic) search using RRF.
 type HybridSearcher struct {
 	fts      *Searcher
-	semantic *SemanticSearcher
+	semantic SemanticProvider
 	logger   zerolog.Logger
 }
 
@@ -178,8 +185,23 @@ type EnhancedSearchHit struct {
 	BestRank     int              `json:"best_rank,omitempty"`     // Best rank across strategies
 }
 
-// NewHybridSearcher creates a new hybrid searcher.
+// NewHybridSearcher creates a hybrid searcher over the production semantic
+// searcher. A nil semantic searcher yields a lexical-only searcher.
+//
+// The explicit nil check matters: assigning a nil *SemanticSearcher straight
+// into the SemanticProvider field would produce an interface that is non-nil
+// but panics on call, and every "is semantic available?" test in this file is a
+// nil comparison.
 func NewHybridSearcher(fts *Searcher, semantic *SemanticSearcher) *HybridSearcher {
+	if semantic == nil {
+		return NewHybridSearcherWith(fts, nil)
+	}
+	return NewHybridSearcherWith(fts, semantic)
+}
+
+// NewHybridSearcherWith creates a hybrid searcher over any semantic provider.
+// This is the injection seam used by tests.
+func NewHybridSearcherWith(fts *Searcher, semantic SemanticProvider) *HybridSearcher {
 	return &HybridSearcher{
 		fts:      fts,
 		semantic: semantic,

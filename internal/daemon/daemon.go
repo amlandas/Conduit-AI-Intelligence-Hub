@@ -37,9 +37,8 @@ type Daemon struct {
 	kbSource     *kb.SourceManager
 	kbSearcher   *kb.Searcher
 	kbIndexer    *kb.Indexer
-	kbSemantic   *kb.SemanticSearcher // Optional: nil if Qdrant/Ollama unavailable
+	kbSemantic   *kb.SemanticSearcher // Optional: nil when semantic search is detached
 	kbHybrid     *kb.HybridSearcher   // Combines FTS5 and semantic search
-	kbQdrant     *kb.QdrantManager    // Manages Qdrant container lifecycle
 
 	// Event system for real-time updates (SSE)
 	eventBus *EventBus
@@ -53,6 +52,23 @@ type Daemon struct {
 	// Shutdown
 	shutdownCh chan struct{}
 	wg         sync.WaitGroup
+}
+
+// semanticSearchConfig returns the semantic search wiring used both at startup
+// and by the runtime attach handler, so the two can never drift apart.
+func semanticSearchConfig() kb.SemanticSearchConfig {
+	return kb.SemanticSearchConfig{
+		EmbeddingConfig: kb.EmbeddingConfig{
+			OllamaHost: "http://localhost:11434",
+			Model:      kb.DefaultEmbeddingModel,
+			Dimension:  kb.DefaultEmbeddingDimension,
+			BatchSize:  10,
+		},
+		VectorIndexConfig: kb.VectorIndexConfig{
+			Dimension: kb.DefaultEmbeddingDimension,
+			BatchSize: 100,
+		},
+	}
 }
 
 // New creates a new Daemon instance.
@@ -79,57 +95,21 @@ func New(cfg *config.Config) (*Daemon, error) {
 
 	logger := observability.Logger("daemon")
 
-	// Initialize Qdrant manager for managed container lifecycle
-	// This ensures storage directory exists, container is running, and collection is healthy
-	qdrantCfg := kb.QdrantConfig{
-		DataDir:        cfg.DataDir,
-		ContainerName:  "conduit-qdrant",
-		HTTPPort:       6333,
-		GRPCPort:       6334,
-		CollectionName: "conduit_kb",
-	}
-	kbQdrant := kb.NewQdrantManager(qdrantCfg)
-
-	// Try to ensure Qdrant is ready (non-blocking if container runtime unavailable)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	if err := kbQdrant.EnsureReady(ctx); err != nil {
-		logger.Warn().Err(err).Msg("Qdrant not ready, semantic search will be unavailable")
-	}
-	cancel()
-
-	// Try to initialize semantic search (optional - graceful if unavailable)
-	var kbSemantic *kb.SemanticSearcher
-	semanticCfg := kb.SemanticSearchConfig{
-		EmbeddingConfig: kb.EmbeddingConfig{
-			OllamaHost: "http://localhost:11434",
-			Model:      "nomic-embed-text",
-			Dimension:  768,
-			BatchSize:  10,
-		},
-		VectorStoreConfig: kb.VectorStoreConfig{
-			Host:           "localhost",
-			Port:           6334, // gRPC port
-			CollectionName: "conduit_kb",
-			Dimension:      768,
-			BatchSize:      100,
-		},
-	}
-
-	// Only initialize semantic search if Qdrant manager detected a container runtime
-	if kbQdrant.IsAvailable() {
-		kbSemantic, err = kb.NewSemanticSearcher(st.DB(), semanticCfg)
-		if err != nil {
-			logger.Warn().Err(err).Msg("semantic search unavailable, falling back to FTS5 only")
-			kbSemantic = nil
-		} else {
-			// Wire semantic search into both indexers for new documents
-			// The SourceManager has its own internal indexer that does the actual syncing
-			kbSource.SetSemanticSearcher(kbSemantic)
-			kbIndexer.SetSemanticSearcher(kbSemantic)
-			logger.Info().Msg("semantic search enabled")
-		}
+	// Initialize semantic search. Vectors now live in the same SQLite file as
+	// FTS5, so there is no container to detect and no service to wait for: the
+	// index is available whenever the database is. Only embedding needs Ollama,
+	// and that failure surfaces per-query as degraded mode rather than as a
+	// missing capability at startup.
+	kbSemantic, err := kb.NewSemanticSearcher(st.DB(), semanticSearchConfig())
+	if err != nil {
+		logger.Warn().Err(err).Msg("semantic search unavailable, falling back to FTS5 only")
+		kbSemantic = nil
 	} else {
-		logger.Info().Msg("no container runtime available, semantic search disabled")
+		// Wire semantic search into both indexers for new documents.
+		// The SourceManager has its own internal indexer that does the actual syncing.
+		kbSource.SetSemanticSearcher(kbSemantic)
+		kbIndexer.SetSemanticSearcher(kbSemantic)
+		logger.Info().Msg("semantic search enabled")
 	}
 
 	// Create hybrid searcher (always available - falls back to FTS5 if semantic unavailable)
@@ -176,7 +156,6 @@ func New(cfg *config.Config) (*Daemon, error) {
 		kbIndexer:  kbIndexer,
 		kbSemantic: kbSemantic,
 		kbHybrid:   kbHybrid,
-		kbQdrant:   kbQdrant,
 		eventBus:   eventBus,
 		shutdownCh: make(chan struct{}),
 	}
@@ -240,12 +219,21 @@ func (d *Daemon) setupRouter() {
 			r.Post("/migrate", d.handleKBMigrate)
 		})
 
-		// Qdrant management endpoints (for hot-reload semantic search)
+		// Semantic search management endpoints (hot-reload attach/detach).
+		r.Route("/semantic", func(r chi.Router) {
+			r.Post("/attach", d.handleSemanticAttach)
+			r.Post("/detach", d.handleSemanticDetach)
+			r.Post("/reindex", d.handleSemanticReindex)
+			r.Get("/status", d.handleSemanticStatus)
+		})
+
+		// TODO(WP-3.2): remove with dead-stack teardown. Legacy route names kept
+		// so an older CLI binary on the same machine keeps working.
 		r.Route("/qdrant", func(r chi.Router) {
-			r.Post("/attach", d.handleQdrantAttach)
-			r.Post("/detach", d.handleQdrantDetach)
-			r.Post("/reindex", d.handleQdrantReindex)
-			r.Get("/status", d.handleQdrantStatus)
+			r.Post("/attach", d.handleSemanticAttach)
+			r.Post("/detach", d.handleSemanticDetach)
+			r.Post("/reindex", d.handleSemanticReindex)
+			r.Get("/status", d.handleSemanticStatus)
 		})
 
 		// Status endpoint

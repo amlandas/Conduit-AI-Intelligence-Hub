@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -79,8 +80,39 @@ func (idx *Indexer) GetExtractionErrors() int {
 }
 
 // Index indexes a document and its chunks.
-// If semantic search is enabled, it also generates and stores vector embeddings.
+//
+// When semantic search is enabled the chunk text, its embedding and its
+// metadata are written in a SINGLE transaction, so a crash can never leave the
+// FTS index and the vector index disagreeing about what is indexed.
+//
+// Embeddings are generated BEFORE the transaction opens. They are a network
+// round trip to Ollama, and SQLite allows one writer at a time: holding the
+// write lock across that call would stall every other writer for seconds. If
+// embedding fails, ingestion proceeds without vectors -- lexical search still
+// works, and the failure is counted for reporting.
 func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) error {
+	// Chunk IDs must be known before embedding so the vector rows can be keyed
+	// by them inside the transaction.
+	chunksWithIDs := make([]Chunk, len(chunks))
+	for i, chunk := range chunks {
+		chunksWithIDs[i] = chunk
+		chunksWithIDs[i].ChunkID = idx.generateUniqueChunkID(doc.DocumentID, chunk.Content, i)
+	}
+
+	var embeddings [][]float32
+	if idx.semantic != nil && len(chunksWithIDs) > 0 {
+		var embErr error
+		embeddings, embErr = idx.semantic.EmbedChunks(ctx, chunksWithIDs)
+		if embErr != nil {
+			idx.logger.Warn().
+				Err(embErr).
+				Str("document_id", doc.DocumentID).
+				Msg("embedding failed, indexing lexical content only")
+			idx.semanticErrors++
+			embeddings = nil
+		}
+	}
+
 	tx, err := idx.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -106,17 +138,9 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 		return fmt.Errorf("insert document: %w", err)
 	}
 
-	// Create a copy of chunks with unique IDs for vector indexing
-	chunksWithIDs := make([]Chunk, len(chunks))
-
 	// Insert chunks with unique IDs that include document context
 	for i, chunk := range chunks {
-		// Generate unique chunk ID that includes document ID to avoid collisions
-		uniqueChunkID := idx.generateUniqueChunkID(doc.DocumentID, chunk.Content, i)
-
-		// Store chunk with ID for vector indexing
-		chunksWithIDs[i] = chunk
-		chunksWithIDs[i].ChunkID = uniqueChunkID
+		uniqueChunkID := chunksWithIDs[i].ChunkID
 
 		chunkMetaJSON, _ := json.Marshal(chunk.Metadata)
 		_, err = tx.ExecContext(ctx, `
@@ -151,25 +175,17 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
+	// Write vectors in the SAME transaction as the chunk text and metadata.
+	// A vector write failure aborts the whole document rather than committing a
+	// half-indexed state; the caller retries the document as a unit.
+	if idx.semantic != nil && embeddings != nil {
+		if err := idx.semantic.IndexVectorsTx(ctx, tx, doc, chunksWithIDs, embeddings); err != nil {
+			return fmt.Errorf("index vectors: %w", err)
+		}
 	}
 
-	// Index vectors if semantic search is enabled
-	if idx.semantic != nil {
-		if err := idx.semantic.IndexDocument(ctx, doc, chunksWithIDs); err != nil {
-			// Log warning but don't fail - FTS indexing succeeded
-			idx.logger.Warn().
-				Err(err).
-				Str("document_id", doc.DocumentID).
-				Msg("vector indexing failed, falling back to FTS only")
-			idx.semanticErrors++ // Track for reporting
-		} else {
-			idx.logger.Debug().
-				Str("document_id", doc.DocumentID).
-				Int("vectors", len(chunksWithIDs)).
-				Msg("indexed document vectors")
-		}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
 	}
 
 	// Queue entity extraction if KAG is enabled
@@ -278,6 +294,16 @@ func (idx *Indexer) deleteInTx(ctx context.Context, tx *sql.Tx, documentID strin
 		return fmt.Errorf("delete fts: %w", err)
 	}
 
+	// Delete vectors in the same transaction. The foreign key on kb_vectors
+	// would cascade from kb_chunks anyway, but doing it explicitly keeps the
+	// behaviour identical whether or not foreign_keys is enabled on the
+	// connection, and tolerates a database that predates migration 005.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM kb_vectors WHERE document_id = ?`, documentID); err != nil {
+		if !isMissingTableErr(err) {
+			return fmt.Errorf("delete vectors: %w", err)
+		}
+	}
+
 	// Delete chunks
 	_, err = tx.ExecContext(ctx, `DELETE FROM kb_chunks WHERE document_id = ?`, documentID)
 	if err != nil {
@@ -291,6 +317,13 @@ func (idx *Indexer) deleteInTx(ctx context.Context, tx *sql.Tx, documentID strin
 	}
 
 	return nil
+}
+
+// isMissingTableErr reports whether err is SQLite complaining that a table does
+// not exist, which is the expected shape on a database that predates the
+// migration introducing it.
+func isMissingTableErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
 }
 
 // GetDocument retrieves a document by ID.

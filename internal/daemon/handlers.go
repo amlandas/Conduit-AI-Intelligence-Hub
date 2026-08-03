@@ -146,46 +146,34 @@ func (d *Daemon) getDependencyStatus(ctx context.Context) map[string]interface{}
 		runtimePath = path
 	}
 
-	// Qdrant (Vector DB) status - enhanced with container info
-	qdrantInfo := map[string]interface{}{
-		"available":  false,
-		"host":       "localhost",
-		"http_port":  6333,
-		"grpc_port":  6334,
-		"managed_by": "conduit",
+	// Vector index status. Vectors live in the knowledge base file, so this is
+	// a table count rather than a container health check.
+	vectorInfo := map[string]interface{}{
+		"available":  true,
+		"backend":    "sqlite",
 		"collection": "conduit_kb",
+		"status":     "green",
 	}
-	if d.kbQdrant != nil {
-		health := d.kbQdrant.CheckHealth(ctx)
-		qdrantInfo["available"] = health.ContainerRunning && health.APIReachable
-		httpPort, grpcPort := d.kbQdrant.GetPorts()
-		qdrantInfo["http_port"] = httpPort
-		qdrantInfo["grpc_port"] = grpcPort
-
-		// Add container details
-		containerName := d.kbQdrant.GetContainerName()
-		if containerInfo := getContainerInfo(runtimePath, containerName); containerInfo != nil {
-			qdrantInfo["container"] = containerInfo
-		}
-
-		if health.ContainerRunning {
-			qdrantInfo["status"] = health.CollectionStatus
-			if qdrantInfo["status"] == "" {
-				qdrantInfo["status"] = "green"
-			}
-			qdrantInfo["vectors_count"] = health.TotalPoints
-			qdrantInfo["indexed_vectors"] = health.IndexedVectors
-			if health.NeedsRecovery {
-				qdrantInfo["status"] = "needs_recovery"
-			}
+	d.mu.RLock()
+	semantic := d.kbSemantic
+	d.mu.RUnlock()
+	if semantic != nil {
+		if stats, err := semantic.VectorIndex().GetStats(ctx); err == nil {
+			vectorInfo["vectors_count"] = stats.VectorCount
+			vectorInfo["indexed_vectors"] = stats.VectorCount
+			vectorInfo["status"] = stats.Status
 		} else {
-			qdrantInfo["status"] = "not_running"
+			vectorInfo["status"] = "error"
+			vectorInfo["error"] = err.Error()
 		}
-		if health.Error != "" {
-			qdrantInfo["error"] = health.Error
-		}
+	} else {
+		vectorInfo["available"] = false
+		vectorInfo["status"] = "detached"
 	}
-	deps["qdrant"] = qdrantInfo
+	deps["vectors"] = vectorInfo
+	// TODO(WP-3.2): remove with dead-stack teardown. The desktop GUI and older
+	// CLI builds still read deps["qdrant"]; keep the key until they are updated.
+	deps["qdrant"] = vectorInfo
 
 	// Ollama status - use helper function for detailed info
 	deps["ollama"] = getOllamaInfo()
@@ -760,7 +748,7 @@ func (d *Daemon) handleKBSearch(w http.ResponseWriter, r *http.Request) {
 		// Force semantic search only
 		if d.kbSemantic == nil {
 			writeError(w, http.StatusServiceUnavailable, "E_SEMANTIC_UNAVAILABLE",
-				"semantic search unavailable: Qdrant or Ollama not running")
+				"semantic search unavailable: embedding service not reachable")
 			return
 		}
 		result, err := d.kbSemantic.Search(ctx, query, d.kbSemanticOpts(r))
@@ -1119,7 +1107,7 @@ func (d *Daemon) kbSearchOpts(r *http.Request) kb.SearchOptions {
 func (d *Daemon) handleKBMigrate(w http.ResponseWriter, r *http.Request) {
 	if d.kbSemantic == nil {
 		writeError(w, http.StatusServiceUnavailable, "E_SEMANTIC_UNAVAILABLE",
-			"semantic search unavailable: Qdrant or Ollama not running")
+			"semantic search unavailable: embedding service not reachable")
 		return
 	}
 
