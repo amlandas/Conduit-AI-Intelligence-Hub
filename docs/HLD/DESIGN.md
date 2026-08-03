@@ -653,9 +653,11 @@ sequenceDiagram
 | [HLD V0.5 — Secure Link](HLD-V0.5-Secure-Link.md) | Deferred remote access features |
 | [HLD V1 — Desktop GUI](HLD-V1-Desktop-GUI.md) | GUI layer implementation |
 | [Implementation Status](IMPLEMENTATION_STATUS.md) | Feature completion matrix |
-| [PROJECT_LEARNINGS.md](../PROJECT_LEARNINGS.md) | Detailed development journey |
 | [KB Search Architecture](../KB_SEARCH_HLD.md) | Search system deep dive |
 | [KAG Architecture](../KAG_HLD.md) | Knowledge graph design |
+
+For Conduit 2.0, see [CONTEXT.md](../../CONTEXT.md) (architecture) and
+[CHANGELOG.md](../../CHANGELOG.md) (what changed and why).
 
 ---
 
