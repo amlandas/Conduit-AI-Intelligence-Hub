@@ -32,6 +32,25 @@ set -euo pipefail
 readonly REPO="amlandas/Conduit-AI-Intelligence-Hub"
 readonly BINARY="conduit"
 
+# Where releases are looked up and downloaded from.
+#
+# Both are overridable so that the download path can be exercised against a
+# local server holding a locally built artifact -- see tests/scripts -- and so a
+# mirror is possible without editing this file. An override is announced loudly
+# when it is used, because silently changing where a user's binary comes from is
+# the one thing an installer must never do. Checksum verification is not
+# relaxed by either: the manifest still has to match the tarball, whatever
+# served it.
+RELEASE_DOWNLOAD_BASE="${CONDUIT_RELEASE_BASE_URL:-}"
+RELEASE_API_BASE="${CONDUIT_RELEASE_API_URL:-https://api.github.com}"
+
+# ARTIFACT CONTRACT -- must match .github/workflows/release.yml exactly.
+#
+#   conduit-<os>-<arch>.tar.gz   one executable named `conduit` at the root
+#   SHA256SUMS                   bare basenames, one line per tarball
+#
+# Changing either half means changing both.
+
 PREFIX="${CONDUIT_PREFIX:-${HOME}/.local/bin}"
 FROM_SOURCE=false
 RUN_SETUP=true
@@ -74,8 +93,8 @@ OPTIONS
     --from-source       Build from this checkout. Requires Go 1.21+ and a C
                         compiler: the knowledge base uses SQLite FTS5, which
                         needs cgo.
-    --version TAG       Release tag to install (default: latest). Ignored with
-                        --from-source.
+    --version TAG       Release tag to install, e.g. v2.0.0-beta.1. The default
+                        is the newest v2 release. Ignored with --from-source.
     --prefix DIR        Where to install the binary (default: ~/.local/bin,
                         or $CONDUIT_PREFIX).
     --model             Download and verify the embedding model after install.
@@ -106,6 +125,17 @@ SUPPORTED PLATFORMS
 
     Intel Macs and Linux arm64 can build from source; there are no published
     binaries for them. Windows is not supported yet -- see install-windows.ps1.
+
+    Published binaries are NOT code-signed or notarised. On macOS, Gatekeeper
+    will quarantine a downloaded one; --from-source avoids that entirely.
+
+ENVIRONMENT
+    CONDUIT_PREFIX          Default for --prefix.
+    CONDUIT_RELEASE_BASE_URL   Download release artifacts from here instead of
+                            GitHub. Announced when used. Checksum verification
+                            still applies.
+    CONDUIT_RELEASE_API_URL    Where to look up the newest release
+                            (default: https://api.github.com).
 
 UPGRADING FROM CONDUIT 1.x
     This script does not remove the v1 daemon, its service registration or its
@@ -184,7 +214,8 @@ detect_platform() {
         *)             die "unsupported architecture: $raw_arch" ;;
     esac
 
-    PLATFORM="${OS}_${ARCH}"
+    # Hyphens, matching the artifact names the release workflow publishes.
+    PLATFORM="${OS}-${ARCH}"
 }
 
 # ---------------------------------------------------------------------------
@@ -227,9 +258,14 @@ install_from_source() {
     info "Compiling ${BINARY} ${version} (this takes a minute)"
     (
         cd "$root"
+        # main.Version and main.BuildTime are capitalised -- see cmd/conduit.
+        # Go's linker silently ignores -X for a symbol that does not exist, so
+        # the lower-cased names that used to be here did not fail the build:
+        # they produced a binary that reported "dev" for every source install
+        # ever made, which is exactly the wrong thing for a bug report to say.
         CGO_ENABLED=1 go build \
             -tags fts5 \
-            -ldflags "-s -w -X main.version=${version} -X main.buildTime=${build_time}" \
+            -ldflags "-s -w -X main.Version=${version} -X main.BuildTime=${build_time}" \
             -o "$out" \
             ./cmd/conduit
     ) || die "build failed"
@@ -242,64 +278,175 @@ install_from_source() {
 
 # ---------------------------------------------------------------------------
 # Install from a published release
-#
-# The download path is written and verified; the artifacts it expects are
-# published by WP-4.1. Until then the release lookup fails and says so, rather
-# than half-installing something.
 # ---------------------------------------------------------------------------
 
-release_base_url() {
-    if [[ "$RELEASE_TAG" == "latest" ]]; then
-        printf 'https://github.com/%s/releases/latest/download' "$REPO"
-    else
-        printf 'https://github.com/%s/releases/download/%s' "$REPO" "$RELEASE_TAG"
-    fi
+# assert_release_urls_allowed vets the endpoints this run will download from,
+# once, before anything is fetched.
+#
+# It has to happen here and not inside fetch. Every caller of fetch probes with
+# stderr suppressed -- a missing manifest is an expected outcome, not a crash --
+# so a refusal raised down there exits the script with no visible reason at all.
+# That is how the first version of this behaved: a plaintext URL produced a bare
+# non-zero exit and an empty explanation.
+#
+# HTTPS is the only scheme accepted from the network. Plaintext is permitted
+# solely for loopback, which is what lets the tests serve a real artifact from a
+# local stub server: a MITM on 127.0.0.1 is not a threat model, and confining
+# the exception to loopback means the override cannot be turned into "fetch my
+# binary over plaintext from a mirror".
+assert_release_urls_allowed() {
+    local url
+    for url in "$RELEASE_API_BASE" ${RELEASE_DOWNLOAD_BASE:+"$RELEASE_DOWNLOAD_BASE"}; do
+        case "$url" in
+            https://*) ;;
+            http://127.0.0.1|http://127.0.0.1:*|http://127.0.0.1/*) ;;
+            http://localhost|http://localhost:*|http://localhost/*) ;;
+            *)
+                die "refusing to download over a non-HTTPS URL: ${url}
+
+Release artifacts are fetched over HTTPS only. Plaintext is allowed for a
+loopback address, and nothing else.
+
+Unset CONDUIT_RELEASE_BASE_URL and CONDUIT_RELEASE_API_URL to use GitHub."
+                ;;
+        esac
+    done
 }
 
 # fetch downloads a URL to a path. It fails on HTTP errors rather than saving
 # an error page, and it never pipes anything into a shell.
+#
+# Redirects are followed but pinned to the same scheme: without --proto-redir an
+# HTTPS URL that redirects to HTTP would be fetched in the clear, which is the
+# whole guarantee gone for the sake of one hop. Anything reaching here on a
+# plaintext URL was already vetted as loopback by assert_release_urls_allowed.
 fetch() {
     local url="$1" dest="$2"
 
+    local curl_opts=(--fail --location --silent --show-error --output "$dest")
+    local wget_opts=(--quiet --output-document="$dest")
+
+    case "$url" in
+        https://*)
+            curl_opts+=(--proto '=https' --proto-redir '=https' --tlsv1.2)
+            wget_opts+=(--https-only)
+            ;;
+    esac
+
     if have curl; then
-        curl --fail --location --silent --show-error --proto '=https' --tlsv1.2 \
-             --output "$dest" "$url"
+        curl "${curl_opts[@]}" "$url"
     elif have wget; then
-        wget --quiet --https-only --output-document="$dest" "$url"
+        wget "${wget_opts[@]}" "$url"
     else
         die "neither curl nor wget is available; cannot download the release"
     fi
 }
 
-install_from_release() {
-    info "Installing from release (${RELEASE_TAG})"
+# resolve_release_tag turns "latest" into a concrete tag.
+#
+# It cannot use https://github.com/OWNER/REPO/releases/latest/download, which is
+# what an installer would normally reach for, because GitHub's "latest" EXCLUDES
+# pre-releases -- and every v2 release is a pre-release while the binaries are
+# unsigned. That endpoint would either 404 or, far worse, quietly serve v0.1.10:
+# the newest non-pre-release, from the daemon era, whose artifacts are a
+# different product that no longer works.
+#
+# So the list endpoint is asked instead and the newest v2 entry is taken. GitHub
+# returns releases newest first, and drafts are not visible unauthenticated.
+resolve_release_tag() {
+    local url="${RELEASE_API_BASE}/repos/${REPO}/releases?per_page=100"
 
-    local base tarball sums_url tar_url
-    base="$(release_base_url)"
-    tarball="${BINARY}_${PLATFORM}.tar.gz"
-    tar_url="${base}/${tarball}"
-    sums_url="${base}/SHA256SUMS"
+    if ! fetch "$url" "${WORKDIR}/releases.json" 2>/dev/null; then
+        die "could not reach the GitHub release API at ${RELEASE_API_BASE}.
+
+Check your network, or install from this checkout instead:
+
+    ./scripts/install.sh --from-source"
+    fi
+
+    # Deliberately a grep rather than a JSON parser: jq is not installed
+    # everywhere, and the only field needed is a tag name matching a narrow
+    # pattern. Both spellings are handled because the API's whitespace is not
+    # part of its contract.
+    local tag
+    tag="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"v2\.[^"]*"' "${WORKDIR}/releases.json" \
+           | sed -e 's/.*"\(v2\.[^"]*\)"$/\1/' \
+           | head -1)"
+
+    [[ -n "$tag" ]] || return 1
+    printf '%s' "$tag"
+}
+
+install_from_release() {
+    # Before anything is downloaded, and before any message implies it will be.
+    assert_release_urls_allowed
 
     WORKDIR="$(mktemp -d)"
+
+    if [[ -n "$RELEASE_DOWNLOAD_BASE" ]]; then
+        warn "downloading from ${RELEASE_DOWNLOAD_BASE} (CONDUIT_RELEASE_BASE_URL is set)"
+    fi
+
+    # Resolve "latest" to a real tag before anything is downloaded, so every
+    # message from here on names the version actually being installed.
+    if [[ "$RELEASE_TAG" == "latest" ]]; then
+        local resolved
+        if ! resolved="$(resolve_release_tag)" || [[ -z "$resolved" ]]; then
+            die "no Conduit 2.0 release has been published yet.
+
+Build from this checkout instead:
+
+    ./scripts/install.sh --from-source
+
+That needs Go 1.21+ and a C compiler. If you meant to install a 1.x release,
+name it explicitly with --version."
+        fi
+        RELEASE_TAG="$resolved"
+    fi
+
+    info "Installing from release (${RELEASE_TAG})"
+
+    # The override replaces GitHub's ".../releases/download" prefix, so the
+    # resolved tag still selects the directory. Keeping that structure means an
+    # override is a mirror of the same layout rather than a second code path.
+    local base tarball sums_url tar_url
+    if [[ -n "$RELEASE_DOWNLOAD_BASE" ]]; then
+        base="${RELEASE_DOWNLOAD_BASE}/${RELEASE_TAG}"
+    else
+        base="https://github.com/${REPO}/releases/download/${RELEASE_TAG}"
+    fi
+    tarball="${BINARY}-${PLATFORM}.tar.gz"
+    tar_url="${base}/${tarball}"
+    sums_url="${base}/SHA256SUMS"
 
     # The checksum manifest is fetched first: if it is not there, no release
     # artifacts are, and there is no point downloading a tarball we could not
     # verify anyway.
     if ! fetch "$sums_url" "${WORKDIR}/SHA256SUMS" 2>/dev/null; then
-        die "no release artifacts found for ${RELEASE_TAG}.
+        die "release ${RELEASE_TAG} has no SHA256SUMS, so nothing it publishes can be verified.
 
-Conduit 2.0 has not published binaries yet. Build from this checkout instead:
+Check the tag name, or build from this checkout instead:
 
-    ./scripts/install.sh --from-source
-
-That needs Go 1.21+ and a C compiler."
+    ./scripts/install.sh --from-source"
     fi
 
     local expected
     expected="$(awk -v f="$tarball" '$2 == f || $2 == "*"f {print $1}' "${WORKDIR}/SHA256SUMS" | head -1)"
-    [[ -n "$expected" ]] || \
+    if [[ -z "$expected" ]]; then
+        # Naming what the release does publish turns "unsupported" into a fact
+        # the user can act on -- most often that they are on an architecture
+        # with no prebuilt binary rather than that the release is broken.
+        local available
+        available="$(awk '{print "    " $2}' "${WORKDIR}/SHA256SUMS")"
         die "release ${RELEASE_TAG} publishes no ${tarball}.
-This platform (${PLATFORM}) has no prebuilt binary; use --from-source."
+
+This platform (${PLATFORM}) has no prebuilt binary. That release contains:
+${available}
+
+Build from this checkout instead:
+
+    ./scripts/install.sh --from-source"
+    fi
 
     info "Downloading ${tarball}"
     fetch "$tar_url" "${WORKDIR}/${tarball}" || \
