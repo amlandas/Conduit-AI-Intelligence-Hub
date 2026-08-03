@@ -144,6 +144,32 @@ fi
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# assert_safe_data_dir refuses a --data-dir that --remove-data would turn into a
+# catastrophe. `--data-dir /` or `--data-dir $HOME` is a typo, not an intent,
+# and the confirmation prompt is not enough on its own: it asks about deleting
+# "the data directory", and the user answering has no reason to suspect it now
+# means their entire home.
+assert_safe_data_dir() {
+    local dir="$1"
+
+    [[ -n "$dir" ]] || die "--data-dir cannot be empty"
+
+    case "$dir" in
+        /|/usr|/etc|/var|/home|/Users|/opt|/tmp)
+            die "refusing to treat $dir as a Conduit data directory" ;;
+    esac
+
+    if [[ "$dir" == "$HOME" ]]; then
+        die "refusing to treat your home directory as a Conduit data directory"
+    fi
+
+    if [[ "$dir" != /* ]]; then
+        die "--data-dir must be an absolute path (got: $dir)"
+    fi
+}
+
+assert_safe_data_dir "$DATA_DIR"
+
 remove_path() {
     local path="$1"
 

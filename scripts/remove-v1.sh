@@ -139,6 +139,34 @@ done
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# assert_safe_data_dir refuses a --data-dir that would make the purge paths
+# catastrophic. `--data-dir /` would turn `<data-dir>/qdrant` into `/qdrant`,
+# and `--data-dir $HOME` would aim at ~/qdrant. Neither is a plausible Conduit
+# data directory, and a typo should not be the only thing standing between a
+# user and rm -rf on a directory they care about.
+assert_safe_data_dir() {
+    local dir="$1"
+
+    [[ -n "$dir" ]] || die "--data-dir cannot be empty"
+
+    case "$dir" in
+        /|/usr|/etc|/var|/home|/Users|/opt|/tmp)
+            die "refusing to treat $dir as a Conduit data directory" ;;
+    esac
+
+    if [[ "$dir" == "$HOME" ]]; then
+        die "refusing to treat your home directory as a Conduit data directory"
+    fi
+
+    # A relative path resolves against whatever directory the script happened to
+    # be run from, which is not something to guess at when removing files.
+    if [[ "$dir" != /* ]]; then
+        die "--data-dir must be an absolute path (got: $dir)"
+    fi
+}
+
+assert_safe_data_dir "$DATA_DIR"
+
 # remove_path deletes a file or directory, honouring dry-run.
 remove_path() {
     local path="$1" label="${2:-$1}"
