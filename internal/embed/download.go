@@ -400,14 +400,37 @@ func hashFile(path string) (string, error) {
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
-// cleanPartFiles removes leftover temp files from interrupted downloads.
+// stalePartAge is how long a .part file must have gone untouched before it is
+// considered abandoned.
+//
+// An in-progress download rewrites its temp file continuously, so its mtime is
+// never this stale unless the writing process is gone or wedged. It is bounded
+// by defaultDownloadTimeout for that reason: a transfer that has made no
+// progress for longer than a whole download is allowed to take is not running.
+const stalePartAge = defaultDownloadTimeout
+
+// cleanPartFiles removes abandoned temp files from interrupted downloads.
+//
+// Age matters here. A blanket sweep would delete the temp file of a *concurrent*
+// download that is still writing to it: on Unix the other process keeps its
+// open handle and carries on to completion, then fails at the rename because
+// the path it was promised no longer exists. That is a confusing failure for
+// the process that did nothing wrong, so only files that nothing can plausibly
+// still be writing are removed.
 func cleanPartFiles(dir, base string) {
 	matches, err := filepath.Glob(filepath.Join(dir, base+".part-*"))
 	if err != nil {
 		return
 	}
+	cutoff := time.Now().Add(-stalePartAge)
 	for _, m := range matches {
-		_ = os.Remove(m)
+		info, err := os.Stat(m)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(cutoff) {
+			_ = os.Remove(m)
+		}
 	}
 }
 

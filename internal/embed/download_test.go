@@ -279,7 +279,7 @@ func TestDownloadCancelledMidFlightRetriesClean(t *testing.T) {
 	}
 }
 
-// A stale .part from a killed process must not survive the next attempt.
+// A .part from a killed process must not survive the next attempt.
 func TestDownloadSweepsStalePartFiles(t *testing.T) {
 	body, spec := fakeGGUF(t, 16*1024)
 	srv := serveBytes(t, body)
@@ -293,12 +293,44 @@ func TestDownloadSweepsStalePartFiles(t *testing.T) {
 	if err := os.WriteFile(stale, []byte("junk from a killed process"), 0o644); err != nil {
 		t.Fatalf("write stale part: %v", err)
 	}
+	// Backdate it past the abandonment threshold; nothing can still be writing
+	// to a file this old.
+	old := time.Now().Add(-2 * stalePartAge)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("chtimes: %v", err)
+	}
 
 	if _, err := downloaderFor(srv).Download(context.Background(), spec, dataDir); err != nil {
 		t.Fatalf("Download: %v", err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Error("stale .part file survived a successful download")
+	}
+}
+
+// The sweep must not touch a temp file that a concurrent download is still
+// writing. Deleting it would leave that process writing to an unlinked path and
+// failing at the rename, having done nothing wrong.
+func TestDownloadLeavesFreshPartFilesAlone(t *testing.T) {
+	body, spec := fakeGGUF(t, 16*1024)
+	srv := serveBytes(t, body)
+	dataDir := t.TempDir()
+
+	modelsDir := filepath.Join(dataDir, "models")
+	if err := os.MkdirAll(modelsDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Freshly written: indistinguishable from another process mid-transfer.
+	inFlight := filepath.Join(modelsDir, spec.HFFile+".part-999999")
+	if err := os.WriteFile(inFlight, []byte("another process is writing this"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if _, err := downloaderFor(srv).Download(context.Background(), spec, dataDir); err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Errorf("a concurrent download's temp file was deleted: %v", err)
 	}
 }
 
