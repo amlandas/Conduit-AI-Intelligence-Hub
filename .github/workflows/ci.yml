@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - v2
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+
+    env:
+      # SQLite FTS5 comes from mattn/go-sqlite3, which is a cgo package.
+      # Without CGO the driver silently compiles down to a stub that fails at
+      # runtime, so CGO must be on for every step below.
+      CGO_ENABLED: 1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          # Sourced from go.mod so the CI toolchain can never drift from the
+          # version the module actually requires.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Toolchain info
+        run: |
+          go version
+          go env GOOS GOARCH CGO_ENABLED CC
+
+      - name: Build
+        run: go build -tags fts5 ./...
+
+      - name: Vet
+        run: go vet -tags fts5 ./...
+
+      - name: Test
+        run: go test -tags fts5 -race -count=1 ./...
+
+      - name: Verify SQLite FTS5 is compiled in
+        # The KB/integration tests skip themselves when FTS5 is unavailable, so
+        # a build with CGO off or the fts5 tag missing would leave CI green
+        # while shipping a binary that cannot open the knowledge base. Fail loud.
+        run: |
+          set -euo pipefail
+          go test -tags fts5 -count=1 -v ./tests/integration/... 2>&1 \
+            | tee "$RUNNER_TEMP/fts5-check.log"
+          if grep -q "FTS5 not available" "$RUNNER_TEMP/fts5-check.log"; then
+            echo "::error::SQLite FTS5 is unavailable in this build - CGO_ENABLED=1 and -tags fts5 are both required"
+            exit 1
+          fi
