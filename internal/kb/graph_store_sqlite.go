@@ -162,7 +162,8 @@ func (g *GraphStore) UpsertEntity(ctx context.Context, e *Entity) error {
 			INSERT INTO kb_entities
 			(entity_id, name, type, description, source_chunk_id, source_document_id, confidence, metadata, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?)
-		`, id, e.Name, string(e.Type), e.Description, e.SourceChunkID, e.SourceDocumentID, e.Confidence, now, now)
+		`, id, e.Name, string(e.Type), e.Description,
+			nullIfEmpty(e.SourceChunkID), nullIfEmpty(e.SourceDocumentID), e.Confidence, now, now)
 		return err
 	case err != nil:
 		return err
@@ -183,8 +184,23 @@ func (g *GraphStore) UpsertEntity(ctx context.Context, e *Entity) error {
 		SET name = ?, type = ?, description = ?, source_chunk_id = ?,
 		    source_document_id = ?, confidence = ?, updated_at = ?
 		WHERE entity_id = ?
-	`, e.Name, string(e.Type), desc, e.SourceChunkID, sources, confidence, now, id)
+	`, e.Name, string(e.Type), desc, nullIfEmpty(e.SourceChunkID),
+		nullIfEmpty(sources), confidence, now, id)
 	return err
+}
+
+// nullIfEmpty maps "" onto SQL NULL.
+//
+// On an install that ran store migration 004, kb_entities.source_chunk_id and
+// source_document_id are foreign keys onto kb_chunks and kb_documents. Writing
+// an empty string would violate them, because "" is a value, not an absence.
+// Provenance is genuinely optional -- an entity can be merged from a source we
+// no longer have a chunk row for -- so absence must be NULL.
+func nullIfEmpty(s string) any {
+	if s == "" {
+		return nil
+	}
+	return s
 }
 
 // mergeSourceList appends id to a comma-separated list if not already present.

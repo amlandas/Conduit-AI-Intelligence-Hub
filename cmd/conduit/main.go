@@ -4130,6 +4130,18 @@ Example MCP client configuration:
 			}
 			defer st.Close()
 
+			// Load config for the knowledge graph and telemetry toggles. A
+			// missing or broken config file must not stop the MCP server from
+			// serving retrieval, so failure here falls back to defaults: graph
+			// off, query log on.
+			mcpCfg, cfgErr := config.Load()
+			if cfgErr != nil {
+				mcpCfg = config.DefaultConfig()
+			}
+			if mcpCfg.DataDir != "" {
+				dataDir = mcpCfg.DataDir
+			}
+
 			// Create FTS5 searcher
 			ftsSearcher := kb.NewSearcher(st.DB())
 
@@ -4158,7 +4170,12 @@ Example MCP client configuration:
 			// Create and run MCP server with hybrid searcher.
 			// Backed by the official MCP Go SDK (internal/mcpserver); it speaks
 			// the current spec revision and negotiates down for older clients.
-			server := mcpserver.New(st.DB(), hybridSearcher)
+			server := mcpserver.NewWithOptions(st.DB(), hybridSearcher, mcpserver.Options{
+				GraphEnabled:    mcpCfg.KB.KAG.Enabled,
+				GraphMaxHops:    mcpCfg.KB.KAG.Graph.MaxHops,
+				QueryLogDir:     dataDir,
+				QueryLogEnabled: mcpCfg.Telemetry.LocalQueryLog,
+			})
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -6758,10 +6775,16 @@ Examples:
 
 			ctx := cmd.Context()
 
-			// Create KAGSearcher configuration
+			// Create KAGSearcher configuration. The graph store is enabled only
+			// when the config says so; when it is off, entity lookup still works
+			// and relations come from the legacy kb_relations table.
+			graphEnabled := false
+			if cfg, err := config.Load(); err == nil {
+				graphEnabled = cfg.KB.KAG.Enabled
+			}
 			kagCfg := kb.KAGSearcherConfig{
 				DB:         db.DB(),
-				GraphStore: nil,
+				GraphStore: kb.NewGraphStore(db.DB(), graphEnabled),
 			}
 
 			// Set up hybrid search if requested
