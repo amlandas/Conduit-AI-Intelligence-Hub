@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -140,12 +139,6 @@ func (d *Daemon) getDependencyStatus(ctx context.Context) map[string]interface{}
 	containerRuntime := getContainerRuntimeInfo()
 	deps["container_runtime"] = containerRuntime
 
-	// Get runtime path for container inspections
-	runtimePath := ""
-	if path, ok := containerRuntime["path"].(string); ok {
-		runtimePath = path
-	}
-
 	// Vector index status. Vectors live in the knowledge base file, so this is
 	// a table count rather than a container health check.
 	vectorInfo := map[string]interface{}{
@@ -181,38 +174,40 @@ func (d *Daemon) getDependencyStatus(ctx context.Context) map[string]interface{}
 	// SQLite/FTS5 status - use helper function
 	deps["sqlite"] = d.getSQLiteInfo()
 
-	// FalkorDB status - TCP check first (like conduit doctor does)
-	falkorInfo := map[string]interface{}{
-		"available":  false,
-		"host":       "localhost",
-		"port":       6379,
-		"managed_by": "conduit",
-		"graph_name": "conduit_kag",
+	// Knowledge graph status.
+	//
+	// WP-2.3 deleted FalkorDB. The graph is a set of tables in the knowledge
+	// base file, gated on kb.kag.enabled, so there is no host, no port, and no
+	// reachability to report -- only whether the feature is on and how much is
+	// in it.
+	graphInfo := map[string]interface{}{
+		"enabled": d.cfg != nil && d.cfg.KB.KAG.Enabled,
+		"backend": "sqlite",
 	}
 
-	// Primary check: TCP connection (same as conduit doctor)
-	conn, err := net.DialTimeout("tcp", "localhost:6379", 2*time.Second)
-	if err == nil {
-		conn.Close()
-		falkorInfo["available"] = true
-	}
-
-	// Supplementary: Add container details if available
-	if containerInfo := getContainerInfo(runtimePath, "conduit-falkordb"); containerInfo != nil {
-		falkorInfo["container"] = containerInfo
-	}
-
-	// Get entity/relationship counts from SQLite (they're stored there, not in FalkorDB directly)
 	if d.store != nil && d.store.DB() != nil {
 		db := d.store.DB()
-		var entityCount, relationCount int
+		var entityCount, relationCount, edgeCount int
 		db.QueryRow("SELECT COUNT(*) FROM kb_entities").Scan(&entityCount)
 		db.QueryRow("SELECT COUNT(*) FROM kb_relations").Scan(&relationCount)
-		falkorInfo["entities_count"] = entityCount
-		falkorInfo["relationships_count"] = relationCount
+		db.QueryRow("SELECT COUNT(*) FROM kb_graph_edges").Scan(&edgeCount)
+		graphInfo["entities_count"] = entityCount
+		graphInfo["relationships_count"] = relationCount
+		graphInfo["edges_count"] = edgeCount
 	}
 
-	deps["falkordb"] = falkorInfo
+	deps["graph"] = graphInfo
+	// TODO(WP-3.2): remove with dead-stack teardown. The desktop GUI and older
+	// CLI builds still read deps["falkordb"]; keep the key until they are
+	// updated. "available" now means "the graph feature is enabled", which is
+	// the closest honest mapping onto what the old key meant.
+	deps["falkordb"] = map[string]interface{}{
+		"available":           graphInfo["enabled"],
+		"managed_by":          "conduit",
+		"backend":             "sqlite",
+		"entities_count":      graphInfo["entities_count"],
+		"relationships_count": graphInfo["relationships_count"],
+	}
 
 	return deps
 }

@@ -170,10 +170,10 @@ func (e *ExtractedEntity) ToEntity(chunkID, documentID string) *Entity {
 // ToRelation converts an extracted relation to a graph relation.
 func (r *ExtractedRelation) ToRelation(chunkID string) *Relation {
 	return &Relation{
-		SubjectName: r.Subject,
-		Predicate:   RelationType(r.Predicate),
-		ObjectName:  r.Object,
-		Confidence:  r.Confidence,
+		SubjectName:   r.Subject,
+		Predicate:     RelationType(r.Predicate),
+		ObjectName:    r.Object,
+		Confidence:    r.Confidence,
 		SourceChunkID: chunkID,
 	}
 }
@@ -189,6 +189,10 @@ func NewProviderFactory() *ProviderFactory {
 // CreateProvider creates an LLM provider based on the given configuration.
 func (f *ProviderFactory) CreateProvider(cfg KAGConfig) (LLMProvider, error) {
 	switch cfg.Provider {
+	case "", "pattern":
+		// Default. No model, no network -- see pattern_extractor.go for what
+		// this keeps and drops relative to LLM extraction.
+		return NewPatternExtractor(PatternExtractorConfig{}), nil
 	case "ollama":
 		return NewOllamaProvider(OllamaProviderConfig{
 			Host:      cfg.Ollama.Host,

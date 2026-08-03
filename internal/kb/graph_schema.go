@@ -161,6 +161,11 @@ type Relation struct {
 	// SourceChunkID is the chunk this relation was extracted from
 	SourceChunkID string `json:"source_chunk_id,omitempty"`
 
+	// SourceDocumentID is the document this relation was extracted from.
+	// Provenance at document granularity is what makes an edge auditable and
+	// makes DeleteByDocument possible without walking chunks.
+	SourceDocumentID string `json:"source_document_id,omitempty"`
+
 	// Confidence is the extraction confidence score (0.0-1.0)
 	Confidence float64 `json:"confidence"`
 

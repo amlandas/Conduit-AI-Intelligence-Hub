@@ -297,14 +297,19 @@ func TestKAGConfig(t *testing.T) {
 			t.Error("KAG should be disabled by default for security")
 		}
 
-		// Localhost only
-		if cfg.Graph.FalkorDB.Host != "localhost" {
-			t.Errorf("expected localhost, got %q", cfg.Graph.FalkorDB.Host)
+		// No network graph backend exists any more: the graph is stored in the
+		// knowledge base file, so there is no host, port or password to leak.
+		if cfg.Graph.Backend != "sqlite" {
+			t.Errorf("expected sqlite graph backend, got %q", cfg.Graph.Backend)
 		}
 
-		// Default provider should be ollama (local)
-		if cfg.Provider != "ollama" {
-			t.Errorf("expected ollama provider, got %q", cfg.Provider)
+		// Default extraction provider must not call a model. Enabling the graph
+		// must not implicitly enable a 4GB model load or an outbound API call.
+		if cfg.Provider != "pattern" {
+			t.Errorf("expected pattern provider, got %q", cfg.Provider)
+		}
+		if cfg.UsesLLM() {
+			t.Error("default KAG config must not use an LLM")
 		}
 	})
 

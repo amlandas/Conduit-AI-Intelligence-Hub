@@ -58,6 +58,9 @@ type Config struct {
 
 	// MCP configuration
 	MCP MCPConfig `mapstructure:"mcp"`
+
+	// Telemetry configuration (local-only; nothing leaves the machine)
+	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 }
 
 // AIConfig holds AI provider configuration.
@@ -95,6 +98,24 @@ type RuntimeConfig struct {
 	StartTimeout   time.Duration `mapstructure:"start_timeout"`
 	StopTimeout    time.Duration `mapstructure:"stop_timeout"`
 	HealthInterval time.Duration `mapstructure:"health_interval"`
+}
+
+// TelemetryConfig holds local-only instrumentation settings.
+//
+// Nothing in this section sends anything anywhere. There is no endpoint, no
+// upload, no identifier. It writes a file under the Conduit data directory that
+// only the machine's owner can read, and Conduit itself never reads it back.
+type TelemetryConfig struct {
+	// LocalQueryLog appends one line per knowledge base query to
+	// <data_dir>/query-shape.jsonl, recording query *shape* only -- token count,
+	// whether the query looks like it names an entity, and the requested
+	// traversal depth. Never the query text, never the results.
+	//
+	// Default: true. Its purpose is to answer one question with evidence
+	// instead of opinion: does anyone actually ask multi-hop questions? The
+	// knowledge graph's future is gated on that answer. Set to false to turn it
+	// off entirely; no file is created.
+	LocalQueryLog bool `mapstructure:"local_query_log"`
 }
 
 // KBConfig holds knowledge base configuration.
@@ -136,18 +157,17 @@ type KAGConfig struct {
 	Ollama KAGOllamaConfig `mapstructure:"ollama"`
 }
 
-// KAGGraphConfig holds graph database configuration.
+// KAGGraphConfig holds graph storage configuration.
+//
+// WP-2.3 deleted the FalkorDB backend; the graph is stored in the knowledge base
+// SQLite file. There is no host, port or password because there is no server.
 type KAGGraphConfig struct {
-	Backend  string              `mapstructure:"backend"`
-	FalkorDB KAGFalkorDBConfig   `mapstructure:"falkordb"`
-}
+	// Backend is the storage engine. Only "sqlite" is supported; the field is
+	// kept so a config file written before WP-2.3 still parses.
+	Backend string `mapstructure:"backend"`
 
-// KAGFalkorDBConfig holds FalkorDB configuration.
-type KAGFalkorDBConfig struct {
-	Host      string `mapstructure:"host"`
-	Port      int    `mapstructure:"port"`
-	GraphName string `mapstructure:"graph_name"`
-	Password  string `mapstructure:"password"`
+	// MaxHops caps graph traversal depth (1-2).
+	MaxHops int `mapstructure:"max_hops"`
 }
 
 // KAGExtractionConfig holds entity extraction settings.
@@ -297,17 +317,12 @@ func DefaultConfig() *Config {
 				DefaultLimit:   10,   // 10 results by default
 			},
 			KAG: KAGConfig{
-				Enabled:      false, // Opt-in for security
-				PreloadModel: false, // Opt-in for RAM management
-				Provider:     "ollama",
+				Enabled:      false,     // Opt-in: no graph tables exist until this is true
+				PreloadModel: false,     // Opt-in for RAM management
+				Provider:     "pattern", // No LLM, no network, on the default enabled path
 				Graph: KAGGraphConfig{
-					Backend: "falkordb",
-					FalkorDB: KAGFalkorDBConfig{
-						Host:      "localhost",
-						Port:      6379,
-						GraphName: "conduit_kg",
-						Password:  "",
-					},
+					Backend: "sqlite",
+					MaxHops: 2,
 				},
 				Extraction: KAGExtractionConfig{
 					ConfidenceThreshold:  0.7,
@@ -366,6 +381,13 @@ func DefaultConfig() *Config {
 					ToStderr: false,
 				},
 			},
+		},
+
+		Telemetry: TelemetryConfig{
+			// On by default because it is local-only and because the question it
+			// answers -- is multi-hop retrieval actually wanted? -- cannot be
+			// answered retroactively.
+			LocalQueryLog: true,
 		},
 	}
 }
@@ -429,6 +451,11 @@ func (c *Config) BackupsDir() string {
 // LogPath returns the path to the log file.
 func (c *Config) LogPath() string {
 	return filepath.Join(c.DataDir, "conduit.log")
+}
+
+// QueryLogPath returns the path to the local query-shape log.
+func (c *Config) QueryLogPath() string {
+	return filepath.Join(c.DataDir, "query-shape.jsonl")
 }
 
 // EnsureDirectories creates required directories.
