@@ -669,8 +669,7 @@ Examples:
 					fmt.Println()
 					fmt.Println("   To diagnose: conduit doctor")
 					fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
-					svc.Close()
-					os.Exit(2)
+					return exitWith(2)
 				}
 
 				if errors, ok := result["errors"].([]interface{}); ok && len(errors) > 0 {
@@ -770,8 +769,7 @@ Examples:
 					fmt.Println("   To diagnose: conduit doctor")
 					fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
 					// Return exit code 2 for partial success
-					svc.Close()
-					os.Exit(2)
+					return exitWith(2)
 				} else if semanticEnabled && (totalAdded > 0 || totalUpdated > 0) {
 					fmt.Println("   Vectors: ✓ all documents indexed")
 				}

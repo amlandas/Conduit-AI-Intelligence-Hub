@@ -149,6 +149,33 @@ func configureMCPClient(clientID string, forceOverwrite bool) error {
 	return nil
 }
 
+// newKBMCPServer builds the KB MCP server and the knowledge base it serves.
+//
+// It is separate from the command so a test can drive the very same wiring over
+// an in-memory transport. The caller owns the returned service and must Close
+// it.
+//
+// Opening through kbservice is what makes `conduit mcp kb` and
+// `conduit kb search` retrieve identically: both get the same searchers and the
+// same configured embedding provider.
+func newKBMCPServer(cfg *config.Config) (*mcpserver.Server, *kbservice.Service, error) {
+	svc, err := kbservice.Open(cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open database: %w", err)
+	}
+
+	// Backed by the official MCP Go SDK (internal/mcpserver); it speaks the
+	// current spec revision and negotiates down for older clients.
+	server := mcpserver.NewWithOptions(svc.DB(), svc.Hybrid(), mcpserver.Options{
+		GraphEnabled:    cfg.KB.KAG.Enabled,
+		GraphMaxHops:    cfg.KB.KAG.Graph.MaxHops,
+		QueryLogDir:     cfg.DataDir,
+		QueryLogEnabled: cfg.Telemetry.LocalQueryLog,
+	})
+
+	return server, svc, nil
+}
+
 // mcpKBCmd runs the KB MCP server
 func mcpKBCmd() *cobra.Command {
 	return &cobra.Command{
@@ -178,23 +205,11 @@ Example MCP client configuration:
 				mcpCfg = config.DefaultConfig()
 			}
 
-			// Opening the knowledge base also selects and wires the embedding
-			// provider, so `mcp kb` and `kb search` retrieve identically.
-			svc, err := kbservice.Open(mcpCfg)
+			server, svc, err := newKBMCPServer(mcpCfg)
 			if err != nil {
-				return fmt.Errorf("open database: %w", err)
+				return err
 			}
 			defer svc.Close()
-
-			// Create and run MCP server with the hybrid searcher.
-			// Backed by the official MCP Go SDK (internal/mcpserver); it speaks
-			// the current spec revision and negotiates down for older clients.
-			server := mcpserver.NewWithOptions(svc.DB(), svc.Hybrid(), mcpserver.Options{
-				GraphEnabled:    mcpCfg.KB.KAG.Enabled,
-				GraphMaxHops:    mcpCfg.KB.KAG.Graph.MaxHops,
-				QueryLogDir:     mcpCfg.DataDir,
-				QueryLogEnabled: mcpCfg.Telemetry.LocalQueryLog,
-			})
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

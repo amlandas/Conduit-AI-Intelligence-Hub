@@ -479,18 +479,18 @@ var forbiddenPaths = []string{
 	"/etc",
 	"/var",
 	"/root",
-	"/System",          // macOS
-	"/Library",         // macOS
-	"/private",         // macOS
-	"C:\\Windows",      // Windows
+	"/System",           // macOS
+	"/Library",          // macOS
+	"/private",          // macOS
+	"C:\\Windows",       // Windows
 	"C:\\Program Files", // Windows
-	"C:\\ProgramData",  // Windows
+	"C:\\ProgramData",   // Windows
 }
 
 // Allowed paths that override forbidden paths (temp directories are safe)
 var allowedPaths = []string{
 	"/tmp",
-	"/var/folders", // macOS per-user temp directory
+	"/var/folders",         // macOS per-user temp directory
 	"/private/var/folders", // macOS resolved symlink
 	"/var/tmp",
 }
@@ -504,8 +504,8 @@ var forbiddenPatterns = []string{
 	".azure",
 	".kube",
 	".docker",
-	"Library/Keychains",   // macOS
-	"AppData/Roaming",     // Windows
+	"Library/Keychains", // macOS
+	"AppData/Roaming",   // Windows
 }
 
 // checkForbiddenPaths checks for forbidden filesystem access.

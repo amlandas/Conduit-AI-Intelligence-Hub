@@ -469,9 +469,17 @@ func LoadWithFlags(flags *pflag.FlagSet) (*LoadResult, error) {
 	v.AddConfigPath("/etc/conduit")
 
 	// Environment: CONDUIT_KB_CHUNK_SIZE -> kb.chunk_size
+	//
+	// AutomaticEnv alone is not enough: it only affects Get, so Unmarshal --
+	// which is how the Config struct is populated -- never sees an environment
+	// value unless the key is explicitly bound. Binding every schema key is
+	// what makes the documented precedence real rather than aspirational.
 	v.SetEnvPrefix("CONDUIT")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
+	for _, key := range LeafKeys() {
+		_ = v.BindEnv(key)
+	}
 
 	res := &LoadResult{}
 
@@ -507,8 +515,19 @@ var flagToKey = map[string]string{
 	"log-level": "log_level",
 }
 
+// bindChangedFlags applies flags the user actually set.
+//
+// It walks every flag and tests Flag.Changed rather than using FlagSet.Visit.
+// Visit reports only what *that* FlagSet parsed, and cobra parses a root
+// persistent flag into the running subcommand's flag set -- so Visit on the
+// root's persistent set sees nothing and every global flag is silently
+// dropped. Flag.Changed lives on the shared Flag value and is set no matter
+// which set did the parsing.
 func bindChangedFlags(v *viper.Viper, flags *pflag.FlagSet) {
-	flags.Visit(func(f *pflag.Flag) {
+	flags.VisitAll(func(f *pflag.Flag) {
+		if !f.Changed {
+			return
+		}
 		key, ok := flagToKey[f.Name]
 		if !ok {
 			return
@@ -613,6 +632,32 @@ func KnownKeys() []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+// LeafKeys returns the schema keys that hold a value rather than a subsection.
+//
+// Only leaves may be bound to environment variables. Binding a parent such as
+// "embed" makes viper treat it as a scalar, and the nil it resolves to when the
+// variable is unset replaces the whole nested section during Unmarshal --
+// silently wiping every default underneath it.
+func LeafKeys() []string {
+	all := KnownKeys()
+
+	prefixes := make(map[string]struct{}, len(all))
+	for _, k := range all {
+		if i := strings.LastIndex(k, "."); i > 0 {
+			prefixes[k[:i]] = struct{}{}
+		}
+	}
+
+	leaves := make([]string, 0, len(all))
+	for _, k := range all {
+		if _, isParent := prefixes[k]; !isParent {
+			leaves = append(leaves, k)
+		}
+	}
+	sort.Strings(leaves)
+	return leaves
 }
 
 func collectKeys(t reflect.Type, prefix string, out map[string]struct{}) {

@@ -101,7 +101,7 @@ Examples:
 					return err
 				}
 				if failed > 0 {
-					os.Exit(1)
+					return exitWith(1)
 				}
 				return nil
 			}
@@ -120,8 +120,7 @@ Examples:
 				return nil
 			}
 			fmt.Printf("✗ %d check(s) failed.\n", failed)
-			os.Exit(1)
-			return nil
+			return exitWith(1)
 		},
 	}
 

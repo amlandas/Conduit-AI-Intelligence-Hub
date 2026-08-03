@@ -15,6 +15,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -37,16 +38,38 @@ var (
 // documented precedence.
 var globalFlags *pflag.FlagSet
 
+// exitError carries a process exit code out of a command without adding a
+// message: the command has already printed everything the user needs.
+//
+// It exists so no command has to call os.Exit half way through its own RunE.
+// That mattered for correctness (an os.Exit skips every deferred Close, so the
+// knowledge base handle was never released) and it is what makes the documented
+// exit codes -- `kb sync` returning 2 on partial success, `doctor` returning 1
+// on a failed check -- testable in-process.
+type exitError struct{ code int }
+
+func (e exitError) Error() string { return "" }
+
+// exitWith returns an error that ends the process with the given code.
+func exitWith(code int) error { return exitError{code: code} }
+
 // Execute builds the root command and runs it, returning a process exit code.
 func Execute(v, bt string) int {
 	version, buildTime = v, bt
 
 	root := NewRootCommand()
-	if err := root.Execute(); err != nil {
-		// Cobra has already printed the error.
-		return 1
+	err := root.Execute()
+	if err == nil {
+		return 0
 	}
-	return 0
+
+	var ee exitError
+	if errors.As(err, &ee) {
+		return ee.code
+	}
+
+	fmt.Fprintln(os.Stderr, "Error:", err)
+	return 1
 }
 
 // NewRootCommand builds the full command tree.
@@ -68,9 +91,11 @@ Examples:
   conduit kb sync
   conduit kb search "how does authentication work"
   conduit mcp configure`,
-		Version:       fmt.Sprintf("%s (built %s)", version, buildTime),
-		SilenceUsage:  true,
-		SilenceErrors: false,
+		Version:      fmt.Sprintf("%s (built %s)", version, buildTime),
+		SilenceUsage: true,
+		// Execute prints errors itself so that an exitError, which carries only
+		// a code, does not surface as a blank "Error:" line.
+		SilenceErrors: true,
 	}
 
 	// Global flags. --db is the workspace-isolation seam: it points the whole
@@ -135,16 +160,22 @@ func loadConfig() (*config.Config, error) {
 	return res.Config, nil
 }
 
-// kbPath returns the knowledge base file path, honouring --db.
+// kbPath returns the knowledge base file path, honouring --db, and makes sure
+// the directory it names exists.
 //
 // It exists so that no command hardcodes ~/.conduit/conduit.db; that
-// duplication is what made workspace isolation impossible before.
+// duplication is what made workspace isolation impossible before. Creating the
+// directory is part of the job: every caller is about to open a database there,
+// and --db may well point somewhere that has never been used.
 func kbPath() string {
 	cfg, err := loadConfig()
 	if err != nil {
 		home, _ := os.UserHomeDir()
 		return filepath.Join(home, ".conduit", "conduit.db")
 	}
+	// Best effort: if this fails, opening the database fails next with a
+	// better message than anything reportable from here.
+	_ = cfg.EnsureDirectories()
 	return cfg.DatabasePath()
 }
 
