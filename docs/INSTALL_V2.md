@@ -175,10 +175,16 @@ Dry run is the default. Nothing is removed until you pass `--yes`. It reports:
 - launchd agents `dev.simpleflo.conduit` and `com.simpleflo.conduit`
 - systemd user units `conduit.service` and `conduit-daemon.service`
 - the `conduit-daemon` binary and its symlinks
-- `~/.conduit/daemon.log`
+
+Nothing under `~/.conduit` is removed without `--purge-data` — not the
+knowledge base, not the models, not even the dead daemon's log.
 
 If a container runtime is installed but not running, the script says so rather
 than guessing, and prints the command to remove those containers by hand.
+
+A data directory that is a symlink is refused rather than followed: `rm -rf
+dir/` would empty what it points at, which is not what "remove the link" should
+mean.
 
 ### 2. Remove it
 
@@ -205,8 +211,9 @@ ask:
 ./scripts/remove-v1.sh --yes --purge-data
 ```
 
-That removes `~/.conduit/qdrant` and `~/.conduit/falkordb` and nothing else.
-Your knowledge base is still not touched.
+That removes `~/.conduit/qdrant`, `~/.conduit/falkordb` and
+`~/.conduit/daemon.log`, and nothing else. Your knowledge base, your
+configuration and your downloaded models are still not touched.
 
 ### Rebuilding vectors
 
@@ -282,13 +289,26 @@ lines it added. **Your data is kept.**
 ./scripts/uninstall.sh --remove-data    # also delete the knowledge base
 ```
 
-`--remove-data` prompts for confirmation unless you pass `--force`.
+`--remove-data` prompts for confirmation unless you pass `--force`. The prompt
+names the exact directory and its size, because the data directory can come from
+a `conduit.yaml` in your working directory and is not always the one you have in
+mind. Declining exits with status **3**, distinct from success and from failure,
+so a script wrapping this can tell a refusal from a completed uninstall.
 
-The script delegates to `conduit uninstall`, which knows what it installed. The
-standalone path exists for when the binary is missing or broken; in that case
-it will not edit your MCP JSON config files from shell, because those hold your
-other MCP servers and unrelated settings. It tells you which files to edit
-instead.
+A directory holding no `conduit.db` or `conduit.yaml` is refused outright: that
+is far more likely to be a mistyped `--data-dir` than a real request.
+
+The script delegates to `conduit uninstall`, which knows what it installed. If
+that binary is too old to understand the flags being used, or fails for any
+other reason, the script stops and says so rather than quietly falling back —
+the manual path is less careful, and downgrading to it after a failure is how a
+wrapper does damage the tool it wrapped had declined to do.
+
+The standalone path runs only when there is no binary at all. It will not edit
+your MCP JSON config files from shell, because those hold your other MCP servers
+and unrelated settings; it tells you which files to edit instead. It touches a
+shell profile only where it finds Conduit's own `# Conduit` marker, and copies
+the file to `.conduit-uninstall.bak` first.
 
 `--prefix DIR` removes one install and only that one. Shell profiles, MCP
 entries and GUI state are per-user rather than per-install, so they are left
@@ -341,6 +361,10 @@ upstream artifact changed. The partial file was already deleted. Retry with
 `conduit model download --force`. If it fails again with the same hash, the
 pinned artifact upstream has genuinely changed and that is a bug worth
 reporting; do not work around it.
+
+`--force` never deletes the model you already have. It re-fetches into a
+temporary file and replaces the old one only once the new bytes verify, so an
+interrupted or offline `--force` leaves your working model exactly where it was.
 
 **Model download fails with no network** — the error says so and points at
 `embed.provider = none` for keyword-only search. A partial download is deleted,
