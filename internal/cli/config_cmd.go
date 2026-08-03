@@ -80,9 +80,7 @@ Examples:
 				fmt.Println("\n🔍 Retrieval:")
 				fmt.Printf("  Default Limit:   %d\n", cfg.KB.RAG.DefaultLimit)
 				fmt.Printf("  Min Score:       %.2f\n", cfg.KB.RAG.MinScore)
-				fmt.Printf("  Semantic Weight: %.2f\n", cfg.KB.RAG.SemanticWeight)
-				fmt.Printf("  MMR:             %v (lambda %.2f)\n", cfg.KB.RAG.EnableMMR, cfg.KB.RAG.MMRLambda)
-				fmt.Printf("  Rerank:          %v\n", cfg.KB.RAG.EnableRerank)
+				fmt.Printf("  Recall Mode:     %s\n", cfg.KB.RAG.RecallMode)
 
 				fmt.Println("\n🔒 Policy:")
 				fmt.Println("  Forbidden Paths:")

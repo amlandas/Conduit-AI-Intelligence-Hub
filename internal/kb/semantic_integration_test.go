@@ -29,6 +29,8 @@ import (
 	"os"
 	"testing"
 	"time"
+
+	"github.com/simpleflo/conduit/internal/embed"
 )
 
 // probeTimeout is deliberately tiny: on a machine without the service, the
@@ -64,10 +66,19 @@ func requireOllama(t *testing.T) string {
 func TestSemanticIntegration_EmbeddingService(t *testing.T) {
 	host := requireOllama(t)
 
-	svc, err := NewEmbeddingService(EmbeddingConfig{OllamaHost: host})
+	// WP-3.4 (#71) repointed this at the live path: an internal/embed provider
+	// wrapped by kb.NewProviderEmbedder. The deleted kb.EmbeddingService built
+	// its client on the untimed http.DefaultClient.
+	provider, err := embed.NewOllamaProvider(embed.OllamaConfig{
+		Host:       host,
+		Model:      DefaultEmbeddingModel,
+		Dimensions: DefaultEmbeddingDimension,
+	})
 	if err != nil {
-		t.Fatalf("NewEmbeddingService: %v", err)
+		t.Fatalf("NewOllamaProvider: %v", err)
 	}
+	t.Cleanup(func() { _ = provider.Close() })
+	svc := NewProviderEmbedder(provider)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()

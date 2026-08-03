@@ -219,14 +219,12 @@ kb:
   # RAG (Retrieval-Augmented Generation) tuning
   # Controls how semantic search retrieves and ranks results
   rag:
-    min_score: 0.0        # Minimum similarity threshold (0.0-1.0)
+    min_score: 0.0        # Minimum similarity threshold for semantic search (0.0-1.0)
                           # Lower = more results, let consuming LLM decide relevance
-    semantic_weight: 0.5  # Balance between semantic and keyword (0.0-1.0)
-                          # 0.0 = keyword only, 1.0 = semantic only
-    enable_mmr: true      # Maximal Marginal Relevance for diversity
-    mmr_lambda: 0.7       # Relevance vs diversity (0.0-1.0)
-                          # 0.0 = max diversity, 1.0 = max relevance
-    enable_rerank: true   # Re-score top candidates semantically
+    recall_mode: balanced # Precision/recall preset for hybrid search
+                          # high     = keep everything potentially relevant
+                          # balanced = default
+                          # precise  = fewer, more distinct results
     default_limit: 10     # Default number of results
 
 # Policy settings
@@ -1029,12 +1027,8 @@ kb:
     # Permissive threshold - let the LLM decide relevance
     min_score: 0.05       # Very low threshold for domain-specific terms
 
-    # Balanced retrieval
-    semantic_weight: 0.5  # Equal weight to semantic and keyword
-
-    # Maximize result diversity for AI consumption
-    enable_mmr: true
-    mmr_lambda: 0.6       # Slightly favor diversity over relevance
+    # Maximize recall for AI consumption
+    recall_mode: high
 
     # Enable reranking for best quality
     enable_rerank: true

@@ -219,8 +219,28 @@ func (s *Service) FindSource(ctx context.Context, nameOrID string) (*kb.Source, 
 }
 
 // AddSource registers a new source. It does not index anything; run Sync.
+//
+// The path is checked against kb.policy.forbidden_paths first: indexing copies
+// a directory's contents into a searchable database that the MCP server exposes
+// to connected AI clients, so ~/.ssh and friends are refused outright. Paths
+// under kb.policy.warn_paths are allowed and returned as warnings for the
+// caller to show. See AddSourceWithWarnings when the warnings matter.
 func (s *Service) AddSource(ctx context.Context, req kb.AddSourceRequest) (*kb.Source, error) {
-	return s.source.Add(ctx, req)
+	src, _, err := s.AddSourceWithWarnings(ctx, req)
+	return src, err
+}
+
+// AddSourceWithWarnings is AddSource, plus the non-fatal path-safety warnings.
+func (s *Service) AddSourceWithWarnings(ctx context.Context, req kb.AddSourceRequest) (*kb.Source, []string, error) {
+	warnings, err := checkSourcePath(s.cfg, req.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	src, err := s.source.Add(ctx, req)
+	if err != nil {
+		return nil, nil, err
+	}
+	return src, warnings, nil
 }
 
 // RemoveResult is the response shape for a source removal.

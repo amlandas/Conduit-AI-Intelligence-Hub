@@ -42,25 +42,28 @@ type SearchRequest struct {
 	// SourceID filters to a single source when non-empty.
 	SourceID string
 
-	// MinScore, SemanticWeight and MMRLambda override RAG config when >= 0.
-	// Values outside [0,1] are ignored, matching the removed HTTP layer.
-	MinScore       float64
-	SemanticWeight float64
-	MMRLambda      float64
+	// MinScore overrides the configured similarity threshold when in [0,1].
+	// It applies to semantic mode; hybrid mode's threshold is a property of
+	// RecallMode (see kb.HybridSearchOptions, issue #69).
+	MinScore float64
 
-	// DisableMMR and DisableRerank force the corresponding stage off.
-	DisableMMR    bool
-	DisableRerank bool
+	// RecallMode is the precision/recall preset for hybrid mode: "high",
+	// "balanced" (default) or "precise".
+	//
+	// WP-3.4 replaced the SemanticWeight / MMRLambda / DisableMMR /
+	// DisableRerank quartet with this. Those four were either dead on arrival
+	// (the weighting they fed was overridden before it was read -- issue #69)
+	// or silently discarded by two of the three presets. A knob that is ignored
+	// is worse than a knob that is absent.
+	RecallMode string
 }
 
 // NewSearchRequest returns a request with tuning values marked unset.
 func NewSearchRequest(query string) SearchRequest {
 	return SearchRequest{
-		Query:          query,
-		Mode:           SearchModeHybrid,
-		MinScore:       Unset,
-		SemanticWeight: Unset,
-		MMRLambda:      Unset,
+		Query:    query,
+		Mode:     SearchModeHybrid,
+		MinScore: Unset,
 	}
 }
 
@@ -134,44 +137,38 @@ func (s *Service) hybridOpts(req SearchRequest) kb.HybridSearchOptions {
 	ragCfg := s.cfg.KB.RAG
 
 	opts := kb.HybridSearchOptions{
-		Limit:           ragCfg.DefaultLimit,
-		Mode:            kb.HybridModeAuto,
-		SemanticWeight:  ragCfg.SemanticWeight,
-		RRFConstant:     60,
-		EnableMMR:       ragCfg.EnableMMR,
-		MMRLambda:       ragCfg.MMRLambda,
-		SimilarityFloor: ragCfg.MinScore,
-		EnableRerank:    ragCfg.EnableRerank,
+		Limit:      ragCfg.DefaultLimit,
+		Mode:       kb.HybridModeAuto,
+		RecallMode: recallModeFor(ragCfg.RecallMode),
 	}
 
 	if opts.Limit <= 0 {
 		opts.Limit = 10
 	}
-	// A SimilarityFloor of 0 is valid (no filtering); only a negative is wrong.
-	if opts.SimilarityFloor < 0 {
-		opts.SimilarityFloor = 0.0
-	}
-
 	if req.Limit > 0 {
 		opts.Limit = req.Limit
 	}
-	if inUnitRange(req.MinScore) {
-		opts.SimilarityFloor = req.MinScore
+	if req.RecallMode != "" {
+		opts.RecallMode = recallModeFor(req.RecallMode)
 	}
-	if inUnitRange(req.SemanticWeight) {
-		opts.SemanticWeight = req.SemanticWeight
-	}
-	if inUnitRange(req.MMRLambda) {
-		opts.MMRLambda = req.MMRLambda
-	}
-	if req.DisableMMR {
-		opts.EnableMMR = false
-	}
-	if req.DisableRerank {
-		opts.EnableRerank = false
+	if req.SourceID != "" {
+		opts.Filter.SourceIDs = []string{req.SourceID}
 	}
 
 	return opts
+}
+
+// recallModeFor maps a configured or requested string onto a kb.RecallMode,
+// falling back to balanced for anything unrecognised or empty.
+func recallModeFor(mode string) kb.RecallMode {
+	switch mode {
+	case string(kb.RecallModeHigh):
+		return kb.RecallModeHigh
+	case string(kb.RecallModePrecise):
+		return kb.RecallModePrecise
+	default:
+		return kb.RecallModeBalanced
+	}
 }
 
 // semanticOpts builds semantic options from RAG config plus request overrides.

@@ -24,36 +24,13 @@ type SemanticSearcher struct {
 	logger     zerolog.Logger
 }
 
-// SemanticSearchConfig configures the semantic searcher.
-type SemanticSearchConfig struct {
-	EmbeddingConfig   EmbeddingConfig
-	VectorIndexConfig VectorIndexConfig
-}
-
-// NewSemanticSearcher creates a semantic searcher with the production wiring:
-// Ollama for embeddings and the SQLite vector index that shares the knowledge
-// base file.
-//
-// It does not contact Ollama and does not require the index to hold any data --
-// an empty knowledge base is a valid state, and an unreachable embedding
-// service surfaces later as a degraded search rather than a failed startup.
-func NewSemanticSearcher(db *sql.DB, cfg SemanticSearchConfig) (*SemanticSearcher, error) {
-	embeddings, err := NewEmbeddingService(cfg.EmbeddingConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create embedding service: %w", err)
-	}
-
-	if cfg.VectorIndexConfig.Dimension <= 0 {
-		cfg.VectorIndexConfig.Dimension = embeddings.Dimension()
-	}
-
-	vectors, err := NewSQLiteVectorIndex(db, cfg.VectorIndexConfig)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create vector index: %w", err)
-	}
-
-	return NewSemanticSearcherWith(db, embeddings, vectors), nil
-}
+// WP-3.4 deleted NewSemanticSearcher and SemanticSearchConfig along with
+// internal/kb.EmbeddingService, the untimed Ollama client tracked as issue #71.
+// The constructor's whole purpose was to build that client from an
+// EmbeddingConfig; production wires the searcher through
+// NewSemanticSearcherWith with an embedder built from internal/embed (see
+// kbservice.newEmbedder and kb.NewProviderEmbedder), where every call is
+// bounded by an http.Client timeout as well as the context.
 
 // NewSemanticSearcherWith builds a semantic searcher from supplied
 // collaborators. This is the injection seam used by tests and by any caller

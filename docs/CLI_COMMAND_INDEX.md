@@ -532,11 +532,8 @@ conduit kb search <query> [options]
 | `--semantic` | Force semantic search |
 | `--fts5` | Force keyword search |
 | `--limit <num>` | Maximum results (default: 10) |
-| `--min-score <float>` | Minimum similarity threshold (0.0-1.0, default: 0.0) |
-| `--semantic-weight <float>` | Semantic vs keyword balance (0.0-1.0, default: 0.5) |
-| `--mmr-lambda <float>` | Relevance vs diversity (0.0-1.0, default: 0.7) |
-| `--no-mmr` | Disable MMR diversity filtering |
-| `--no-rerank` | Disable semantic reranking |
+| `--min-score <float>` | Minimum similarity threshold for `--semantic` (0.0-1.0, default: 0.0) |
+| `--recall <mode>` | Precision/recall preset: `high`, `balanced` (default), `precise` |
 | `--source <id>` | Limit to specific source |
 | `--json` | Output as JSON |
 

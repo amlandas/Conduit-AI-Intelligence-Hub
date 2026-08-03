@@ -6,6 +6,8 @@ package kb
 // that are NOT among the tracked issues #69-#73.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -41,40 +43,43 @@ func TestChunker_WindowingTable(t *testing.T) {
 			wantEnd:   []int{10},
 		},
 		{
-			name: "fixed windows with overlap, cutting mid-word",
+			name: "fixed windows with overlap, cutting mid-word when no splitter matches",
 			in:   "abcdefghijklmnopqrstuvwxyz",
 			opts: ChunkOptions{MaxSize: 10, Overlap: 2, Splitters: []string{"\n\n"}},
-			want: []string{"abcdefghij", "ijklmnopqr", "qrstuvwxyz", "yz"},
-			// Note the final "yz": it is wholly contained in the previous chunk.
-			wantStart: []int{0, 8, 16, 24},
-			wantEnd:   []int{10, 18, 26, 26},
-			notes:     "the trailing chunk is always a duplicate of the overlap tail",
+			want: []string{"abcdefghij", "ijklmnopqr", "qrstuvwxyz"},
+			// #76: there is no trailing "yz" any more. The third window reaches
+			// the end of the input, so the loop stops instead of re-emitting the
+			// overlap tail as a fourth chunk.
+			wantStart: []int{0, 8, 16},
+			wantEnd:   []int{10, 18, 26},
+			notes:     "issue #76: the redundant trailing chunk is gone",
 		},
 		{
-			name: "KNOWN GAP: paragraph splitters do not move the cut point",
+			name: "paragraph splitters move the cut point",
 			in:   "AAAA BBBB.\n\nCCCC DDDD.\n\nEEEE FFFF.",
 			opts: ChunkOptions{MaxSize: 15, Overlap: 2},
-			want: []string{"AAAA BBBB.\n\nCCC", "CCC DDDD.\n\nEEEE", "EE FFFF.", "F."},
-			// A splitter-aware chunker would cut after "AAAA BBBB.\n\n".
-			wantStart: []int{0, 13, 26, 32},
-			wantEnd:   []int{15, 28, 34, 34},
-			notes:     "see TestGolden_ChunkerNeverUsesSplitters for why",
+			want: []string{"AAAA BBBB.", "CCCC DDDD.", "EEEE FFFF."},
+			// #76: cuts land after each "\n\n" instead of blindly at MaxSize.
+			wantStart: []int{0, 10, 22},
+			wantEnd:   []int{12, 24, 34},
+			notes:     "issue #76: ChunkOptions.Splitters is no longer inert",
 		},
 		{
-			name:      "KNOWN GAP: sentence splitters do not move the cut point either",
+			name:      "sentence splitters move the cut point too",
 			in:        "One two three. Four five six. Seven eight nine.",
 			opts:      ChunkOptions{MaxSize: 20, Overlap: 3},
-			want:      []string{"One two three. Four", "ur five six. Seven e", "n eight nine.", "ne."},
-			wantStart: []int{0, 17, 34, 44},
-			wantEnd:   []int{20, 37, 47, 47},
+			want:      []string{"One two three.", "e. Four five six.", "x. Seven eight nine."},
+			wantStart: []int{0, 12, 27},
+			wantEnd:   []int{15, 30, 47},
+			notes:     `the default splitter list reaches ". " before falling back to " "`,
 		},
 		{
 			name:      "windows are trimmed of surrounding whitespace",
 			in:        "alpha   \n   beta",
 			opts:      ChunkOptions{MaxSize: 9, Overlap: 1},
-			want:      []string{"alpha", "beta", "a"},
-			wantStart: []int{0, 8, 15},
-			wantEnd:   []int{9, 16, 16},
+			want:      []string{"alpha", "beta"},
+			wantStart: []int{0, 8},
+			wantEnd:   []int{9, 16},
 			notes:     "Content is trimmed but StartChar/EndChar keep the untrimmed offsets, so the offsets no longer address the stored text",
 		},
 	}
@@ -111,91 +116,98 @@ func contents(chunks []Chunk) []string {
 	return out
 }
 
-// TestGolden_ChunkerNeverUsesSplitters pins a defect that is NOT one of the
-// five tracked issues (#69-#73), and is a candidate sixth bug.
+// TestGolden_ChunkerHonoursSplitters is the enforcement half of issue #76.
 //
-// splitRecursive slices content[currentPos : currentPos+MaxSize] and hands that
-// slice to findBestSplit along with the same MaxSize. findBestSplit's first
-// statement is `if utf8.RuneCountInString(text) <= maxSize { return len(text) }`
-// -- which is always true for an ASCII slice of exactly MaxSize bytes. So the
-// splitter search below it is unreachable and every chunk boundary is a blind
-// cut at MaxSize, mid-word and mid-sentence.
-//
-// The Splitters option is therefore inert for Chunk(). ChunkSmart() has its own
-// content-type-specific paths and is not affected in the same way.
-func TestGolden_ChunkerNeverUsesSplitters(t *testing.T) {
+// Was: splitRecursive sliced content[currentPos : currentPos+MaxSize] and
+// handed that slice to findBestSplit along with the same MaxSize, so
+// findBestSplit's "the text already fits" early return always fired and the
+// splitter search below it was unreachable. Every boundary was a blind cut at
+// MaxSize, mid-word and mid-sentence, and ChunkOptions.Splitters was inert.
+func TestGolden_ChunkerHonoursSplitters(t *testing.T) {
 	c := NewChunker()
 
-	// A paragraph break sits well inside the window, so a splitter-aware
-	// chunker would cut there. It does not.
+	// A paragraph break sits well inside the window, so the cut lands there.
 	text := "SHORT.\n\n" + strings.Repeat("x", 40)
 	got := c.Chunk(text, ChunkOptions{MaxSize: 20, Overlap: 0, Splitters: []string{"\n\n"}})
 
 	if len(got) == 0 {
 		t.Fatal("expected chunks")
 	}
-	if got[0].Content == "SHORT." {
-		t.Fatalf("the chunker now honours splitters; this test documented the opposite and must be updated")
-	}
-	if got[0].Content != "SHORT.\n\nxxxxxxxxxxxx" {
-		t.Errorf("first chunk: got %q, want a blind 20-character cut", got[0].Content)
+	if got[0].Content != "SHORT." {
+		t.Errorf("first chunk: got %q, want a cut at the paragraph break (%q)", got[0].Content, "SHORT.")
 	}
 
-	// Directly: findBestSplit refuses to look for a splitter when the text it
-	// is given is not longer than maxSize -- which is the only way
-	// splitRecursive ever calls it.
+	// Directly: findBestSplit searches for a splitter whenever the text it is
+	// given is longer than maxSize, which is how splitRecursive now calls it.
 	window := "aa\n\nbbbbbbbbbbbbbbbbbb"
 	if len(window) != 22 {
 		t.Fatalf("fixture drifted: window is %d chars", len(window))
 	}
-	if got := c.findBestSplit(window, []string{"\n\n"}, 22); got != 22 {
-		t.Errorf("findBestSplit with len(text) == maxSize returned %d, want 22 (early return, splitters skipped)", got)
+	if got := c.findBestSplit(window, []string{"\n\n"}, 0, 22); got != 22 {
+		t.Errorf("findBestSplit with len(text) == maxSize returned %d, want 22 (the whole text fits)", got)
 	}
-	// When it IS given a longer text than maxSize, the splitter logic works.
-	if got := c.findBestSplit(window, []string{"\n\n"}, 10); got != 4 {
-		t.Errorf("findBestSplit with len(text) > maxSize returned %d, want 4 (just after the paragraph break)", got)
+	if got := c.findBestSplit(window, []string{"\n\n"}, 0, 10); got != 4 {
+		t.Errorf("findBestSplit returned %d, want 4 (just after the paragraph break)", got)
+	}
+
+	// minSize forbids a cut that the previous chunk already covered. With the
+	// only paragraph break at byte 4 and 6 bytes already covered, the splitter
+	// is skipped and the fallback cut is used instead.
+	if got := c.findBestSplit(window, []string{"\n\n"}, 6, 10); got <= 6 {
+		t.Errorf("findBestSplit returned %d, which adds no new content past minSize 6", got)
+	}
+
+	// Sentence splitters move the cut too, not just paragraph breaks.
+	sentences := c.Chunk("One two three. Four five six. Seven eight nine.", ChunkOptions{MaxSize: 20, Overlap: 3})
+	if len(sentences) == 0 || sentences[0].Content != "One two three." {
+		t.Errorf("sentence-aware cut: got %q, want %q", contents(sentences), []string{"One two three.", "..."})
 	}
 }
 
-// TestGolden_ChunkerEmitsTrailingDuplicate pins the second chunker defect: the
-// windowing loop always emits a final chunk that is entirely contained in the
-// previous one, because it advances by (len - overlap) and then re-enters the
-// loop for the remaining `overlap` characters.
+// TestGolden_ChunkerEmitsNoRedundantChunk is the other half of issue #76.
 //
-// Candidate sixth bug; pinned, not fixed. It inflates chunk counts and vector
-// storage by one chunk per multi-chunk document.
-func TestGolden_ChunkerEmitsTrailingDuplicate(t *testing.T) {
+// Was: the windowing loop advanced by (len - Overlap) even on the window that
+// already reached the end of the document, so every multi-chunk document ended
+// with a chunk wholly contained in its predecessor -- inflating chunk counts,
+// FTS rows and vector storage by one per document. A second form of the same
+// defect appeared mid-document once splitters started working: the window could
+// cut before the previous window's end and emit a chunk with no new content.
+func TestGolden_ChunkerEmitsNoRedundantChunk(t *testing.T) {
 	c := NewChunker()
 
 	got := c.Chunk(strings.Repeat("ab", 13), ChunkOptions{MaxSize: 10, Overlap: 2, Splitters: []string{"\n\n"}})
 	if len(got) < 2 {
 		t.Fatalf("expected several chunks, got %d", len(got))
 	}
+	assertNoContainedChunk(t, got)
 
-	last := got[len(got)-1]
-	prev := got[len(got)-2]
-	if len(last.Content) != 2 {
-		t.Errorf("trailing chunk length: got %d, want 2 (== Overlap)", len(last.Content))
-	}
-	if !strings.Contains(prev.Content, last.Content) {
-		t.Errorf("trailing chunk %q is expected to be a substring of the previous chunk %q", last.Content, prev.Content)
-	}
-
-	// It happens on the real corpus too: 1485 characters at MaxSize 1000 /
-	// Overlap 100 becomes 3 chunks, the third of which is redundant.
+	// The real corpus: every document, at the production chunk settings.
 	gi := ingestGoldenCorpus(t)
-	var gettysburg corpusDoc
 	for _, d := range gi.Docs {
-		if d.DocumentID == "01-gettysburg-address" {
-			gettysburg = d
+		t.Run(d.DocumentID, func(t *testing.T) {
+			assertNoContainedChunk(t, c.Chunk(d.Content, goldenChunkOptions))
+		})
+	}
+}
+
+// assertNoContainedChunk fails if one chunk's character range is wholly inside
+// another's, which is the shape every redundant chunk takes.
+//
+// The check is on offsets rather than content because repeated source text can
+// legitimately produce two chunks with identical content at different
+// positions; what must never happen is a chunk that covers no new characters.
+func assertNoContainedChunk(t *testing.T, chunks []Chunk) {
+	t.Helper()
+	for i, a := range chunks {
+		for j, b := range chunks {
+			if i == j {
+				continue
+			}
+			if b.StartChar <= a.StartChar && a.EndChar <= b.EndChar {
+				t.Errorf("chunk %d [%d,%d) is wholly contained in chunk %d [%d,%d): %q",
+					i, a.StartChar, a.EndChar, j, b.StartChar, b.EndChar, a.Content)
+			}
 		}
-	}
-	chunks := c.Chunk(gettysburg.Content, goldenChunkOptions)
-	if len(chunks) != 3 {
-		t.Fatalf("gettysburg chunk count: got %d, want 3", len(chunks))
-	}
-	if !strings.Contains(chunks[1].Content, chunks[2].Content) {
-		t.Errorf("the third gettysburg chunk is expected to be wholly contained in the second")
 	}
 }
 
@@ -212,15 +224,20 @@ func TestChunker_EstimateVsActual(t *testing.T) {
 	}{
 		{name: "single chunk", length: 100, opts: ChunkOptions{MaxSize: 1000, Overlap: 100}, wantEstimate: 1, wantActual: 1},
 		{
-			name:   "estimate undercounts because of the trailing duplicate",
+			name:   "estimate agrees with actual",
 			length: 26, opts: ChunkOptions{MaxSize: 10, Overlap: 2},
-			wantEstimate: 4, wantActual: 4,
+			wantEstimate: 3, wantActual: 3,
 		},
 		{
-			name:   "estimate and actual diverge on the golden settings",
+			name:   "estimate agrees with actual on the golden settings",
 			length: 1485, opts: ChunkOptions{MaxSize: 1000, Overlap: 100},
-			wantEstimate: 2, wantActual: 3,
-			estimateNote: "EstimateChunkCount does not model the trailing overlap chunk",
+			wantEstimate: 2, wantActual: 2,
+			estimateNote: "issue #76: EstimateChunkCount now models the same windowing Chunk performs",
+		},
+		{
+			name:   "estimate agrees with actual across a range of lengths",
+			length: 3000, opts: ChunkOptions{MaxSize: 1000, Overlap: 100},
+			wantEstimate: 4, wantActual: 4,
 		},
 	}
 
@@ -237,41 +254,57 @@ func TestChunker_EstimateVsActual(t *testing.T) {
 	}
 }
 
+// TestChunker_IDsTable covers kb.ChunkID, the single chunk-id function left
+// after issue #72 (see chunker.go). An id is a function of document identity,
+// chunk index and chunk content -- all three.
 func TestChunker_IDsTable(t *testing.T) {
-	c := NewChunker()
-
 	tests := []struct {
 		name     string
+		aDoc     string
 		a        string
 		aIndex   int
+		bDoc     string
 		b        string
 		bIndex   int
 		wantSame bool
 		notes    string
 	}{
-		{name: "same content, same index", a: "hello", aIndex: 0, b: "hello", bIndex: 0, wantSame: true},
+		{name: "same document, content and index", aDoc: "d", a: "hello", aIndex: 0, bDoc: "d", b: "hello", bIndex: 0, wantSame: true},
 		{
-			name: "KNOWN BUG #72: same content, different index still collides",
-			a:    "hello", aIndex: 0, b: "hello", bIndex: 9, wantSame: true,
-			notes: "chunkID hashes only the content; the index parameter is accepted and discarded",
+			name: "issue #72 fixed: same content at a different index is a different chunk",
+			aDoc: "d", a: "hello", aIndex: 0, bDoc: "d", b: "hello", bIndex: 9, wantSame: false,
+			notes: "the index is now part of the hashed payload",
 		},
-		{name: "different content", a: "hello", aIndex: 0, b: "world", bIndex: 0, wantSame: false},
-		{name: "whitespace difference changes the id", a: "hello ", aIndex: 0, b: "hello", bIndex: 0, wantSame: false},
+		{
+			name: "issue #72 fixed: identical content in two documents does not collide",
+			aDoc: "docA", a: "shared paragraph", aIndex: 0, bDoc: "docB", b: "shared paragraph", bIndex: 0, wantSame: false,
+			notes: "the document id is part of the hashed payload",
+		},
+		{name: "different content", aDoc: "d", a: "hello", aIndex: 0, bDoc: "d", b: "world", bIndex: 0, wantSame: false},
+		{name: "whitespace difference changes the id", aDoc: "d", a: "hello ", aIndex: 0, bDoc: "d", b: "hello", bIndex: 0, wantSame: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := c.chunkID(tt.a, tt.aIndex) == c.chunkID(tt.b, tt.bIndex)
+			got := ChunkID(tt.aDoc, tt.aIndex, tt.a) == ChunkID(tt.bDoc, tt.bIndex, tt.b)
 			if got != tt.wantSame {
-				t.Errorf("chunkID collision = %v, want %v\n%s", got, tt.wantSame, tt.notes)
+				t.Errorf("ChunkID collision = %v, want %v\n%s", got, tt.wantSame, tt.notes)
 			}
 		})
 	}
 
 	// The id format is part of the on-disk contract for the vector store.
-	id := c.chunkID("anything", 0)
+	id := ChunkID("doc", 0, "anything")
 	if !strings.HasPrefix(id, "chunk_") || len(id) != len("chunk_")+16 {
 		t.Errorf("chunk id format changed: %q (want chunk_ + 16 hex characters)", id)
+	}
+
+	// The hashed payload must stay byte-identical to the one the old
+	// Indexer.generateUniqueChunkID used, or every already-indexed knowledge
+	// base loses the link between its chunks and its stored vectors.
+	want := sha256.Sum256([]byte("doc:3:body text"))
+	if got := ChunkID("doc", 3, "body text"); got != "chunk_"+hex.EncodeToString(want[:8]) {
+		t.Errorf("ChunkID payload changed: %s -- existing knowledge bases would be orphaned", got)
 	}
 }
 

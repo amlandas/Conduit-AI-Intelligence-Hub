@@ -203,7 +203,7 @@ Examples:
 			}
 			defer svc.Close()
 
-			source, err := svc.AddSource(cmd.Context(), req)
+			source, warnings, err := svc.AddSourceWithWarnings(cmd.Context(), req)
 			if err != nil {
 				if jsonOutput {
 					fmt.Printf(`{"success":false,"error":"add source: %s"}`, err.Error())
@@ -222,6 +222,13 @@ Examples:
 				}
 				fmt.Println(string(data))
 				return nil
+			}
+
+			for _, w := range warnings {
+				fmt.Printf("! %s\n", w)
+			}
+			if len(warnings) > 0 {
+				fmt.Println()
 			}
 
 			fmt.Printf("✓ Added source: %s\n", source.Name)
@@ -389,8 +396,8 @@ Examples:
 func kbSearchCmd() *cobra.Command {
 	var semantic, fts5, raw, jsonOutput bool
 	var contextChunks, limit int
-	var minScore, semanticWeight, mmrLambda float64
-	var disableMMR, disableRerank bool
+	var minScore float64
+	var recallMode string
 
 	cmd := &cobra.Command{
 		Use:   "search <query>",
@@ -409,10 +416,9 @@ The hybrid mode automatically detects:
 Results are processed by default (merged chunks, filtered boilerplate).
 Use --raw to get unprocessed results.
 
-ADVANCED MODE: RAG tuning flags allow fine-grained control over retrieval:
-  --min-score         Minimum similarity threshold (0.0-1.0, default 0.0)
-  --semantic-weight   Balance between semantic/lexical (0.0-1.0, default 0.5)
-  --mmr-lambda        Relevance vs diversity (0.0-1.0, default 0.7)
+ADVANCED MODE: retrieval tuning:
+  --recall            Precision/recall preset: high, balanced (default), precise
+  --min-score         Minimum similarity threshold for --semantic (0.0-1.0)
 
 Examples:
   conduit kb search "how does authentication work"    # Hybrid RRF (default)
@@ -421,14 +427,14 @@ Examples:
   conduit kb search "class AuthProvider" --fts5       # Force keyword only
   conduit kb search "query" --raw                     # Raw chunks without processing
 
-  # Advanced: Lower threshold for more permissive matching
-  conduit kb search "ASL-3 safeguards" --min-score 0.05
+  # Advanced: widen recall, keeping every potentially relevant chunk
+  conduit kb search "ASL-3 safeguards" --recall high
 
   # Advanced: Pure semantic search with low threshold
   conduit kb search "AI safety deployment" --semantic --min-score 0.0
 
-  # Advanced: Higher relevance, less diversity
-  conduit kb search "authentication" --mmr-lambda 0.9`,
+  # Advanced: fewer, more distinct results
+  conduit kb search "authentication" --recall precise`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			query := args[0]
@@ -446,10 +452,7 @@ Examples:
 			searchReq.Raw = raw
 			searchReq.Limit = limit
 			searchReq.MinScore = minScore
-			searchReq.SemanticWeight = semanticWeight
-			searchReq.MMRLambda = mmrLambda
-			searchReq.DisableMMR = disableMMR
-			searchReq.DisableRerank = disableRerank
+			searchReq.RecallMode = recallMode
 			// --context is accepted and ignored, as it was by the HTTP layer.
 			_ = contextChunks
 
@@ -578,11 +581,8 @@ Examples:
 	cmd.Flags().IntVar(&limit, "limit", 0, "Maximum results to return (default: 10)")
 
 	// Advanced RAG tuning flags
-	cmd.Flags().Float64Var(&minScore, "min-score", -1, "Minimum similarity threshold (0.0-1.0)")
-	cmd.Flags().Float64Var(&semanticWeight, "semantic-weight", -1, "Semantic vs lexical weight (0.0-1.0)")
-	cmd.Flags().Float64Var(&mmrLambda, "mmr-lambda", -1, "Relevance vs diversity balance (0.0-1.0)")
-	cmd.Flags().BoolVar(&disableMMR, "no-mmr", false, "Disable MMR diversity filtering")
-	cmd.Flags().BoolVar(&disableRerank, "no-rerank", false, "Disable semantic reranking")
+	cmd.Flags().Float64Var(&minScore, "min-score", -1, "Minimum similarity threshold for --semantic (0.0-1.0)")
+	cmd.Flags().StringVar(&recallMode, "recall", "", "Precision/recall preset: high, balanced, precise")
 
 	return cmd
 }

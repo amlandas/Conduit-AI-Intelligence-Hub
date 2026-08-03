@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/simpleflo/conduit/internal/embed"
 )
 
 var errEmbedderDown = errors.New("embedding service unreachable")
@@ -515,16 +517,42 @@ func TestSemanticSearcher_InjectionSeam(t *testing.T) {
 }
 
 // TestSemanticSearchConfig_DefaultWiring pins that production callers still get
-// a working searcher from config alone, with no live service required.
+// a working searcher without a live embedding service.
+//
+// WP-3.4 (#71) deleted NewSemanticSearcher and its EmbeddingConfig along with
+// internal/kb.EmbeddingService, the untimed Ollama client. Production wires the
+// searcher the way this test now does: an internal/embed provider (bounded by
+// an http.Client timeout), wrapped by kb.NewProviderEmbedder, handed to
+// NewSemanticSearcherWith. The host below is a closed port, and constructing
+// the searcher must still succeed -- an unreachable embedding service is a
+// degraded search later, not a failed startup.
 func TestSemanticSearchConfig_DefaultWiring(t *testing.T) {
 	db := newTestDB(t)
 
-	semantic, err := NewSemanticSearcher(db, SemanticSearchConfig{
-		EmbeddingConfig: EmbeddingConfig{OllamaHost: "http://127.0.0.1:1"},
+	provider, err := embed.NewOllamaProvider(embed.OllamaConfig{
+		Host:       "http://127.0.0.1:1",
+		Model:      DefaultEmbeddingModel,
+		Dimensions: DefaultEmbeddingDimension,
 	})
 	if err != nil {
-		t.Fatalf("NewSemanticSearcher must not require a reachable embedding service: %v", err)
+		t.Fatalf("NewOllamaProvider: %v", err)
 	}
+	t.Cleanup(func() { _ = provider.Close() })
+
+	embedder := NewProviderEmbedder(provider)
+	if got := embedder.Dimension(); got != DefaultEmbeddingDimension {
+		t.Errorf("Dimension() = %d, want %d", got, DefaultEmbeddingDimension)
+	}
+	if got := embedder.Model(); got != DefaultEmbeddingModel {
+		t.Errorf("Model() = %q, want %q", got, DefaultEmbeddingModel)
+	}
+
+	vectors, err := NewSQLiteVectorIndex(db, VectorIndexConfig{Dimension: embedder.Dimension()})
+	if err != nil {
+		t.Fatalf("NewSQLiteVectorIndex: %v", err)
+	}
+
+	semantic := NewSemanticSearcherWith(db, embedder, vectors)
 	if semantic.VectorIndex() == nil {
 		t.Fatal("default wiring produced no vector index")
 	}

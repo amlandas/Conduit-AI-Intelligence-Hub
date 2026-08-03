@@ -2,9 +2,7 @@ package kb
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -93,10 +91,16 @@ func (idx *Indexer) GetExtractionErrors() int {
 func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) error {
 	// Chunk IDs must be known before embedding so the vector rows can be keyed
 	// by them inside the transaction.
+	//
+	// The id is recomputed rather than trusted: a caller may have chunked
+	// without setting ChunkOptions.DocumentID, and the document identity has to
+	// be in the hash. ChunkID is the same function Chunker uses, so a chunker
+	// that was told the document id produces exactly these values (issue #72 was
+	// two id functions that could disagree).
 	chunksWithIDs := make([]Chunk, len(chunks))
 	for i, chunk := range chunks {
 		chunksWithIDs[i] = chunk
-		chunksWithIDs[i].ChunkID = idx.generateUniqueChunkID(doc.DocumentID, chunk.Content, i)
+		chunksWithIDs[i].ChunkID = ChunkID(doc.DocumentID, i, chunk.Content)
 	}
 
 	var embeddings [][]float32
@@ -490,12 +494,6 @@ func (idx *Indexer) Rebuild(ctx context.Context) error {
 	return nil
 }
 
-// generateUniqueChunkID generates a globally unique chunk ID by including
-// the document ID in the hash. This prevents collisions when identical
-// content exists in multiple documents.
-func (idx *Indexer) generateUniqueChunkID(documentID, content string, index int) string {
-	// Combine document ID, content, and index to ensure uniqueness
-	data := fmt.Sprintf("%s:%d:%s", documentID, index, content)
-	h := sha256.Sum256([]byte(data))
-	return "chunk_" + hex.EncodeToString(h[:8])
-}
+// WP-3.4 deleted Indexer.generateUniqueChunkID. It was the second of the two
+// chunk-id functions tracked as issue #72; the surviving one is kb.ChunkID in
+// chunker.go, which hashes the identical "documentID:index:content" payload.

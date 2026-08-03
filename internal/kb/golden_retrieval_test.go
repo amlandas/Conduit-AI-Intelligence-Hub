@@ -37,10 +37,11 @@ func floatsClose(a, b float64) bool { return math.Abs(a-b) <= scoreEpsilon }
 // TestGolden_CorpusIngestion pins what ingestion produces for the golden
 // corpus: document count, per-document chunk count, and total indexed rows.
 //
-// The chunk counts here are a direct consequence of Chunker.Chunk's current
-// fixed-window behaviour (see TestGolden_ChunkerNeverUsesSplitters). Documents
-// of 1100-1485 characters become 3 chunks rather than 2 because the chunker
-// always emits a trailing chunk equal to the overlap tail.
+// The chunk counts here are a direct consequence of Chunker.Chunk's windowing
+// (see TestGolden_ChunkerHonoursSplitters). Issue #76 moved them: cuts now land
+// on paragraph and sentence boundaries instead of blindly at MaxSize, and the
+// redundant trailing chunk is gone, so the 1100-1485 character documents are 2
+// chunks rather than 3.
 func TestGolden_CorpusIngestion(t *testing.T) {
 	gi := ingestGoldenCorpus(t)
 	ctx := context.Background()
@@ -51,9 +52,9 @@ func TestGolden_CorpusIngestion(t *testing.T) {
 
 	wantChunks := map[string]int{
 		"01-gettysburg-address":         3,
-		"02-declaration-preamble":       3,
-		"03-moby-dick-loomings":         3,
-		"04-alice-down-the-rabbit-hole": 3,
+		"02-declaration-preamble":       2,
+		"03-moby-dick-loomings":         2,
+		"04-alice-down-the-rabbit-hole": 2,
 		"05-sonnet-18":                  1,
 		"06-fixture-lantern-keeper":     1,
 		"07-fixture-harbour-ledger":     1,
@@ -110,42 +111,45 @@ func TestGolden_FTSKeywordSearch(t *testing.T) {
 		{
 			name:         "phrase shared by two documents",
 			query:        "created equal",
-			wantDocs:     []string{"02-declaration-preamble", "01-gettysburg-address"},
-			wantTopScore: -2.0466698849558873,
-			note:         "both documents contain 'all men are created equal'; the shorter preamble chunk wins on BM25 length normalisation",
+			wantDocs:     []string{"01-gettysburg-address", "02-declaration-preamble"},
+			wantTopScore: -1.5915914261298685,
+			note: "both documents contain 'all men are created equal'. Issue #76 moved this ranking: with " +
+				"boundary-aware cuts the gettysburg chunk carrying the phrase is now the shorter of the two, " +
+				"so BM25 length normalisation favours it instead of the preamble",
 		},
 		{
 			name:         "term frequency gradient",
 			query:        "lantern",
 			wantDocs:     []string{"06-fixture-lantern-keeper", "07-fixture-harbour-ledger"},
-			wantTopScore: -2.9992787315700444,
+			wantTopScore: -2.6057274240106465,
 			note:         "lantern appears 4x in the keeper fixture and 1x in the harbour fixture",
 		},
 		{
 			name:         "single document, several matching chunks",
 			query:        "rabbit",
-			wantDocs:     []string{"04-alice-down-the-rabbit-hole", "04-alice-down-the-rabbit-hole", "04-alice-down-the-rabbit-hole"},
-			wantTopScore: -2.2147609541623927,
-			note:         "chunk overlap means the same document can occupy every slot",
+			wantDocs:     []string{"04-alice-down-the-rabbit-hole", "04-alice-down-the-rabbit-hole"},
+			wantTopScore: -2.3712867256466472,
+			note:         "chunk overlap means the same document can occupy several slots (two chunks since #76, three before)",
 		},
 		{
-			name:         "term present in two documents, four chunks",
+			name:         "term present in two documents, three chunks",
 			query:        "government",
-			wantDocs:     []string{"02-declaration-preamble", "01-gettysburg-address", "02-declaration-preamble", "01-gettysburg-address"},
-			wantTopScore: -1.0565672657133092,
+			wantDocs:     []string{"02-declaration-preamble", "01-gettysburg-address", "01-gettysburg-address"},
+			wantTopScore: -1.3106597756377871,
 		},
 		{
 			name:         "stemming: 'people' matches 'people' and 'people's'",
 			query:        "people",
-			wantDocs:     []string{"01-gettysburg-address", "01-gettysburg-address", "02-declaration-preamble", "03-moby-dick-loomings"},
-			wantTopScore: -1.5216808882308421,
-			note:         "moby-dick only matches via \"people's hats\" -- porter stemming, not a substring match",
+			wantDocs:     []string{"01-gettysburg-address", "01-gettysburg-address", "02-declaration-preamble", "03-moby-dick-loomings", "02-declaration-preamble", "03-moby-dick-loomings"},
+			wantTopScore: -0.0000015936073059,
+			note: "moby-dick only matches via \"people's hats\" -- porter stemming, not a substring match. " +
+				"The near-zero top score is BM25 IDF: after #76 the term appears in half the chunks in the corpus",
 		},
 		{
 			name:         "identical paragraph in two documents",
 			query:        "boilerplate notice",
 			wantDocs:     []string{"07-fixture-harbour-ledger", "06-fixture-lantern-keeper"},
-			wantTopScore: -2.8219619223060208,
+			wantTopScore: -2.5441189067585825,
 			note:         "duplicate content is NOT deduplicated; the shorter host document ranks first",
 		},
 		{
@@ -158,8 +162,9 @@ func TestGolden_FTSKeywordSearch(t *testing.T) {
 			name:         "apostrophe in query still finds the sonnet",
 			query:        "summer's day",
 			wantDocs:     []string{"05-sonnet-18"},
-			wantTopScore: -3.8915892719995693,
-			note:         "the apostrophe is stripped to a space, so this becomes summer AND s AND day*; see TestKnownBug_Issue70 for what it does to mode selection",
+			wantTopScore: -2.5609151512518666,
+			note: `#70/#75: the query is now "summer's" "day"* -- one term for the possessive rather ` +
+				`than summer AND s AND day*, which is why the score moved`,
 		},
 	}
 
@@ -220,8 +225,8 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 			name:           "exploratory query goes through fusion",
 			query:          "created equal",
 			wantMode:       HybridModeFusion,
-			wantDocs:       []string{"02-declaration-preamble", "01-gettysburg-address"},
-			wantTopScore:   0.009016393442622951, // 0.5 (lexical weight) * 1/(60+1) * 1.1 (agreement)
+			wantDocs:       []string{"01-gettysburg-address", "02-declaration-preamble"}, // #76 moved this ranking
+			wantTopScore:   0.018032786885245903,                                         // #69: 1/(60+1) * 1.1 (agreement), unweighted
 			wantConfidence: "medium",
 			wantStrategies: 1,
 		},
@@ -229,19 +234,35 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 			name:           "entity query gets an exact-match boost",
 			query:          "Wonderland",
 			wantMode:       HybridModeFusion,
-			wantDocs:       []string{"04-alice-down-the-rabbit-hole", "04-alice-down-the-rabbit-hole", "04-alice-down-the-rabbit-hole"},
-			wantTopScore:   0.010819672131147542, // ... * 1.2 for the single-word entity hit
+			wantDocs:       []string{"04-alice-down-the-rabbit-hole", "04-alice-down-the-rabbit-hole"}, // #76: two chunks, not three
+			wantTopScore:   0.021639344262295086,                                                      // ... * 1.2 for the single-word entity hit
 			wantConfidence: "medium",
 			wantStrategies: 1,
 		},
 		{
-			name:           "apostrophe forces lexical mode and raw bm25 scores",
+			// #70: an apostrophe no longer forces lexical mode, so this query
+			// goes through fusion like any other and carries fusion's score
+			// scale, confidence and strategy count.
+			name:           "apostrophe goes through fusion like any other query",
 			query:          "summer's day",
+			wantMode:       HybridModeFusion,
+			wantDocs:       []string{"05-sonnet-18"},
+			wantTopScore:   0.018032786885245903,
+			wantConfidence: "medium",
+			wantStrategies: 1,
+		},
+		{
+			// The control: a genuine double-quoted phrase still selects lexical
+			// mode. #77: its score is now on the same reciprocal-rank scale
+			// fusion uses -- 1/(60+1) for rank 1 -- rather than raw negative
+			// bm25, and Confidence and StrategiesUsed are populated.
+			name:           "a double-quoted phrase still selects lexical mode",
+			query:          `"summer's day"`,
 			wantMode:       HybridModeLexical,
 			wantDocs:       []string{"05-sonnet-18"},
-			wantTopScore:   -3.8915892719995693,
-			wantConfidence: "", // KNOWN GAP: searchFTSOnly never sets Confidence or StrategiesUsed.
-			wantStrategies: 0,
+			wantTopScore:   0.01639344262295082,
+			wantConfidence: "medium",
+			wantStrategies: 1,
 		},
 		{
 			name:           "no match returns an empty fusion result",
@@ -285,8 +306,12 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 
 // TestGolden_MMRReordersFinalRanking pins the fact that the final ranking is
 // NOT sorted by the Score field: MMR runs last and reorders for diversity while
-// leaving Score untouched. Consumers that re-sort by Score get a different order
-// than the one Conduit returned.
+// leaving Score untouched.
+//
+// #77 made that safe rather than silent: SearchHit.Rank now carries the
+// authoritative position, so a consumer has something to trust instead of
+// having to infer the order from a field that no longer implies it. See
+// TestIssue77_RankIsAuthoritative.
 func TestGolden_MMRReordersFinalRanking(t *testing.T) {
 	gi := ingestGoldenCorpus(t)
 	ctx := context.Background()
@@ -300,6 +325,8 @@ func TestGolden_MMRReordersFinalRanking(t *testing.T) {
 		"01-gettysburg-address",
 		"03-moby-dick-loomings", // promoted by MMR: least similar snippet
 		"02-declaration-preamble",
+		"02-declaration-preamble",
+		"03-moby-dick-loomings",
 		"01-gettysburg-address",
 	}
 	if got := docIDs(res.Results); !equalStrings(got, wantOrder) {
@@ -349,7 +376,7 @@ func TestGolden_RetrievalSuite(t *testing.T) {
 		{
 			Name:           "shared_phrase_returns_both_documents",
 			Query:          "created equal",
-			ExpectedTopDoc: "02-declaration-preamble.txt",
+			ExpectedTopDoc: "01-gettysburg-address.txt", // #76 moved rank 1; see TestGolden_FTSKeywordSearch
 			MustContain:    []string{"created equal"},
 			MinResults:     2,
 			MaxRank:        1,
@@ -423,15 +450,17 @@ func TestGolden_SearchFiltersAndPagination(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Search: %v", err)
 		}
+		// #76: "government" now matches three chunks rather than four, so the
+		// second page holds the single remainder.
 		if got := docIDs(first.Results); !equalStrings(got, []string{"02-declaration-preamble", "01-gettysburg-address"}) {
 			t.Errorf("page 1: got %v", got)
 		}
-		if got := docIDs(second.Results); !equalStrings(got, []string{"02-declaration-preamble", "01-gettysburg-address"}) {
+		if got := docIDs(second.Results); !equalStrings(got, []string{"01-gettysburg-address"}) {
 			t.Errorf("page 2: got %v", got)
 		}
 		// TotalHits ignores paging.
-		if first.TotalHits != 4 || second.TotalHits != 4 {
-			t.Errorf("TotalHits should be 4 on both pages, got %d and %d", first.TotalHits, second.TotalHits)
+		if first.TotalHits != 3 || second.TotalHits != 3 {
+			t.Errorf("TotalHits should be 3 on both pages, got %d and %d", first.TotalHits, second.TotalHits)
 		}
 	})
 
