@@ -29,6 +29,7 @@ import (
 	"github.com/simpleflo/conduit/internal/config"
 	"github.com/simpleflo/conduit/internal/installer"
 	"github.com/simpleflo/conduit/internal/kb"
+	"github.com/simpleflo/conduit/internal/mcpserver"
 	containerRuntime "github.com/simpleflo/conduit/internal/runtime"
 	"github.com/simpleflo/conduit/internal/store"
 )
@@ -4181,8 +4182,10 @@ Example MCP client configuration:
 			// Create hybrid searcher (combines FTS5 + semantic when available)
 			hybridSearcher := kb.NewHybridSearcher(ftsSearcher, semanticSearcher)
 
-			// Create and run MCP server with hybrid searcher
-			server := kb.NewMCPServer(st.DB(), hybridSearcher)
+			// Create and run MCP server with hybrid searcher.
+			// Backed by the official MCP Go SDK (internal/mcpserver); it speaks
+			// the current spec revision and negotiates down for older clients.
+			server := mcpserver.New(st.DB(), hybridSearcher)
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
