@@ -17,6 +17,7 @@ import (
 	"github.com/simpleflo/conduit/internal/kb"
 	"github.com/simpleflo/conduit/internal/kbservice"
 	"github.com/simpleflo/conduit/internal/mcpserver"
+	setuppkg "github.com/simpleflo/conduit/internal/setup"
 )
 
 // mcpCmd is the parent command for MCP server operations
@@ -68,83 +69,26 @@ Examples:
 	return cmd
 }
 
-// mcpClientConfigPath returns the config file and the key holding MCP servers
-// for a supported AI client.
-func mcpClientConfigPath(clientID string) (path string, key string, err error) {
-	homeDir, _ := os.UserHomeDir()
-	switch clientID {
-	case "claude-code":
-		return filepath.Join(homeDir, ".claude.json"), "mcpServers", nil
-	case "cursor":
-		return filepath.Join(homeDir, ".cursor", "settings", "extensions.json"), "mcpServers", nil
-	case "vscode":
-		return filepath.Join(homeDir, ".vscode", "settings.json"), "mcp.servers", nil
-	default:
-		return "", "", fmt.Errorf("unsupported client: %s", clientID)
-	}
-}
-
-// configureMCPClient writes the conduit-kb MCP server entry into an AI client's
-// configuration file. It is shared by 'mcp configure' and 'setup'.
+// configureMCPClient registers Conduit's MCP server in an AI client and reports
+// the outcome. The work itself lives in internal/setup; this is presentation.
 func configureMCPClient(clientID string, forceOverwrite bool) error {
-	configPath, configKey, err := mcpClientConfigPath(clientID)
+	res, err := setuppkg.ConfigureMCPClient(clientID, forceOverwrite)
 	if err != nil {
 		return err
 	}
 
-	// Read existing config or create new
-	var clientCfg map[string]interface{}
-	if data, rerr := os.ReadFile(configPath); rerr == nil {
-		if uerr := json.Unmarshal(data, &clientCfg); uerr != nil {
-			return fmt.Errorf("parse config: %w", uerr)
-		}
-	} else {
-		clientCfg = make(map[string]interface{})
-	}
-
-	// Get or create mcpServers section
-	var mcpServers map[string]interface{}
-	if servers, ok := clientCfg[configKey].(map[string]interface{}); ok {
-		mcpServers = servers
-	} else {
-		mcpServers = make(map[string]interface{})
-	}
-
-	// Check if already configured
-	if _, exists := mcpServers["conduit-kb"]; exists && !forceOverwrite {
+	if res.AlreadyConfigured {
 		fmt.Println("✓ MCP KB server already configured")
-		fmt.Printf("  Client: %s\n", clientID)
-		fmt.Printf("  Config: %s\n", configPath)
+		fmt.Printf("  Client: %s\n", res.ClientID)
+		fmt.Printf("  Config: %s\n", res.ConfigPath)
 		return nil
 	}
 
-	// Add conduit-kb configuration
-	mcpServers["conduit-kb"] = map[string]interface{}{
-		"command": "conduit",
-		"args":    []string{"mcp", "kb"},
-	}
-	clientCfg[configKey] = mcpServers
-
-	// Ensure directory exists
-	if err := os.MkdirAll(filepath.Dir(configPath), 0755); err != nil {
-		return fmt.Errorf("create config directory: %w", err)
-	}
-
-	// Write config with pretty formatting
-	data, err := json.MarshalIndent(clientCfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal config: %w", err)
-	}
-
-	if err := os.WriteFile(configPath, data, 0644); err != nil {
-		return fmt.Errorf("write config: %w", err)
-	}
-
 	fmt.Println("✓ MCP KB server configured")
-	fmt.Printf("  Client: %s\n", clientID)
-	fmt.Printf("  Config: %s\n", configPath)
+	fmt.Printf("  Client: %s\n", res.ClientID)
+	fmt.Printf("  Config: %s\n", res.ConfigPath)
 	fmt.Println()
-	fmt.Printf("Restart %s for the configuration to take effect.\n", clientID)
+	fmt.Printf("Restart %s for the configuration to take effect.\n", res.ClientID)
 
 	return nil
 }
@@ -245,7 +189,6 @@ Shows:
 Use --json for machine-readable output (used by GUI).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
 
 			// Check MCP configuration in each supported client
 			type ClientConfig struct {
@@ -254,18 +197,16 @@ Use --json for machine-readable output (used by GUI).`,
 				ServerName string `json:"serverName,omitempty"`
 			}
 
-			clients := map[string]ClientConfig{
-				"claude-code": {ConfigPath: filepath.Join(homeDir, ".claude.json")},
-				"cursor":      {ConfigPath: filepath.Join(homeDir, ".cursor", "settings", "extensions.json")},
-				"vscode":      {ConfigPath: filepath.Join(homeDir, ".vscode", "settings.json")},
-			}
-
-			// Check each client's configuration
-			for name, cfg := range clients {
-				configured, serverName := checkMCPClientConfigured(cfg.ConfigPath)
-				cfg.Configured = configured
-				cfg.ServerName = serverName
-				clients[name] = cfg
+			// The client list comes from internal/setup so that 'mcp status'
+			// and 'mcp configure' can never look at different files.
+			clients := map[string]ClientConfig{}
+			for name, client := range setuppkg.MCPClients() {
+				configured, serverName := checkMCPClientConfigured(client.ConfigPath)
+				clients[name] = ClientConfig{
+					Configured: configured,
+					ConfigPath: client.ConfigPath,
+					ServerName: serverName,
+				}
 			}
 
 			// JSON output mode for GUI consumption
@@ -486,35 +427,11 @@ This command shows daemon logs related to MCP operations.`,
 	return cmd
 }
 
-// checkMCPClientConfigured checks if conduit-kb MCP server is configured in a client config file
+// checkMCPClientConfigured reports whether a client config already registers
+// Conduit's MCP server. It delegates so that 'mcp configure' writing an entry
+// and 'mcp status' looking for one can never disagree about its shape.
 func checkMCPClientConfigured(configPath string) (bool, string) {
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return false, ""
-	}
-
-	var config map[string]interface{}
-	if err := json.Unmarshal(data, &config); err != nil {
-		return false, ""
-	}
-
-	// Check for mcpServers key (Claude Code, Cursor)
-	if mcpServers, ok := config["mcpServers"].(map[string]interface{}); ok {
-		if _, exists := mcpServers["conduit-kb"]; exists {
-			return true, "conduit-kb"
-		}
-	}
-
-	// Check for mcp.servers key (VS Code style)
-	if mcpSection, ok := config["mcp"].(map[string]interface{}); ok {
-		if servers, ok := mcpSection["servers"].(map[string]interface{}); ok {
-			if _, exists := servers["conduit-kb"]; exists {
-				return true, "conduit-kb"
-			}
-		}
-	}
-
-	return false, ""
+	return setuppkg.IsMCPClientConfigured(configPath)
 }
 
 // readLastNLines reads the last N lines from a file
