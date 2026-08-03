@@ -153,6 +153,7 @@ VS Code, Gemini CLI, and more.`,
 	rootCmd.AddCommand(serviceCmd())
 	rootCmd.AddCommand(configCmd())
 	rootCmd.AddCommand(backupCmd())
+	// TODO(WP-3.2): remove with dead-stack teardown -- deprecation shim only.
 	rootCmd.AddCommand(qdrantCmd())
 	rootCmd.AddCommand(falkordbCmd())
 	rootCmd.AddCommand(ollamaCmd())
@@ -1024,14 +1025,30 @@ func checkCommand(name string, args ...string) bool {
 	return cmd.Run() == nil
 }
 
-// checkQdrantRunning checks if Qdrant vector database is running
-func checkQdrantRunning() bool {
-	cmd := exec.Command("curl", "-s", "-o", "/dev/null", "-w", "%{http_code}", "http://localhost:6333/collections")
-	out, err := cmd.Output()
+// vectorIndexCount returns how many chunk vectors the knowledge base holds.
+// Vectors live in the knowledge base file, so this is a table count rather than
+// a request to a vector service.
+func vectorIndexCount() (int64, error) {
+	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return false
+		return 0, err
 	}
-	return strings.TrimSpace(string(out)) == "200"
+	dbPath := filepath.Join(homeDir, ".conduit", "conduit.db")
+	if _, err := os.Stat(dbPath); err != nil {
+		return 0, err
+	}
+
+	st, err := store.New(dbPath)
+	if err != nil {
+		return 0, err
+	}
+	defer st.Close()
+
+	var count int64
+	if err := st.DB().QueryRow(`SELECT COUNT(*) FROM kb_vectors`).Scan(&count); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 // checkFalkorDBRunning checks if FalkorDB is accessible on localhost:6379
@@ -1042,27 +1059,6 @@ func checkFalkorDBRunning() bool {
 	}
 	conn.Close()
 	return true
-}
-
-// getQdrantVectorCount returns the number of vectors in the conduit_kb collection
-func getQdrantVectorCount() (int64, error) {
-	cmd := exec.Command("curl", "-s", "http://localhost:6333/collections/conduit_kb")
-	out, err := cmd.Output()
-	if err != nil {
-		return 0, err
-	}
-
-	var result map[string]interface{}
-	if err := json.Unmarshal(out, &result); err != nil {
-		return 0, err
-	}
-
-	if res, ok := result["result"].(map[string]interface{}); ok {
-		if count, ok := res["points_count"].(float64); ok {
-			return int64(count), nil
-		}
-	}
-	return 0, fmt.Errorf("collection not found")
 }
 
 // getOllamaModels returns a list of installed Ollama models
@@ -1197,21 +1193,21 @@ func statusCmd() *cobra.Command {
 					}
 				}
 
-				// Qdrant (Vector DB)
-				if qdrant, ok := deps["qdrant"].(map[string]interface{}); ok {
-					available, _ := qdrant["available"].(bool)
-					qdrantStatus := "unknown"
-					if s, ok := qdrant["status"].(string); ok {
-						qdrantStatus = s
+				// Vector index (stored in the knowledge base file)
+				if vectorsDep, ok := deps["vectors"].(map[string]interface{}); ok {
+					available, _ := vectorsDep["available"].(bool)
+					vectorStatus := "unknown"
+					if s, ok := vectorsDep["status"].(string); ok {
+						vectorStatus = s
 					}
 					if available {
 						vectors := int64(0)
-						if v, ok := qdrant["vectors_count"].(float64); ok {
+						if v, ok := vectorsDep["vectors_count"].(float64); ok {
 							vectors = int64(v)
 						}
-						fmt.Printf("   Vector Database:   ✓ Qdrant (%s, %d vectors)\n", qdrantStatus, vectors)
+						fmt.Printf("   Vector Index:      ✓ in knowledge base (%s, %d vectors)\n", vectorStatus, vectors)
 					} else {
-						fmt.Printf("   Vector Database:   ○ Qdrant (%s)\n", qdrantStatus)
+						fmt.Printf("   Vector Index:      ○ %s\n", vectorStatus)
 					}
 				}
 
@@ -3148,7 +3144,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().BoolVar(&semantic, "semantic", false, "Force semantic search (requires Qdrant + Ollama)")
+	cmd.Flags().BoolVar(&semantic, "semantic", false, "Force semantic search (requires Ollama for query embedding)")
 	cmd.Flags().BoolVar(&fts5, "fts5", false, "Force FTS5 keyword search")
 	cmd.Flags().BoolVar(&raw, "raw", false, "Return raw chunks without processing")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON (for GUI consumption)")
@@ -3240,7 +3236,7 @@ Examples:
 							fmt.Printf("  Vectors: ✓ indexed\n")
 						}
 					} else {
-						fmt.Printf("  Vectors: disabled (Qdrant/Ollama unavailable)\n")
+						fmt.Printf("  Vectors: disabled (semantic search unavailable)\n")
 					}
 				}
 
@@ -3386,7 +3382,7 @@ This is required to enable semantic search for documents that were indexed
 before semantic search was enabled. New documents are automatically indexed
 in both FTS5 and vector search.
 
-Requires Qdrant and Ollama to be running.
+Requires Ollama to be running for embedding generation.
 
 Examples:
   conduit kb migrate`,
@@ -3437,7 +3433,7 @@ Checks:
   - Container runtime availability (Podman/Docker)
   - Database accessibility
   - AI provider configuration and installed models
-  - Semantic search (Qdrant vector database + embeddings)
+  - Semantic search (in-database vectors + embeddings)
   - Client configurations
   - Knowledge base status
   - Document extraction tools (PDF, DOC, RTF, DOCX, ODT)`,
@@ -3631,14 +3627,14 @@ Checks:
 				}
 			}
 
-			// Check semantic search (Qdrant + embeddings)
+			// Check semantic search (vector index + embeddings)
 			fmt.Println()
 			fmt.Println("🔍 Semantic Search")
 			fmt.Println("────────────────────────────────────────────────────────")
 
 			// Get daemon's view of semantic search status
 			daemonSemanticEnabled := false
-			daemonQdrantStatus := ""
+			daemonVectorStatus := ""
 			daemonVectorCount := int64(0)
 			if daemonStatus != nil {
 				if deps, ok := daemonStatus["dependencies"].(map[string]interface{}); ok {
@@ -3647,42 +3643,39 @@ Checks:
 							daemonSemanticEnabled = available
 						}
 					}
-					if qdrant, ok := deps["qdrant"].(map[string]interface{}); ok {
-						if qs, ok := qdrant["status"].(string); ok {
-							daemonQdrantStatus = qs
+					if vectors, ok := deps["vectors"].(map[string]interface{}); ok {
+						if vs, ok := vectors["status"].(string); ok {
+							daemonVectorStatus = vs
 						}
-						if vc, ok := qdrant["vectors"].(float64); ok {
+						if vc, ok := vectors["vectors_count"].(float64); ok {
 							daemonVectorCount = int64(vc)
 						}
 					}
 				}
 			}
 
-			qdrantRunning := checkQdrantRunning()
-			if qdrantRunning {
-				if daemonQdrantStatus != "" && daemonQdrantStatus != "unknown" {
-					fmt.Printf("✓ Qdrant vector database: %s\n", daemonQdrantStatus)
+			// The vector index is part of the knowledge base file, so it is
+			// present whenever the knowledge base is -- there is no service that
+			// can be "down".
+			vectorCount, vectorErr := vectorIndexCount()
+			if vectorErr == nil {
+				if daemonVectorStatus != "" && daemonVectorStatus != "unknown" {
+					fmt.Printf("✓ Vector index (in knowledge base): %s\n", daemonVectorStatus)
 				} else {
-					fmt.Println("✓ Qdrant vector database is running")
+					fmt.Println("✓ Vector index (in knowledge base)")
 				}
 				if daemonVectorCount > 0 {
-					fmt.Printf("   Collection: conduit_kb (%d vectors)\n", daemonVectorCount)
-				} else if count, err := getQdrantVectorCount(); err == nil {
-					fmt.Printf("   Collection: conduit_kb (%d vectors)\n", count)
-				} else {
-					fmt.Println("   Collection: not yet created (run 'conduit kb sync')")
+					vectorCount = daemonVectorCount
 				}
-				if daemonContainer != "" {
-					fmt.Println("   Managed by: Conduit (auto-started)")
+				if vectorCount > 0 {
+					fmt.Printf("   Indexed: %d vectors\n", vectorCount)
+				} else {
+					fmt.Println("   Indexed: no vectors yet (run 'conduit kb sync')")
 				}
 			} else {
-				fmt.Println("⚠️  Qdrant not running")
+				fmt.Println("⚠️  Vector index unavailable")
 				fmt.Println("   Semantic search unavailable (using FTS5 fallback)")
-				if daemonRuntime != "" {
-					fmt.Println("   Conduit will auto-start on daemon restart")
-				} else {
-					fmt.Println("   Install Docker/Podman for auto-managed Qdrant")
-				}
+				fmt.Println("   Run 'conduit kb sync' to build the knowledge base")
 				warnings++
 			}
 
@@ -4157,27 +4150,24 @@ Example MCP client configuration:
 			// Create FTS5 searcher
 			ftsSearcher := kb.NewSearcher(st.DB())
 
-			// Attempt to create semantic searcher (if Qdrant/Ollama available)
-			var semanticSearcher *kb.SemanticSearcher
+			// Attempt to create the semantic searcher. The vector index shares
+			// this database, so it is always present; only query embedding needs
+			// Ollama, and that degrades per-query rather than at startup.
 			semanticCfg := kb.SemanticSearchConfig{
 				EmbeddingConfig: kb.EmbeddingConfig{
 					OllamaHost: "http://localhost:11434",
-					Model:      "nomic-embed-text",
-					Dimension:  768,
+					Model:      kb.DefaultEmbeddingModel,
+					Dimension:  kb.DefaultEmbeddingDimension,
 					BatchSize:  10,
 				},
-				VectorStoreConfig: kb.VectorStoreConfig{
-					Host:           "localhost",
-					Port:           6334, // gRPC port
-					CollectionName: "conduit_kb",
-					Dimension:      768,
-					BatchSize:      100,
+				VectorIndexConfig: kb.VectorIndexConfig{
+					Dimension: kb.DefaultEmbeddingDimension,
+					BatchSize: 100,
 				},
 			}
 
-			// Try to create semantic searcher - if it fails, we fall back to FTS5 only
-			semanticSearcher, _ = kb.NewSemanticSearcher(st.DB(), semanticCfg)
-			// Error is ignored - hybrid searcher works with nil semantic searcher
+			// Error is ignored - hybrid searcher works with a nil semantic searcher
+			semanticSearcher, _ := kb.NewSemanticSearcher(st.DB(), semanticCfg)
 
 			// Create hybrid searcher (combines FTS5 + semantic when available)
 			hybridSearcher := kb.NewHybridSearcher(ftsSearcher, semanticSearcher)
@@ -4215,7 +4205,7 @@ func mcpStatusCmd() *cobra.Command {
 Shows:
 - MCP configuration status in AI clients (Claude Code, Cursor, VS Code)
 - Search capabilities (FTS5, semantic search availability)
-- Qdrant and Ollama connectivity status
+- Vector index and Ollama connectivity status
 - Knowledge base sources and statistics
 
 Use --json for machine-readable output (used by GUI).`,
@@ -4310,7 +4300,7 @@ Use --json for machine-readable output (used by GUI).`,
 			// Service status
 			fmt.Println("\n🔌 Service Connectivity:")
 			fmt.Println("────────────────────────────────────────────────────────")
-			fmt.Printf("  Qdrant (localhost:6333): %s\n", caps.QdrantStatus)
+			fmt.Printf("  Vector index (in knowledge base): %s\n", caps.VectorStatus)
 			fmt.Printf("  Ollama (localhost:11434): %s\n", caps.OllamaStatus)
 
 			// Knowledge base stats
@@ -5116,7 +5106,7 @@ SAFETY FLAGS:
 
 NOTE: Dependencies (Ollama, container runtimes, containers) are NOT removed.
       These may be shared with other projects. To remove manually:
-      - Stop containers: podman stop qdrant falkordb && podman rm qdrant falkordb
+      - Stop containers: podman stop falkordb && podman rm falkordb
       - Remove Ollama: See https://ollama.com/download for uninstall instructions
       - Remove Podman: brew uninstall podman
 
@@ -5285,7 +5275,7 @@ Examples:
 			if !dryRun && result.Success {
 				fmt.Println()
 				fmt.Println("To remove dependencies manually (if no longer needed):")
-				fmt.Println("  • Containers: podman stop qdrant falkordb && podman rm qdrant falkordb")
+				fmt.Println("  • Containers: podman stop falkordb && podman rm falkordb")
 				fmt.Println("  • Ollama: rm -rf ~/.ollama && brew uninstall ollama")
 				fmt.Println("  • Podman: podman machine stop && podman machine rm && brew uninstall podman")
 			}
@@ -5505,541 +5495,74 @@ func serviceRemoveCmd() *cobra.Command {
 	}
 }
 
-// qdrantCmd is the parent command for Qdrant management
+// TODO(WP-3.2): remove with dead-stack teardown.
+//
+// Vectors moved into the knowledge base SQLite file in WP-2.1, so there is no
+// Qdrant container left to install, start, stop or purge. The command group is
+// kept as a deprecation shim purely so that a user (or a stale script, or the
+// frozen desktop app) running `conduit qdrant ...` gets an explanation instead
+// of "unknown command". WP-3.2 deletes the group outright.
 func qdrantCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "qdrant",
-		Short: "Manage Qdrant vector database",
-		Long: `Manage the Qdrant vector database for semantic search.
+		Use:    "qdrant",
+		Short:  "Deprecated: vectors are stored in the knowledge base file",
+		Hidden: true,
+		Long: `Deprecated. Conduit no longer runs a separate vector database.
 
-Qdrant enables semantic search - finding documents by meaning,
-not just keywords. It runs as a container managed by Conduit.
+Vectors are stored in the same SQLite file as the rest of the knowledge base,
+so there is no container to install, start, stop or purge, and nothing to
+attach to. Semantic search is available whenever the knowledge base is.
 
-Examples:
-  conduit qdrant install     # Install and start Qdrant
-  conduit qdrant status      # Check Qdrant health
-  conduit qdrant attach      # Enable semantic search without restart
-  conduit qdrant purge       # Clear all vectors (fresh start)`,
-	}
-
-	cmd.AddCommand(qdrantInstallCmd())
-	cmd.AddCommand(qdrantStartCmd())
-	cmd.AddCommand(qdrantStopCmd())
-	cmd.AddCommand(qdrantStatusCmd())
-	cmd.AddCommand(qdrantAttachCmd())
-	cmd.AddCommand(qdrantPurgeCmd())
-
-	return cmd
-}
-
-// qdrantInstallCmd installs and starts Qdrant
-func qdrantInstallCmd() *cobra.Command {
-	var preferRuntime string
-
-	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install and start Qdrant container",
-		Long: `Install Qdrant vector database for semantic search.
-
-This command will:
-1. Detect available container runtime (Podman preferred, Docker as fallback)
-2. On macOS: Start Podman machine if needed
-3. Pull the Qdrant image
-4. Create and start the conduit-qdrant container
-5. Verify Qdrant is healthy
-
-After installation, enable semantic search with:
-  conduit qdrant attach`,
+  conduit kb stats     # how many vectors are indexed
+  conduit kb sync      # (re)index documents, embeddings included
+  conduit status       # dependency and capability overview`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
-			dataDir := filepath.Join(homeDir, ".conduit")
-
-			// Create QdrantManager
-			mgr := kb.NewQdrantManager(kb.QdrantConfig{
-				DataDir: dataDir,
-			})
-
-			// Handle runtime preference
-			if preferRuntime != "" {
-				mgr.SetContainerRuntime(preferRuntime)
-				fmt.Printf("Using %s as container runtime\n", preferRuntime)
-			} else {
-				// Try Podman first with cascading fallback
-				runtime, err := detectContainerRuntimeCascading(ctx, mgr)
-				if err != nil {
-					return fmt.Errorf("no container runtime available: %w\n\nInstall Podman or Docker first:\n  brew install podman && podman machine init && podman machine start", err)
-				}
-				fmt.Printf("Using %s as container runtime\n", runtime)
-			}
-
-			// Install Qdrant
-			fmt.Println("Installing Qdrant...")
-			if err := mgr.Install(ctx); err != nil {
-				return fmt.Errorf("failed to install Qdrant: %w", err)
-			}
-
-			fmt.Println()
-			fmt.Println("✓ Qdrant installed and running")
-			fmt.Println()
-			fmt.Println("Next steps:")
-			fmt.Println("  conduit qdrant attach    # Enable semantic search in daemon")
-			fmt.Println("  conduit kb sync          # Index documents into vector store")
-
-			return nil
+			return deprecatedVectorStackCmd(cmd)
 		},
 	}
 
-	cmd.Flags().StringVar(&preferRuntime, "runtime", "", "Preferred container runtime (podman or docker)")
+	for _, sub := range []struct{ use, short string }{
+		{"install", "Deprecated: no vector database container is required"},
+		{"start", "Deprecated: no vector database container is required"},
+		{"stop", "Deprecated: no vector database container is required"},
+		{"status", "Deprecated: use 'conduit kb stats'"},
+		{"attach", "Deprecated: semantic search is always attached"},
+		{"purge", "Deprecated: use 'conduit kb sync --force'"},
+	} {
+		s := sub
+		cmd.AddCommand(&cobra.Command{
+			Use:    s.use,
+			Short:  s.short,
+			Hidden: true,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return deprecatedVectorStackCmd(cmd)
+			},
+		})
+	}
 
 	return cmd
 }
 
-// detectContainerRuntimeCascading tries Podman first (with machine start on macOS), then Docker
-// Uses full binary paths to work correctly when called from Electron (no PATH)
-func detectContainerRuntimeCascading(ctx context.Context, mgr *kb.QdrantManager) (string, error) {
-	// Get full paths for binaries
-	podmanPath := findBinaryPath("podman")
-	dockerPath := findBinaryPath("docker")
+// deprecatedVectorStackCmd explains that the external vector database is gone.
+//
+// TODO(WP-3.2): remove with dead-stack teardown.
+func deprecatedVectorStackCmd(cmd *cobra.Command) error {
+	fmt.Fprintf(cmd.OutOrStdout(),
+		`This command is no longer needed.
 
-	// Try Podman first
-	if podmanPath != "" {
-		if runtime.GOOS == "darwin" {
-			// Check if Podman machine is running
-			out, err := exec.CommandContext(ctx, podmanPath, "machine", "list", "--format", "{{.Running}}").Output()
-			if err == nil && strings.Contains(string(out), "true") {
-				mgr.SetContainerRuntime(podmanPath)
-				return "podman", nil
-			}
+Conduit stores vectors in the knowledge base file itself, so there is no
+separate vector database to manage.
 
-			// Machine exists but not running
-			out, _ = exec.CommandContext(ctx, podmanPath, "machine", "list", "--format", "{{.Name}}").Output()
-			if len(strings.TrimSpace(string(out))) > 0 {
-				fmt.Println("Podman machine exists but is not running.")
-				fmt.Print("Start Podman machine now? [Y/n]: ")
-				reader := bufio.NewReader(os.Stdin)
-				input, _ := reader.ReadString('\n')
-				input = strings.TrimSpace(strings.ToLower(input))
-
-				if input == "" || input == "y" || input == "yes" {
-					fmt.Println("Starting Podman machine...")
-					startCmd := exec.CommandContext(ctx, podmanPath, "machine", "start")
-					startCmd.Stdout = os.Stdout
-					startCmd.Stderr = os.Stderr
-					if err := startCmd.Run(); err != nil {
-						fmt.Printf("⚠ Failed to start Podman machine: %v\n", err)
-						fmt.Println("Trying Docker as fallback...")
-					} else {
-						mgr.SetContainerRuntime(podmanPath)
-						return "podman", nil
-					}
-				}
-			} else {
-				// No machine exists
-				fmt.Println("Podman is installed but no machine exists.")
-				fmt.Print("Initialize and start Podman machine? [Y/n]: ")
-				reader := bufio.NewReader(os.Stdin)
-				input, _ := reader.ReadString('\n')
-				input = strings.TrimSpace(strings.ToLower(input))
-
-				if input == "" || input == "y" || input == "yes" {
-					fmt.Println("Initializing Podman machine...")
-					initCmd := exec.CommandContext(ctx, podmanPath, "machine", "init")
-					initCmd.Stdout = os.Stdout
-					initCmd.Stderr = os.Stderr
-					if err := initCmd.Run(); err != nil {
-						fmt.Printf("⚠ Failed to initialize Podman machine: %v\n", err)
-					} else {
-						fmt.Println("Starting Podman machine...")
-						startCmd := exec.CommandContext(ctx, podmanPath, "machine", "start")
-						startCmd.Stdout = os.Stdout
-						startCmd.Stderr = os.Stderr
-						if err := startCmd.Run(); err != nil {
-							fmt.Printf("⚠ Failed to start Podman machine: %v\n", err)
-						} else {
-							mgr.SetContainerRuntime(podmanPath)
-							return "podman", nil
-						}
-					}
-					fmt.Println("Trying Docker as fallback...")
-				}
-			}
-		} else {
-			// Linux: Podman works natively
-			testCmd := exec.CommandContext(ctx, podmanPath, "ps")
-			if testCmd.Run() == nil {
-				mgr.SetContainerRuntime(podmanPath)
-				return "podman", nil
-			}
-		}
-	}
-
-	// Fallback to Docker
-	if dockerPath != "" {
-		testCmd := exec.CommandContext(ctx, dockerPath, "ps")
-		if testCmd.Run() == nil {
-			mgr.SetContainerRuntime(dockerPath)
-			return "docker", nil
-		}
-		fmt.Println("Docker is installed but not running.")
-	}
-
-	return "", fmt.Errorf("neither Podman nor Docker is available and working")
+  conduit kb stats     # how many vectors are indexed
+  conduit kb sync      # (re)index documents, embeddings included
+  conduit status       # dependency and capability overview
+`)
+	return nil
 }
 
 // commandExists checks if a command is available in PATH or known locations
 func commandExists(cmd string) bool {
 	return findBinaryPath(cmd) != ""
-}
-
-// qdrantStartCmd starts an existing Qdrant container
-func qdrantStartCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "start",
-		Short: "Start existing Qdrant container",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
-			dataDir := filepath.Join(homeDir, ".conduit")
-
-			mgr := kb.NewQdrantManager(kb.QdrantConfig{
-				DataDir: dataDir,
-			})
-
-			// Detect runtime
-			if _, err := mgr.DetectContainerRuntime(); err != nil {
-				return fmt.Errorf("no container runtime available: %w", err)
-			}
-
-			// Check if already running
-			health := mgr.CheckHealth(ctx)
-			if health.APIReachable {
-				fmt.Println("✓ Qdrant is already running")
-				return nil
-			}
-
-			// Start via EnsureReady which handles starting stopped containers
-			fmt.Println("Starting Qdrant...")
-			if err := mgr.EnsureReady(ctx); err != nil {
-				return fmt.Errorf("failed to start Qdrant: %w", err)
-			}
-
-			fmt.Println("✓ Qdrant started")
-			return nil
-		},
-	}
-}
-
-// qdrantStopCmd stops the Qdrant container
-func qdrantStopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop",
-		Short: "Stop Qdrant container",
-		Long: `Stop the Qdrant container (preserves data).
-
-The container can be started again with 'conduit qdrant start'.
-All indexed vectors are preserved in ~/.conduit/qdrant.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
-			dataDir := filepath.Join(homeDir, ".conduit")
-
-			mgr := kb.NewQdrantManager(kb.QdrantConfig{
-				DataDir: dataDir,
-			})
-
-			// Detect runtime
-			if _, err := mgr.DetectContainerRuntime(); err != nil {
-				return fmt.Errorf("no container runtime available: %w", err)
-			}
-
-			if err := mgr.Stop(ctx); err != nil {
-				return fmt.Errorf("failed to stop Qdrant: %w", err)
-			}
-
-			fmt.Println("✓ Qdrant stopped")
-			fmt.Println("  Data preserved in ~/.conduit/qdrant")
-			fmt.Println("  Restart with: conduit qdrant start")
-			return nil
-		},
-	}
-}
-
-// qdrantStatusCmd shows Qdrant status and health
-func qdrantStatusCmd() *cobra.Command {
-	var verbose bool
-
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Check Qdrant status and health",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
-			dataDir := filepath.Join(homeDir, ".conduit")
-
-			mgr := kb.NewQdrantManager(kb.QdrantConfig{
-				DataDir: dataDir,
-			})
-
-			// Detect runtime (don't fail if not found)
-			runtime, _ := mgr.DetectContainerRuntime()
-
-			fmt.Println("Qdrant Vector Database Status")
-			fmt.Println("────────────────────────────────────────────────────────")
-
-			// Container runtime
-			if runtime != "" {
-				fmt.Printf("Container Runtime: %s\n", runtime)
-			} else {
-				fmt.Println("Container Runtime: not available")
-				fmt.Println("  Install with: brew install podman && podman machine init && podman machine start")
-				return nil
-			}
-
-			// Health check
-			health := mgr.CheckHealth(ctx)
-
-			// API status
-			if health.APIReachable {
-				fmt.Println("API Status:        ✓ reachable")
-			} else {
-				fmt.Println("API Status:        ○ not reachable")
-				if health.ContainerRunning {
-					fmt.Println("  Container is running but API is not responding")
-					fmt.Println("  Try: conduit qdrant stop && conduit qdrant start")
-				} else {
-					fmt.Println("  Start with: conduit qdrant start")
-				}
-				return nil
-			}
-
-			// Collection status
-			fmt.Printf("Collection:        %s\n", health.CollectionStatus)
-			if health.CollectionStatus == "missing" {
-				fmt.Println("  Run 'conduit kb sync' to create collection and index documents")
-			}
-
-			// Vector count
-			fmt.Printf("Indexed Vectors:   %d\n", health.IndexedVectors)
-			fmt.Printf("Total Points:      %d\n", health.TotalPoints)
-
-			// Recovery status
-			if health.NeedsRecovery {
-				fmt.Println()
-				fmt.Println("⚠ Collection needs recovery")
-				if health.Error != "" {
-					fmt.Printf("  Error: %s\n", health.Error)
-				}
-				fmt.Println("  Run 'conduit kb sync --force' to rebuild index")
-			}
-
-			// Storage path (verbose)
-			if verbose {
-				fmt.Println()
-				fmt.Printf("Storage Path:      %s\n", mgr.GetStorageDir())
-				httpPort, grpcPort := mgr.GetPorts()
-				fmt.Printf("HTTP Port:         %d\n", httpPort)
-				fmt.Printf("gRPC Port:         %d\n", grpcPort)
-			}
-
-			// Check daemon semantic search status
-			fmt.Println()
-			c := newClient(socketPath)
-			data, err := c.get("/api/v1/status")
-			if err == nil {
-				var status map[string]interface{}
-				if json.Unmarshal(data, &status) == nil {
-					if deps, ok := status["dependencies"].(map[string]interface{}); ok {
-						if ollama, ok := deps["ollama"].(map[string]interface{}); ok {
-							if available, ok := ollama["available"].(bool); ok {
-								if available {
-									fmt.Println("Daemon Status:     ✓ Ollama available")
-								} else {
-									fmt.Println("Daemon Status:     ○ Ollama not available")
-									fmt.Println("  Start with: ollama serve")
-								}
-							}
-						}
-					}
-				}
-			} else {
-				fmt.Println("Daemon Status:     ○ daemon not running")
-			}
-
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed information")
-
-	return cmd
-}
-
-// qdrantAttachCmd enables semantic search in the daemon
-func qdrantAttachCmd() *cobra.Command {
-	var reindex bool
-
-	cmd := &cobra.Command{
-		Use:   "attach",
-		Short: "Enable semantic search in daemon",
-		Long: `Attach the running daemon to Qdrant and enable semantic search.
-
-This command:
-1. Verifies Qdrant is running and healthy
-2. Notifies the daemon to initialize semantic search
-3. Optionally triggers re-indexing of existing documents
-
-Use this after installing Qdrant to enable semantic search without
-restarting the daemon.`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
-			dataDir := filepath.Join(homeDir, ".conduit")
-
-			// First verify Qdrant is running
-			mgr := kb.NewQdrantManager(kb.QdrantConfig{
-				DataDir: dataDir,
-			})
-
-			health := mgr.CheckHealth(ctx)
-			if !health.APIReachable {
-				return fmt.Errorf("Qdrant is not running. Start it first with: conduit qdrant start")
-			}
-
-			fmt.Println("✓ Qdrant is running")
-
-			// Call daemon API to attach
-			c := newClient(socketPath)
-			data, err := c.post("/api/v1/qdrant/attach", nil)
-			if err != nil {
-				return fmt.Errorf("failed to connect to daemon: %w\n  Is the daemon running? Start with: conduit service start", err)
-			}
-
-			var result map[string]interface{}
-			if err := json.Unmarshal(data, &result); err != nil {
-				return fmt.Errorf("invalid response from daemon: %w", err)
-			}
-
-			if errMsg, ok := result["error"].(string); ok && errMsg != "" {
-				return fmt.Errorf("daemon error: %s", errMsg)
-			}
-
-			status := result["status"].(string)
-			message := result["message"].(string)
-
-			if status == "already_attached" {
-				fmt.Println("✓ Semantic search is already enabled")
-			} else {
-				fmt.Println("✓", message)
-			}
-
-			// Trigger reindex if requested
-			if reindex && status == "attached" {
-				fmt.Println()
-				fmt.Println("Re-indexing documents into vector store...")
-				data, err = c.post("/api/v1/qdrant/reindex", nil)
-				if err != nil {
-					fmt.Printf("⚠ Failed to trigger reindex: %v\n", err)
-					fmt.Println("  You can manually reindex with: conduit kb sync")
-				} else {
-					fmt.Println("✓ Re-indexing started in background")
-					fmt.Println("  Check progress with: conduit kb stats")
-				}
-			} else if status == "attached" {
-				fmt.Println()
-				fmt.Println("Index existing documents with: conduit kb sync")
-			}
-
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVar(&reindex, "reindex", false, "Re-index existing documents after attach")
-
-	return cmd
-}
-
-// qdrantPurgeCmd clears all vectors from the Qdrant collection
-func qdrantPurgeCmd() *cobra.Command {
-	var force bool
-
-	cmd := &cobra.Command{
-		Use:   "purge",
-		Short: "Clear all vectors from Qdrant",
-		Long: `Remove all vectors from the Qdrant collection.
-
-This is useful when:
-- You reinstalled Conduit and have orphaned vectors
-- You want to start fresh with semantic search
-- There's a mismatch between SQLite documents and Qdrant vectors
-
-After purging, run 'conduit kb sync' to re-index all documents.
-
-WARNING: This operation cannot be undone!`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
-			dataDir := filepath.Join(homeDir, ".conduit")
-
-			// Create QdrantManager to check status
-			mgr := kb.NewQdrantManager(kb.QdrantConfig{
-				DataDir: dataDir,
-			})
-
-			// Check if Qdrant is running
-			health := mgr.CheckHealth(ctx)
-			if !health.APIReachable {
-				return fmt.Errorf("Qdrant is not running. Start it first with: conduit qdrant start")
-			}
-
-			// Get current vector count
-			vectorCount := health.TotalPoints
-			if vectorCount == 0 {
-				fmt.Println("✓ Qdrant collection is already empty")
-				return nil
-			}
-
-			// Confirm with user unless force flag is set
-			if !force {
-				fmt.Printf("This will delete %d vectors from Qdrant.\n", vectorCount)
-				fmt.Print("Are you sure you want to continue? [y/N]: ")
-				var response string
-				fmt.Scanln(&response)
-				if response != "y" && response != "Y" {
-					fmt.Println("Aborted.")
-					return nil
-				}
-			}
-
-			// Delete all vectors by deleting and recreating the collection
-			fmt.Println("Purging Qdrant collection...")
-
-			// Use curl to delete the collection (simpler than importing Qdrant client)
-			deleteURL := fmt.Sprintf("http://localhost:%d/collections/conduit_kb", 6333)
-			req, _ := http.NewRequestWithContext(ctx, http.MethodDelete, deleteURL, nil)
-			client := &http.Client{Timeout: 30 * time.Second}
-			resp, err := client.Do(req)
-			if err != nil {
-				return fmt.Errorf("failed to delete collection: %w", err)
-			}
-			resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-				return fmt.Errorf("failed to delete collection: HTTP %d", resp.StatusCode)
-			}
-
-			fmt.Printf("✓ Purged %d vectors from Qdrant\n", vectorCount)
-			fmt.Println()
-			fmt.Println("The collection will be recreated automatically on next sync.")
-			fmt.Println("Re-index documents with: conduit kb sync")
-
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVarP(&force, "force", "f", false, "Skip confirmation prompt")
-
-	return cmd
 }
 
 // ============================================================================
@@ -7273,8 +6796,6 @@ Examples:
 func kbKagVectorizeCmd() *cobra.Command {
 	var batchSize int
 	var ollamaHost string
-	var qdrantHost string
-	var qdrantPort int
 
 	cmd := &cobra.Command{
 		Use:   "kag-vectorize",
@@ -7282,11 +6803,11 @@ func kbKagVectorizeCmd() *cobra.Command {
 		Long: `Generate and store vector embeddings for all entities in the knowledge graph.
 
 This enables semantic search over entities using vector similarity.
-Embeddings are stored in a Qdrant collection (conduit_entities) separate from chunk vectors.
+Entity embeddings are stored in the knowledge base file, in a table separate
+from the chunk vectors.
 
 Requirements:
   - Ollama running with nomic-embed-text model
-  - Qdrant running on the specified host/port
 
 Examples:
   conduit kb kag-vectorize
@@ -7319,21 +6840,14 @@ Examples:
 				return fmt.Errorf("ensure embedding model: %w", err)
 			}
 
-			// Create vector store
-			fmt.Println("Connecting to Qdrant...")
-			vectorStore, err := kb.NewVectorStore(kb.VectorStoreConfig{
-				Host: qdrantHost,
-				Port: qdrantPort,
+			// Open the entity vector index in the knowledge base file
+			vectorIndex, err := kb.NewSQLiteVectorIndex(db.DB(), kb.VectorIndexConfig{
+				Dimension: embeddingSvc.Dimension(),
 			})
 			if err != nil {
-				return fmt.Errorf("create vector store: %w", err)
+				return fmt.Errorf("open vector index: %w", err)
 			}
-			defer vectorStore.Close()
-
-			// Ensure entity collection exists
-			if err := vectorStore.EnsureEntityCollection(ctx); err != nil {
-				return fmt.Errorf("ensure entity collection: %w", err)
-			}
+			defer vectorIndex.Close()
 
 			// Query all entities from database
 			fmt.Println("Loading entities from database...")
@@ -7412,8 +6926,8 @@ Examples:
 					}
 				}
 
-				// Upsert to Qdrant
-				if err := vectorStore.UpsertEntityBatch(ctx, points); err != nil {
+				// Write to the entity vector index
+				if err := vectorIndex.UpsertEntityBatch(ctx, points); err != nil {
 					fmt.Printf("  Batch %d-%d: upsert failed: %v\n", i+1, end, err)
 					failed += len(batch)
 					continue
@@ -7433,7 +6947,7 @@ Examples:
 			}
 
 			// Show collection stats
-			stats, err := vectorStore.GetEntityStats(ctx)
+			stats, err := vectorIndex.GetEntityStats(ctx)
 			if err == nil {
 				fmt.Printf("\nEntity Collection: %s\n", stats.CollectionName)
 				fmt.Printf("  Vectors: %d\n", stats.VectorCount)
@@ -7446,8 +6960,6 @@ Examples:
 
 	cmd.Flags().IntVar(&batchSize, "batch-size", 20, "Number of entities to process at a time")
 	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "http://localhost:11434", "Ollama API endpoint")
-	cmd.Flags().StringVar(&qdrantHost, "qdrant-host", "localhost", "Qdrant gRPC host")
-	cmd.Flags().IntVar(&qdrantPort, "qdrant-port", 6334, "Qdrant gRPC port")
 
 	return cmd
 }
@@ -7457,8 +6969,6 @@ func kbKagQueryCmd() *cobra.Command {
 	var format string
 	var hybrid bool
 	var ollamaHost string
-	var qdrantHost string
-	var qdrantPort int
 
 	cmd := &cobra.Command{
 		Use:   "kag-query <query>",
@@ -7466,7 +6976,7 @@ func kbKagQueryCmd() *cobra.Command {
 		Long: `Query the knowledge graph for entities and relationships.
 
 The --hybrid flag enables hybrid search (lexical + semantic) for improved recall.
-Requires Ollama (nomic-embed-text) and Qdrant running, with entities vectorized via kag-vectorize.
+Requires Ollama (nomic-embed-text) and entities vectorized via kag-vectorize.
 
 Examples:
   conduit kb kag-query "threat models"
@@ -7503,17 +7013,16 @@ Examples:
 				if err != nil {
 					fmt.Printf("Warning: Could not connect to Ollama, falling back to lexical search: %v\n", err)
 				} else {
-					// Create vector store
-					vectorStore, err := kb.NewVectorStore(kb.VectorStoreConfig{
-						Host: qdrantHost,
-						Port: qdrantPort,
+					// Open the entity vector index in the knowledge base file
+					vectorIndex, err := kb.NewSQLiteVectorIndex(db.DB(), kb.VectorIndexConfig{
+						Dimension: embeddingSvc.Dimension(),
 					})
 					if err != nil {
-						fmt.Printf("Warning: Could not connect to Qdrant, falling back to lexical search: %v\n", err)
+						fmt.Printf("Warning: Could not open the vector index, falling back to lexical search: %v\n", err)
 					} else {
-						kagCfg.VectorStore = vectorStore
+						kagCfg.EntityVectors = vectorIndex
 						kagCfg.EmbeddingService = embeddingSvc
-						defer vectorStore.Close()
+						defer vectorIndex.Close()
 					}
 				}
 			}
@@ -7576,8 +7085,6 @@ Examples:
 	cmd.Flags().StringVar(&format, "format", "text", "Output format: text or json")
 	cmd.Flags().BoolVar(&hybrid, "hybrid", false, "Enable hybrid search (lexical + semantic)")
 	cmd.Flags().StringVar(&ollamaHost, "ollama-host", "http://localhost:11434", "Ollama API endpoint")
-	cmd.Flags().StringVar(&qdrantHost, "qdrant-host", "localhost", "Qdrant gRPC host")
-	cmd.Flags().IntVar(&qdrantPort, "qdrant-port", 6334, "Qdrant gRPC port")
 
 	return cmd
 }

@@ -42,6 +42,8 @@ const (
 	// System events
 	EventDaemonStatus       EventType = "daemon_status"
 	EventDependencyStatus   EventType = "dependency_status"
+	// TODO(WP-3.2): remove with dead-stack teardown -- the desktop GUI still
+	// subscribes to this event name.
 	EventQdrantStatusChange EventType = "qdrant_status_changed"
 )
 
@@ -259,7 +261,8 @@ type DaemonStatusData struct {
 
 // DependencyStatusData contains data for dependency status events.
 type DependencyStatusData struct {
-	Name      string `json:"name"` // "qdrant", "ollama", "falkordb", "container_runtime"
+	// TODO(WP-3.2): remove "qdrant" from this list with dead-stack teardown.
+	Name      string `json:"name"` // "vectors", "qdrant", "ollama", "falkordb", "container_runtime"
 	Available bool   `json:"available"`
 	Status    string `json:"status"` // "running", "stopped", "error", "not_installed"
 	Details   string `json:"details,omitempty"`

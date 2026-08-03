@@ -1441,6 +1441,10 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 	fmt.Println("──────────────────────────────────────────────────────────────")
 
 	// Check what exists
+	//
+	// TODO(WP-3.2): remove with dead-stack teardown. Conduit no longer creates a
+	// Qdrant container; this detection exists only to clean up one left behind by
+	// a pre-WP-2.1 install.
 	hasDataDir := false
 	hasQdrantContainer := false
 	var containerCmd string
@@ -1574,7 +1578,10 @@ func (i *Installer) Uninstall(ctx context.Context) error {
 	return nil
 }
 
-// getQdrantVectorCount returns the number of vectors in Qdrant.
+// getQdrantVectorCount returns the number of vectors in a leftover Qdrant.
+//
+// TODO(WP-3.2): remove with dead-stack teardown. Only reachable when a
+// pre-WP-2.1 container is still running on this machine.
 func (i *Installer) getQdrantVectorCount() int64 {
 	cmd := exec.Command("curl", "-s", "http://localhost:6333/collections/conduit_kb")
 	out, err := cmd.Output()
