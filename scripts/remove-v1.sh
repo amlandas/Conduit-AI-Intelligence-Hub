@@ -35,11 +35,21 @@ set -euo pipefail
 DRY_RUN=true
 PURGE_DATA=false
 
-DATA_DIR="${CONDUIT_DATA_DIR:-${HOME}/.conduit}"
 # Tracks whether the user named a data directory or we defaulted to one. Only a
 # user-supplied path is held to the absolute-path rule; the default is already
 # absolute, and rejecting it would break the ordinary invocation.
+#
+# CONDUIT_DATA_DIR counts as the user naming one. It used to leave this false,
+# so `CONDUIT_DATA_DIR=data ./remove-v1.sh --purge-data` skipped the refusal and
+# was silently resolved against the working directory -- precisely the outcome
+# the refusal exists to prevent, reached through the other door.
 DATA_DIR_EXPLICIT=false
+if [[ -n "${CONDUIT_DATA_DIR:-}" ]]; then
+    DATA_DIR="$CONDUIT_DATA_DIR"
+    DATA_DIR_EXPLICIT=true
+else
+    DATA_DIR="${HOME}/.conduit"
+fi
 
 # Containers the v1 installer created.
 readonly V1_CONTAINERS=(conduit-qdrant conduit-falkordb)
@@ -92,7 +102,8 @@ OPTIONS
                     (<data-dir>/qdrant and <data-dir>/falkordb). Without this
                     flag no file under the data directory is touched.
     --data-dir DIR  Conduit data directory (default: ~/.conduit,
-                    or $CONDUIT_DATA_DIR).
+                    or $CONDUIT_DATA_DIR). Must be an absolute path, whether
+                    it comes from the flag or the environment variable.
     -h, --help      Show this help.
 
 WHAT IS REMOVED
@@ -241,9 +252,17 @@ path_identity() {
 # The mount points are here because an external disk, a network share or a
 # container bind mount is somebody's entire filesystem, and "--data-dir
 # /Volumes" differs from a real one by a single missing component.
+#
+# /System/Volumes/Data is listed separately from /System because the list is
+# matched by exact path and by device:inode, and neither of those catches a
+# CHILD of a protected directory. On macOS Catalina and later the system volume
+# is read-only and everything writable -- every user's home included -- lives on
+# a second volume mounted there. It is its own mount with its own inode,
+# distinct from both / and /Users, so nothing already in this list resembled it.
 protected_dirs() {
     printf '%s\n' / /usr /etc /var /opt /tmp /bin /sbin /home /Users /root \
-                  /System /Library /Applications /private /dev /proc /boot \
+                  /System /System/Volumes/Data \
+                  /Library /Applications /private /dev /proc /boot \
                   /Volumes /mnt /media /net /srv
 
     local home_canonical

@@ -167,6 +167,96 @@ func TestStripShellConfig_DryRunWritesNothing(t *testing.T) {
 	}
 }
 
+// #86: a symlinked profile must be edited through the link, not replaced.
+//
+// Managing dotfiles in a git repository and symlinking them into $HOME is one
+// of the standard setups. writeFileAtomic ends in os.Rename, which replaces a
+// symlink with a regular file, so the rewrite severed the link: the block
+// survived in the repository, where nothing would ever remove it, and the
+// user's ~/.zshrc silently stopped tracking the repository they manage it from.
+func TestStripShellConfig_KeepsASymlinkedProfileASymlink(t *testing.T) {
+	home := isolate(t)
+
+	repo := filepath.Join(home, "dotfiles")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	real := filepath.Join(repo, "zshrc")
+	original := "# from my dotfiles repo\n\n# Conduit\nexport PATH=\"$HOME/.local/bin:$PATH\"\nexport EDITOR=vim\n"
+	if err := os.WriteFile(real, []byte(original), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	link := filepath.Join(home, ".zshrc")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	result := &UninstallResult{}
+	if err := stripShellConfig(link, false, result); err != nil {
+		t.Fatalf("stripShellConfig: %v", err)
+	}
+
+	info, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat: %v", err)
+	}
+	if info.Mode()&os.ModeSymlink == 0 {
+		t.Fatal(".zshrc is no longer a symlink; the rewrite replaced it with a regular file")
+	}
+	if got, _ := os.Readlink(link); got != real {
+		t.Errorf("symlink target = %q, want %q", got, real)
+	}
+
+	after, err := os.ReadFile(real)
+	if err != nil {
+		t.Fatalf("read %s: %v", real, err)
+	}
+	if strings.Contains(string(after), "# Conduit") {
+		t.Errorf("the block survived in the repository file:\n%s", after)
+	}
+	if !strings.Contains(string(after), "# from my dotfiles repo") {
+		t.Errorf("the user's own content was lost:\n%s", after)
+	}
+
+	// The backup belongs beside the file that was actually rewritten.
+	if _, err := os.Stat(real + backupSuffix); err != nil {
+		t.Errorf("no backup beside the resolved file: %v", err)
+	}
+	if _, err := os.Lstat(link + backupSuffix); err == nil {
+		t.Error("a backup was written beside the symlink, where nobody would look for it")
+	}
+}
+
+// The report has to name both paths, or a user reading it cannot tell that the
+// edit landed in their dotfiles repository rather than in $HOME.
+func TestStripShellConfig_ReportsBothPathsForASymlink(t *testing.T) {
+	home := isolate(t)
+
+	repo := filepath.Join(home, "dotfiles")
+	if err := os.MkdirAll(repo, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	real := filepath.Join(repo, "zshrc")
+	if err := os.WriteFile(real, []byte("# Conduit\nexport PATH=\"x\"\n"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	link := filepath.Join(home, ".zshrc")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+
+	result := &UninstallResult{}
+	if err := stripShellConfig(link, false, result); err != nil {
+		t.Fatalf("stripShellConfig: %v", err)
+	}
+
+	joined := strings.Join(result.ItemsRemoved, "\n")
+	if !strings.Contains(joined, link) || !strings.Contains(joined, real) {
+		t.Errorf("the report names only one of the two paths:\n%s", joined)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // A7 -- atomic replacement
 // ---------------------------------------------------------------------------

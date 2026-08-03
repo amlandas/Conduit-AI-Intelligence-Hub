@@ -75,10 +75,18 @@ func expandHome(path string) string {
 // The mount points are here because an external disk, a network share or a
 // container bind mount is somebody's whole filesystem, and `--data-dir
 // /Volumes` differs from a real one by a single missing path component.
+//
+// "/System/Volumes/Data" is listed separately from "/System" because this list
+// is matched by exact path and by device:inode, and neither of those catches a
+// CHILD of a protected directory. On macOS Catalina and later the system volume
+// is read-only and everything writable -- every user's home included -- lives
+// on a second volume mounted there. It is its own mount with its own inode,
+// distinct from both "/" and "/Users", so nothing already here resembled it.
 func protectedDirs() []string {
 	dirs := []string{
 		"/", "/usr", "/etc", "/var", "/opt", "/tmp", "/bin", "/sbin",
-		"/home", "/Users", "/root", "/System", "/Library", "/Applications",
+		"/home", "/Users", "/root", "/System", "/System/Volumes/Data",
+		"/Library", "/Applications",
 		"/private", "/dev", "/proc", "/boot",
 		"/Volumes", "/mnt", "/media", "/net", "/srv",
 	}

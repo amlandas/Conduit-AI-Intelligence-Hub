@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -67,13 +68,86 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-// profile returns the shell rc file the scripts will act on.
+// profile returns the shell rc file install.sh will write its PATH block to.
 //
-// The harness pins SHELL=/bin/bash, so both install.sh and uninstall.sh resolve
-// to .bashrc. Deriving it here rather than hardcoding it in each test keeps the
-// two in step if the harness's shell ever changes.
+// The harness pins SHELL=/bin/bash, so the answer is bash's -- but which bash
+// file depends on the platform, because the two operating systems start a
+// terminal's bash differently:
+//
+//   - macOS terminals start a LOGIN shell, which reads ~/.bash_profile and
+//     never ~/.bashrc.
+//   - Linux terminals start an interactive non-login shell, which reads
+//     ~/.bashrc and not ~/.bash_profile.
+//
+// Writing to the wrong one of those is issue #85: the installer reported
+// success and the PATH entry was never read by any shell the user opened.
+//
+// uninstall.sh scans all four candidate profiles, so it finds whichever this
+// returns; only the install side is platform-dependent.
 func (e *env) profile() string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(e.home, ".bash_profile")
+	}
 	return filepath.Join(e.home, ".bashrc")
+}
+
+// startupPATH returns the PATH a freshly opened terminal would have on this
+// machine, given the fake home's profiles.
+//
+// This asks the real bash rather than restating the rule the installer is
+// supposed to follow, which is the only way for the test to be evidence about
+// behaviour instead of a copy of the implementation. -l on macOS and -i on
+// Linux is exactly how each platform's terminal starts bash.
+func (e *env) startupPATH(t *testing.T) string {
+	t.Helper()
+
+	mode := "-i"
+	if runtime.GOOS == "darwin" {
+		mode = "-l"
+	}
+
+	// The value is fenced. A startup file is allowed to print things -- and one
+	// of the fixtures below deliberately does -- so the shell's whole stdout is
+	// not the answer, only the part between the sentinels is.
+	const openTag, closeTag = "<<<CONDUIT_PATH[", "]CONDUIT_PATH>>>"
+	cmd := exec.Command("bash", mode, "-c", `printf '%s' "`+openTag+`$PATH`+closeTag+`"`)
+	cmd.Env = []string{
+		"HOME=" + e.home,
+		"PATH=/usr/bin:/bin",
+		"SHELL=/bin/bash",
+		"TERM=dumb",
+	}
+	cmd.Dir = e.home
+
+	var out strings.Builder
+	cmd.Stdout = &out
+	// An interactive bash with no controlling terminal warns about job control
+	// on stderr. That is noise, not failure, so stderr is discarded and only
+	// the exit status is consulted.
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("could not read the startup PATH from bash %s: %v", mode, err)
+	}
+
+	text := out.String()
+	start := strings.Index(text, openTag)
+	end := strings.Index(text, closeTag)
+	if start < 0 || end < start {
+		t.Fatalf("bash %s produced no PATH marker; output was:\n%s", mode, text)
+	}
+	return text[start+len(openTag) : end]
+}
+
+// pathContains reports whether a PATH string has dir as one of its entries.
+//
+// Substring matching would pass on a prefix of a longer directory name, which
+// is the one way this assertion could be wrong in the installer's favour.
+func pathContains(pathVar, dir string) bool {
+	for _, entry := range strings.Split(pathVar, ":") {
+		if entry == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // writeFile creates a file under the fake machine.
@@ -229,14 +303,23 @@ func (e *env) run(t *testing.T, script string, args ...string) result {
 // runWithStdin is run with something on standard input.
 func (e *env) runWithStdin(t *testing.T, stdin, script string, args ...string) result {
 	t.Helper()
+	return e.runWithEnv(t, nil, stdin, script, args...)
+}
+
+// runWithEnv is run with extra environment variables set.
+//
+// The base environment is still replaced rather than extended, so a variable
+// the caller does not name cannot leak in from the developer's shell.
+func (e *env) runWithEnv(t *testing.T, extra []string, stdin, script string, args ...string) result {
+	t.Helper()
 
 	cmd := exec.Command("bash", append([]string{scriptPath(t, script)}, args...)...)
-	cmd.Env = []string{
+	cmd.Env = append([]string{
 		"HOME=" + e.home,
 		"PATH=" + e.binDir + ":/usr/bin:/bin",
 		"SHELL=/bin/bash",
 		"TERM=dumb",
-	}
+	}, extra...)
 	cmd.Dir = e.home
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
@@ -314,23 +397,59 @@ func (e *env) withGNUStat(t *testing.T) bool {
 	return true
 }
 
-// runWithRealHome runs a script with the developer's actual HOME.
+// realHomeForbiddenFlags are the flags that must never appear in an invocation
+// pointed at the developer's actual home directory.
 //
-// Used only by the case-folding guard test, where the property under test is
-// how the real filesystem treats the real home directory's name. It is
-// restricted to --dry-run invocations for that reason: the whole point is that
-// the script must refuse before doing anything.
-func (e *env) runWithRealHome(t *testing.T, script string, args ...string) result {
-	t.Helper()
+// --dry-run is the property being relied on, but it is not the only thing that
+// decides whether a run is inert:
+//
+//   - --remove-data is the flag that selects the recursive delete. If a future
+//     edit ever let it past the guard, --dry-run would be the only thing
+//     between this suite and somebody's real knowledge base.
+//   - --force removes the confirmation prompt, which is the last human check.
+//   - --manual skips delegation and deletes files from the shell directly,
+//     which is a different and less careful code path from the one --dry-run
+//     was reasoned about on.
+//
+// Listing them is defence in depth: the intent is "this invocation cannot
+// touch anything", and --dry-run alone states that too narrowly.
+var realHomeForbiddenFlags = []string{"--remove-data", "--force", "-f", "--manual"}
 
+// assertRealHomeArgsSafe reports why an argument list is not safe to run
+// against the real home directory, or nil if it is.
+//
+// Split out as a pure function so the rule itself can be tested. A guard that
+// only ever runs inside a helper is a guard nothing verifies.
+func assertRealHomeArgsSafe(args []string) error {
 	dryRun := false
 	for _, a := range args {
 		if a == "--dry-run" {
 			dryRun = true
 		}
+		for _, bad := range realHomeForbiddenFlags {
+			if a == bad {
+				return fmt.Errorf("%s must never be run against the real home directory", bad)
+			}
+		}
 	}
 	if !dryRun {
-		t.Fatalf("runWithRealHome is only safe for --dry-run invocations; got %v", args)
+		return fmt.Errorf("only --dry-run invocations may be run against the real home directory")
+	}
+	return nil
+}
+
+// runWithRealHome runs a script with the developer's actual HOME.
+//
+// Used only by the case-folding guard test, where the property under test is
+// how the real filesystem treats the real home directory's name. Everything
+// about it is arranged so that the run cannot change anything: the arguments
+// are vetted before the script starts, and afterwards the stub records are
+// checked to prove no real work was attempted.
+func (e *env) runWithRealHome(t *testing.T, script string, args ...string) result {
+	t.Helper()
+
+	if err := assertRealHomeArgsSafe(args); err != nil {
+		t.Fatalf("runWithRealHome refused %v: %v", args, err)
 	}
 
 	realHome, err := os.UserHomeDir()
@@ -361,6 +480,19 @@ func (e *env) runWithRealHome(t *testing.T, script string, args ...string) resul
 		} else {
 			t.Fatalf("run %s: %v", script, runErr)
 		}
+	}
+
+	// The guard tests exist to prove the script refuses BEFORE it does
+	// anything. A run that reached the binary got past the refusal, and the
+	// only reason it changed nothing is that --dry-run happened to be set --
+	// which is exactly the thing that must not be the last line of defence.
+	//
+	// Checked after the fact rather than trusted, because it is the one
+	// assertion that can catch a guard regression while the test it belongs to
+	// still passes.
+	if invocations := e.realInvocations(t); len(invocations) != 0 {
+		t.Fatalf("a run against the REAL home directory invoked the binary %d time(s): %v\n%s",
+			len(invocations), invocations, out.String()+errOut.String())
 	}
 
 	return result{

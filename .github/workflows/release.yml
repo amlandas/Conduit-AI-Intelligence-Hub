@@ -1,106 +1,243 @@
 name: Release
 
+# Tagging is the whole release process. Push a v2 tag and this builds the
+# binaries, checksums them, and publishes a pre-release with both attached.
+# Nothing is uploaded by hand -- see .eng-lead-kb/RELEASE-PROCESS.md.
+#
+# This replaces the daemon-era workflow, which built a conduit-daemon binary and
+# two DMGs that no longer exist and used softprops/action-gh-release@v1, pinned
+# to a node16 runner GitHub has withdrawn. Every run of it since v0.1.10 was
+# cancelled, and the releases of that period were uploaded by hand.
+
 on:
   push:
     tags:
-      - 'v*'
+      # v2 only. The v0.1.x tags belong to the daemon era, whose artifacts were
+      # a different product entirely; pushing one of those must not start this.
+      - 'v2.*'
 
+# Read-only by default. The single job that has to write to the repository asks
+# for the permission itself, so nothing in the build half can publish anything.
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  # Keyed on the tag, so two different tags can build at once but one tag cannot
+  # build twice. cancel-in-progress is off deliberately: cancelling a run
+  # part-way through publishing would leave a release carrying some assets and
+  # no checksum manifest, which is worse than a slow queue.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  build-desktop:
+  build:
+    name: build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+
     strategy:
+      # A release missing a platform is broken, not partial. Stop the whole
+      # matrix so the release job never runs on an incomplete set.
+      fail-fast: true
       matrix:
         include:
-          - os: macos-14
-            arch: arm64
-          - os: macos-13
-            arch: x64
+          - os: macos-latest
+            artifact: conduit-darwin-arm64
+          - os: ubuntu-latest
+            artifact: conduit-linux-amd64
 
-    runs-on: ${{ matrix.os }}
+    env:
+      # SQLite FTS5 comes from mattn/go-sqlite3, which is a cgo package. With
+      # CGO off the driver compiles down to a stub whose every call fails at
+      # runtime, so cgo must be on for the build below.
+      #
+      # It is also why this is a matrix of real runners rather than a
+      # cross-compile: setting GOOS/GOARCH implicitly disables cgo, and forcing
+      # it back on needs a C cross-toolchain per target that no single host has.
+      # See the note in the Makefile where build-all-platforms used to be.
+      CGO_ENABLED: 1
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: apps/conduit-desktop/package-lock.json
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
+          # Sourced from go.mod so the release toolchain cannot drift from the
+          # version the module actually requires. Same as ci.yml.
           go-version-file: go.mod
           cache: true
 
-      - name: Get version from tag
-        id: version
-        env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+      - name: Toolchain info
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          go version
+          go env GOOS GOARCH CGO_ENABLED CC
 
-      - name: Install dependencies
-        working-directory: apps/conduit-desktop
-        run: npm ci
-
-      - name: Build and Package DMG
-        working-directory: apps/conduit-desktop
+      - name: Build
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ github.ref_name }}
         run: |
-          npm run package:mac:dmg
+          set -euo pipefail
+          mkdir -p stage
 
-      - name: Upload DMG artifact
+          # The version is the tag itself, read from the ref rather than from
+          # `git describe`. describe needs the tag object and enough history to
+          # reach it, which a shallow checkout does not have; the ref name is
+          # exact and always present.
+          #
+          # main.Version and main.BuildTime are capitalised, and that matters:
+          # Go's linker silently ignores -X for a symbol that does not exist, so
+          # a lower-cased name here would not fail the build. It would ship a
+          # binary that reports "dev", and the first sign of it would be a bug
+          # report naming the wrong build.
+          go build \
+            -tags fts5 \
+            -trimpath \
+            -ldflags "-s -w -X main.Version=${VERSION} -X main.BuildTime=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -o stage/conduit \
+            ./cmd/conduit
+
+      - name: Smoke test - the artifact runs and knows its version
+        env:
+          VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          ./stage/conduit version
+          ./stage/conduit version --json > version.json
+          cat version.json
+          jq -e --arg want "$VERSION" '.version == $want' version.json
+
+      - name: Smoke test - FTS5 is compiled into this artifact
+        run: |
+          set -euo pipefail
+
+          # HOME is redirected at a fresh directory so this measures the binary
+          # rather than whatever configuration the runner image ships with.
+          SMOKE="$RUNNER_TEMP/smoke"
+          mkdir -p "$SMOKE/home" "$SMOKE/data"
+
+          # doctor exits non-zero when any check fails, and on a runner with no
+          # embedding model several legitimately do. Its JSON is the point here,
+          # not its exit code.
+          HOME="$SMOKE/home" ./stage/conduit doctor --json \
+            --data-dir "$SMOKE/data" --probe-timeout 1 > doctor.json || true
+          cat doctor.json
+
+          # ci.yml proves the SOURCE TREE builds with FTS5. This proves the
+          # ARTIFACT has it -- the exact binary a user will download. A build
+          # with CGO off or the fts5 tag missing compiles, starts, and prints
+          # its version quite happily, then fails every search with
+          # "no such module: fts5".
+          jq -e '[.checks[] | select(.name == "FTS5 lexical search") | .status] == ["ok"]' doctor.json
+
+      - name: Package
+        env:
+          ARTIFACT: ${{ matrix.artifact }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+
+          # ARTIFACT CONTRACT: the archive is named conduit-<os>-<arch>.tar.gz
+          # and holds exactly one file, an executable called `conduit`, at its
+          # root. scripts/install.sh unpacks against precisely that shape;
+          # changing either half means changing both.
+          tar -czf "dist/${ARTIFACT}.tar.gz" -C stage conduit
+          tar -tzf "dist/${ARTIFACT}.tar.gz"
+
+      - name: Upload for the release job
         uses: actions/upload-artifact@v4
-        env:
-          VERSION: ${{ steps.version.outputs.VERSION }}
         with:
-          name: dmg-${{ matrix.arch }}
-          path: apps/conduit-desktop/release/${{ steps.version.outputs.VERSION }}/Conduit-*.dmg
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.artifact }}.tar.gz
+          # A silent empty upload would surface as a release missing a
+          # platform, long after the run went green.
+          if-no-files-found: error
           retention-days: 7
 
-  create-release:
-    needs: build-desktop
+  release:
+    name: publish pre-release
+    needs: build
     runs-on: ubuntu-latest
 
+    # The only job in this workflow that may write to the repository.
+    permissions:
+      contents: write
+
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - name: Download every built artifact
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          # Flatten, so dist/ holds the tarballs themselves rather than one
+          # directory per matrix job.
+          merge-multiple: true
 
-      - name: Get version from tag
-        id: version
-        env:
-          GITHUB_REF_NAME: ${{ github.ref_name }}
+      - name: Checksums
         run: |
-          VERSION="${GITHUB_REF_NAME#v}"
-          echo "VERSION=$VERSION" >> "$GITHUB_OUTPUT"
+          set -euo pipefail
+          cd dist
+          ls -l
 
-      - name: Download arm64 DMG
-        uses: actions/download-artifact@v4
-        with:
-          name: dmg-arm64
-          path: ./artifacts/arm64
+          # Both platforms or nothing. fail-fast should already have stopped an
+          # incomplete matrix, but publishing half a release is bad enough to
+          # justify checking rather than assuming.
+          for want in conduit-darwin-arm64.tar.gz conduit-linux-amd64.tar.gz; do
+            if [ ! -f "$want" ]; then
+              echo "::error::$want is missing; refusing to publish an incomplete release"
+              exit 1
+            fi
+          done
 
-      - name: Download x64 DMG
-        uses: actions/download-artifact@v4
-        with:
-          name: dmg-x64
-          path: ./artifacts/x64
+          # Bare basenames, because install.sh matches the manifest's second
+          # field against the file name it asked for.
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
-        with:
-          draft: false
-          prerelease: false
-          generate_release_notes: true
-          files: |
-            ./artifacts/arm64/*.dmg
-            ./artifacts/x64/*.dmg
+      - name: Publish
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          # A pre-release, always, for as long as v2 is personal-grade: these
+          # binaries are unsigned and un-notarised, so macOS Gatekeeper will
+          # quarantine them, and marking the release "latest" would put them in
+          # front of anyone who lands on the releases page.
+          #
+          # install.sh knows this and resolves the newest v2 PRE-release through
+          # the API rather than using /releases/latest, which excludes them.
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "release $TAG already exists; replacing its assets"
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+              dist/conduit-darwin-arm64.tar.gz \
+              dist/conduit-linux-amd64.tar.gz \
+              dist/SHA256SUMS
+          else
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease \
+              --title "$TAG" \
+              --generate-notes \
+              dist/conduit-darwin-arm64.tar.gz \
+              dist/conduit-linux-amd64.tar.gz \
+              dist/SHA256SUMS
+          fi
+
+      - name: Summary
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          {
+            echo "### Released ${TAG}"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "Install it with:"
+            echo
+            echo '```'
+            echo "./scripts/install.sh --version ${TAG}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

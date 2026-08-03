@@ -35,11 +35,28 @@ readonly BINARY="conduit"
 # caller cannot tell a refusal from a completed uninstall.
 readonly EXIT_USER_CANCELLED=3
 
-DATA_DIR="${CONDUIT_DATA_DIR:-${HOME}/.conduit}"
-# Tracks whether the user named a data directory or we defaulted to one. The
-# distinction decides whether --data-dir is forwarded to the binary: forwarding
-# a default would override the user's configured data_dir.
+# Tracks whether the user named a data directory or we defaulted to one.
+#
+# The distinction decides two things: whether the absolute-path refusal applies
+# (a path we chose ourselves is not a typo waiting to happen), and whether
+# --data-dir is forwarded to the binary (forwarding a default would override the
+# user's configured data_dir).
+#
+# CONDUIT_DATA_DIR counts as the user naming one. It used to leave this false,
+# with two consequences. The absolute-path refusal was skipped, so
+# `CONDUIT_DATA_DIR=data ./uninstall.sh` was silently resolved against the
+# working directory -- exactly what that refusal exists to prevent, reached
+# through the other door. And because --data-dir was then not forwarded,
+# delegation ran against the binary's own default: the binary does NOT read
+# CONDUIT_DATA_DIR, only these scripts do, so the user named one directory and
+# Conduit removed ~/.conduit instead.
 DATA_DIR_EXPLICIT=false
+if [[ -n "${CONDUIT_DATA_DIR:-}" ]]; then
+    DATA_DIR="$CONDUIT_DATA_DIR"
+    DATA_DIR_EXPLICIT=true
+else
+    DATA_DIR="${HOME}/.conduit"
+fi
 PREFIX=""
 REMOVE_DATA=false
 FORCE=false
@@ -92,7 +109,8 @@ OPTIONS
                     configuration and any downloaded embedding models.
                     Without this flag, data is kept.
     --data-dir DIR  Conduit data directory (default: ~/.conduit,
-                    or $CONDUIT_DATA_DIR). Must be an absolute path.
+                    or $CONDUIT_DATA_DIR). Must be an absolute path, whether
+                    it comes from the flag or the environment variable.
     --prefix DIR    Remove the install at DIR instead of searching the usual
                     locations. Use this if you installed with
                     `install.sh --prefix DIR`.
@@ -275,9 +293,17 @@ path_identity() {
 # The mount points are here because an external disk, a network share or a
 # container bind mount is somebody's entire filesystem, and "--data-dir
 # /Volumes" differs from a real one by a single missing component.
+#
+# /System/Volumes/Data is listed separately from /System because the list is
+# matched by exact path and by device:inode, and neither of those catches a
+# CHILD of a protected directory. On macOS Catalina and later the system volume
+# is read-only and everything writable -- every user's home included -- lives on
+# a second volume mounted there. It is its own mount with its own inode,
+# distinct from both / and /Users, so nothing already in this list resembled it.
 protected_dirs() {
     printf '%s\n' / /usr /etc /var /opt /tmp /bin /sbin /home /Users /root \
-                  /System /Library /Applications /private /dev /proc /boot \
+                  /System /System/Volumes/Data \
+                  /Library /Applications /private /dev /proc /boot \
                   /Volumes /mnt /media /net /srv
 
     local home_canonical
@@ -612,6 +638,48 @@ strip_conduit_path_block() {
     ' "$1"
 }
 
+# resolve_profile_path follows a symlinked profile to the file that will
+# actually be rewritten.
+#
+# Keeping dotfiles in a git repository and symlinking them into $HOME is one of
+# the standard ways to manage a shell config -- it is what GNU stow, chezmoi and
+# every hand-rolled `ln -s ~/dotfiles/zshrc ~/.zshrc` produce. On such a machine
+# ~/.zshrc is a symlink, not a file.
+#
+# install.sh appends with '>>', which follows the link and writes the file in
+# the repository. The rewrite here moved a temp file over the path, and rename
+# does the opposite: it REPLACES the link with a regular file. So the two halves
+# of Conduit acted on two different files. The PATH block stayed behind in the
+# dotfiles repo, where nothing would ever remove it, and ~/.zshrc silently
+# stopped tracking the repository the user manages it from -- a change they
+# would discover much later, as edits to their dotfiles no longer taking effect.
+#
+# `readlink -f` would be a one-liner, but stock macOS only gained it in 12.3, so
+# the chain is walked by hand. The walk is bounded: a symlink loop has to end as
+# a refusal, not as a hang.
+resolve_profile_path() {
+    local path="$1" target hops=0
+
+    while [[ -L "$path" ]]; do
+        hops=$((hops + 1))
+        if [[ "$hops" -gt 40 ]]; then
+            return 1   # a loop, or a chain no sane setup produces
+        fi
+
+        target="$(readlink -- "$path")" || return 1
+        [[ -n "$target" ]] || return 1
+
+        # A relative link resolves against the directory the LINK lives in, not
+        # the working directory.
+        if [[ "$target" != /* ]]; then
+            target="$(dirname -- "$path")/${target}"
+        fi
+        path="$target"
+    done
+
+    printf '%s' "$path"
+}
+
 remove_shell_path_lines() {
     info "Shell profiles"
 
@@ -624,35 +692,60 @@ remove_shell_path_lines() {
 
     local file
     for file in "${files[@]}"; do
+        # -f follows symlinks, so a dangling one is skipped here and never
+        # reaches the resolver.
         [[ -f "$file" ]] || continue
         profile_has_marker "$file" || continue
 
         FOUND=$((FOUND + 1))
 
+        # Everything below acts on the file this profile actually IS, not on
+        # the name it happens to be reached by. See resolve_profile_path.
+        local target
+        if ! target="$(resolve_profile_path "$file")" || [[ -z "$target" ]]; then
+            FAILED=$((FAILED + 1))
+            bad "$file (symlink chain could not be resolved; left unchanged)"
+            continue
+        fi
+
+        # A label that names both, so the user can see when an edit landed
+        # somewhere other than the path in the list.
+        local label="$file"
+        [[ "$target" != "$file" ]] && label="$file -> $target"
+
         if [[ "$DRY_RUN" == true ]]; then
-            plan "Conduit PATH block in $file"
-            grep -nE -A1 "$CONDUIT_PATH_MARKER" "$file" | sed 's/^/      /'
+            plan "Conduit PATH block in $label"
+            grep -nE -A1 "$CONDUIT_PATH_MARKER" "$target" | sed 's/^/      /'
             continue
         fi
 
         # Never edit a profile in place without a copy: a broken .zshrc locks
-        # somebody out of their own shell.
-        local backup="${file}.conduit-uninstall.bak"
-        cp -- "$file" "$backup" || { bad "could not back up $file"; continue; }
+        # somebody out of their own shell. The copy goes beside the RESOLVED
+        # file -- a backup of ~/.zshrc sitting next to a symlink is not where
+        # anyone whose dotfiles repo just changed would think to look.
+        local backup="${target}.conduit-uninstall.bak"
+        cp -- "$target" "$backup" || { bad "could not back up $target"; continue; }
 
+        # The temp file is a sibling of the destination so the replacement is a
+        # rename within one filesystem rather than a cross-device copy. mktemp's
+        # own directory is frequently on a different one.
         local tmp
-        tmp="$(mktemp)"
+        if ! tmp="$(mktemp "${target}.conduit-tmp.XXXXXX")"; then
+            FAILED=$((FAILED + 1))
+            bad "$target (its directory is not writable; left unchanged, backup: $backup)"
+            continue
+        fi
 
         # An awk failure must not be mistaken for "nothing matched". The old
         # code ended in `|| true`, which swallowed every non-zero exit --
         # including a read error or a full disk -- and then moved the resulting
         # empty file over the user's profile.
         local rc=0
-        strip_conduit_path_block "$file" > "$tmp" || rc=$?
+        strip_conduit_path_block "$target" > "$tmp" || rc=$?
         if [[ "$rc" -ne 0 ]]; then
             rm -f -- "$tmp"
             FAILED=$((FAILED + 1))
-            bad "$file (could not be rewritten; left unchanged, backup: $backup)"
+            bad "$label (could not be rewritten; left unchanged, backup: $backup)"
             continue
         fi
 
@@ -660,19 +753,19 @@ remove_shell_path_lines() {
         # into place unchanged would silently tighten a profile that was
         # deliberately group-readable.
         local mode
-        mode="$(file_mode "$file")"
+        mode="$(file_mode "$target")"
         # Reported rather than swallowed: a chmod that quietly does nothing
         # leaves the profile at mktemp's 0600, and the user finds out weeks
         # later when something else cannot read it.
-        chmod "$mode" "$tmp" || warn "could not restore mode $mode on $file"
+        chmod "$mode" "$tmp" || warn "could not restore mode $mode on $target"
 
-        if mv -f -- "$tmp" "$file"; then
+        if mv -f -- "$tmp" "$target"; then
             REMOVED=$((REMOVED + 1))
-            ok "Conduit PATH block in $file  (backup: $backup)"
+            ok "Conduit PATH block in $label  (backup: $backup)"
         else
             rm -f -- "$tmp"
             FAILED=$((FAILED + 1))
-            bad "$file"
+            bad "$label"
         fi
     done
 }

@@ -60,7 +60,7 @@ Re-running it is safe. It is the supported way to upgrade a source install.
 | Flag | Effect |
 |---|---|
 | `--from-source` | Build from this checkout. Needs Go and a C compiler. |
-| `--version TAG` | Install a specific release (default: `latest`). |
+| `--version TAG` | Install a specific release, e.g. `v2.0.0-beta.1`. Default: the newest v2 release. |
 | `--prefix DIR` | Install somewhere other than `~/.local/bin`. |
 | `--model` | Also download the embedding model (a few hundred MB). |
 | `--client NAME` | Configure `claude-code` (default), `cursor` or `vscode`. |
@@ -69,30 +69,95 @@ Re-running it is safe. It is the supported way to upgrade a source install.
 ### Installing from a release
 
 ```bash
-./scripts/install.sh
+./scripts/install.sh                            # newest v2 release
+./scripts/install.sh --version v2.0.0-beta.1    # pin a specific one
 ```
 
-Without `--from-source` the installer fetches a published release artifact and
-verifies it against the release's `SHA256SUMS` before unpacking. Verification
-is mandatory; there is no flag to skip it.
+Without `--from-source` the installer downloads a published release artifact
+and verifies it against that release's `SHA256SUMS` before unpacking.
+**Verification is mandatory and there is no flag to skip it.** A mismatch
+deletes the download and fails; nothing is half-installed.
 
-**Conduit 2.0 has not published release binaries yet.** Until it does, this
-mode stops with a message telling you to use `--from-source`. It does not
-half-install anything.
+What it fetches:
+
+| | |
+|---|---|
+| Archive | `conduit-<os>-<arch>.tar.gz`, holding one executable `conduit` |
+| Platforms | `darwin-arm64` (Apple Silicon), `linux-amd64` |
+| Manifest | `SHA256SUMS`, one line per archive |
+
+Both are built natively by CI on a tagged release. See
+[`.eng-lead-kb/RELEASE-PROCESS.md`](../.eng-lead-kb/RELEASE-PROCESS.md) for how
+a release is cut and how to verify one by hand.
+
+#### The default is the newest **pre-release**
+
+Every v2 release is published as a GitHub *pre-release*, because the binaries
+are not code-signed or notarised. That has one consequence worth stating,
+because it is a trap:
+
+GitHub's `/releases/latest` endpoint — the one most install scripts use —
+**excludes pre-releases**. Pointing at it would either 404 or, worse, silently
+serve `v0.1.10`: the newest non-pre-release, from the daemon era, a completely
+different product. `install.sh` therefore asks the releases API for the list
+and takes the newest `v2.*` entry. If you are scripting around it yourself,
+do the same.
+
+#### If there is no release yet, or none for your platform
+
+Both cases stop with an error naming `--from-source`, and the second one lists
+what the release actually contains — so you can tell "this architecture has no
+prebuilt binary" from "this release is broken". Intel Macs and Linux arm64 have
+no published binaries and must build from source.
+
+#### macOS Gatekeeper
+
+Published binaries are **not signed or notarised**. macOS will quarantine a
+downloaded one and refuse to run it until you clear the attribute:
+
+```bash
+xattr -d com.apple.quarantine ~/.local/bin/conduit
+```
+
+`--from-source` avoids this entirely, and is the recommended path on macOS
+until signing is in place.
 
 ### If `~/.local/bin` is not on your PATH
 
-The installer appends a two-line block to `~/.zshrc` or `~/.bashrc`:
+The installer appends a two-line block to your shell's startup file:
 
 ```bash
 # Conduit
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
-The `# Conduit` marker is the point of it. It is the only thing the uninstaller
-matches on, so a PATH line you wrote yourself is never touched even when it
-names the same directory — and without the marker, there would be no safe way to
-remove Conduit's line later without guessing.
+Which file that is depends on the shell **and the platform**:
+
+| Shell | File |
+|---|---|
+| zsh | `~/.zshrc` |
+| bash on macOS | `~/.bash_profile`, or your existing `~/.bash_login` / `~/.profile` |
+| bash on Linux | `~/.bashrc` |
+
+The bash split is not arbitrary. macOS terminals start bash as a *login* shell,
+which reads `~/.bash_profile` and never `~/.bashrc`; Linux terminals start it
+interactive-but-not-login, which is the other way round. Writing to `~/.bashrc`
+on a Mac — which earlier versions did — produced an install that reported
+success and a PATH entry no shell ever read. On macOS the installer appends to
+whichever of the three files you already have, rather than creating
+`~/.bash_profile`, because a login bash stops at the first one it finds and a
+new `~/.bash_profile` would shadow an existing `~/.profile` entirely.
+
+The `# Conduit` marker is the point of the block. It is the only thing the
+uninstaller matches on, so a PATH line you wrote yourself is never touched even
+when it names the same directory — and without the marker there would be no
+safe way to remove Conduit's line later without guessing. The match is anchored
+to the start of a line, so an unrelated comment mentioning `# Conduit` neither
+suppresses the write nor gets deleted on uninstall.
+
+If your profile is a **symlink** into a dotfiles repository, both the installer
+and the uninstaller follow it and edit the file it points at, leaving the link
+intact.
 
 Re-running the installer does not add a second copy. For `fish`, or any shell
 whose rc file the installer does not recognise, it prints the line for you to add
@@ -318,8 +383,13 @@ identity, not by spelling** — device and inode, the same test the kernel uses.
 On a case-insensitive filesystem such as APFS, `/USERS/you` *is* your home
 directory; a string comparison would not notice, and the next step is a
 recursive delete. Symlinked data directories are refused rather than followed,
-and `/`, `/etc`, `/Users`, `/Volumes`, `/mnt` and their kin are never acceptable
-however they are spelled.
+and `/`, `/etc`, `/Users`, `/Volumes`, `/mnt`, `/System/Volumes/Data` and their
+kin are never acceptable however they are spelled.
+
+`$CONDUIT_DATA_DIR` is held to exactly the same rules as the flag. It is a
+directory you named, so it must be absolute and it is subject to the same deny
+list — and it is forwarded to the binary, so the script and the binary agree on
+which directory is being removed.
 
 ### How delegation works
 

@@ -585,6 +585,30 @@ func stripShellConfig(path string, dryRun bool, result *UninstallResult) error {
 	}
 	content := string(data)
 
+	// Act on the file this profile actually IS, not on the name it is reached
+	// by.
+	//
+	// Managing dotfiles in a git repository and symlinking them into $HOME is a
+	// standard setup -- stow, chezmoi, or a hand-written `ln -s`. On such a
+	// machine ~/.zshrc is a symlink into that repository. writeFileAtomic
+	// finishes with os.Rename, which REPLACES a symlink with a regular file, so
+	// the rewrite would sever the link: the PATH block would survive in the
+	// repository, where nothing would ever remove it, and the user's ~/.zshrc
+	// would silently stop tracking the repository they manage it from.
+	//
+	// install.sh appends through the link, so following it here is also what
+	// makes the two halves agree on which file they are editing.
+	target := path
+	if resolved, rerr := filepath.EvalSymlinks(path); rerr == nil {
+		target = resolved
+	}
+	// The label names both when they differ, so a user can see that the edit
+	// landed somewhere other than the path being reported.
+	label := path
+	if target != path {
+		label = path + " -> " + target
+	}
+
 	lines := strings.Split(content, "\n")
 	out := make([]string, 0, len(lines))
 	changed := false
@@ -606,7 +630,7 @@ func stripShellConfig(path string, dryRun bool, result *UninstallResult) error {
 
 	if dryRun {
 		result.ItemsRemoved = append(result.ItemsRemoved,
-			fmt.Sprintf("[DRY RUN] Would clean PATH entry from %s", path))
+			fmt.Sprintf("[DRY RUN] Would clean PATH entry from %s", label))
 		return nil
 	}
 
@@ -618,23 +642,27 @@ func stripShellConfig(path string, dryRun bool, result *UninstallResult) error {
 	out = append(out, "")
 
 	mode := os.FileMode(0644)
-	if info, serr := os.Stat(path); serr == nil {
+	if info, serr := os.Stat(target); serr == nil {
 		mode = info.Mode().Perm()
 	}
 
 	// Copy aside before rewriting. Atomic replacement guarantees the file is
 	// never truncated; it does not guarantee the edit was the one the user
 	// wanted, and a wrong edit to .zshrc breaks their next login shell.
-	backup, err := backupFile(path)
+	//
+	// The backup goes beside the RESOLVED file: one sitting next to a symlink,
+	// named after the symlink, is not where anyone whose dotfiles repository
+	// just changed would think to look for it.
+	backup, err := backupFile(target)
 	if err != nil {
-		return fmt.Errorf("failed to back up %s: %w", path, err)
+		return fmt.Errorf("failed to back up %s: %w", target, err)
 	}
 
-	if err := writeFileAtomic(path, []byte(strings.Join(out, "\n")), mode); err != nil {
-		return fmt.Errorf("failed to clean %s: %w", path, err)
+	if err := writeFileAtomic(target, []byte(strings.Join(out, "\n")), mode); err != nil {
+		return fmt.Errorf("failed to clean %s: %w", target, err)
 	}
 	result.ItemsRemoved = append(result.ItemsRemoved,
-		fmt.Sprintf("PATH entry: %s (backup: %s)", path, backup))
+		fmt.Sprintf("PATH entry: %s (backup: %s)", label, backup))
 	return nil
 }
 
