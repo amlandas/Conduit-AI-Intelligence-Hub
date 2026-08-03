@@ -396,11 +396,15 @@ func embedModelCheck(cfg *config.Config) check {
 
 	// A size that disagrees with the pin is a truncated or replaced file, and
 	// it is cheap enough to notice from the stat we already did.
+	//
+	// Exact byte counts, not humanBytes: a file truncated by one byte rounds to
+	// the same "261.6 MB" as the real one, and reporting "is 261.6 MB, expected
+	// 261.6 MB" reads as a bug in the checker rather than a corrupt download.
 	if st.SizeBytes != spec.SizeBytes {
 		return check{
 			Name: "embedding model", Status: checkFail,
-			Detail: fmt.Sprintf("%s is %s on disk, expected %s",
-				spec.ID, humanBytes(st.SizeBytes), humanBytes(spec.SizeBytes)),
+			Detail: fmt.Sprintf("%s is %d bytes on disk, expected %d (off by %d)",
+				spec.ID, st.SizeBytes, spec.SizeBytes, spec.SizeBytes-st.SizeBytes),
 			Remedy: fmt.Sprintf("run 'conduit model download %s --force'", spec.ID),
 		}
 	}
