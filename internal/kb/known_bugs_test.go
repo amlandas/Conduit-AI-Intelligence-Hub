@@ -410,3 +410,150 @@ func TestIssue73_FallbackLadder(t *testing.T) {
 		}
 	})
 }
+
+// ISSUE #77 -- response contract. FIXED in WP-3.4.
+//
+// Four defects, all in what a client could believe about a result:
+//
+//  1. Lexical mode passed raw SQLite bm25 through the same `score` key that
+//     fusion fills with a small positive RRF value. Negative-is-better versus
+//     higher-is-better, under one name, with no way to tell which.
+//  2. Lexical and semantic-only modes left Confidence and StrategiesUsed at
+//     their zero values, so "" was both "not computed" and "no confidence".
+//  3. MMR reorders for diversity as the last stage and does not touch Score,
+//     so sorting by Score gave a different order than the one returned.
+//  4. calculateOverallConfidence gated "very_high" on
+//     `highAgreementCount >= len(hits)/2` -- integer division, so a single
+//     uncorroborated hit scored 0 >= 0 and came back very_high.
+func TestIssue77_ResponseContract(t *testing.T) {
+	gi := ingestGoldenCorpus(t)
+	ctx := context.Background()
+
+	t.Run("scores are on one scale in every mode", func(t *testing.T) {
+		modes := []struct {
+			name  string
+			query string
+			mode  HybridSearchMode
+		}{
+			{"fusion", "lantern", HybridModeFusion},
+			{"lexical", "lantern", HybridModeLexical},
+		}
+		for _, m := range modes {
+			t.Run(m.name, func(t *testing.T) {
+				res, err := gi.Hybrid.Search(ctx, m.query, HybridSearchOptions{Limit: 10, Mode: m.mode})
+				if err != nil {
+					t.Fatalf("Search: %v", err)
+				}
+				if len(res.Results) == 0 {
+					t.Fatal("expected results")
+				}
+				for _, h := range res.Results {
+					if h.Score <= 0 {
+						t.Errorf("%s mode returned a non-positive score %.6f; every mode reports "+
+							"reciprocal rank now", m.name, h.Score)
+					}
+					if h.Score > 3.0/float64(DefaultRRFConstant+1) {
+						t.Errorf("%s mode score %.6f is off the reciprocal-rank scale", m.name, h.Score)
+					}
+				}
+			})
+		}
+
+		// Rank 1 in lexical mode scores exactly what fusion gives a rank-1 hit
+		// found by one strategy: the two are the same number, not merely
+		// comparable.
+		lex, err := gi.Hybrid.Search(ctx, "lantern", HybridSearchOptions{Limit: 10, Mode: HybridModeLexical})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		want := 1.0 / float64(DefaultRRFConstant+1)
+		if math.Abs(lex.Results[0].Score-want) > 1e-12 {
+			t.Errorf("lexical rank 1 = %.12f, want %.12f", lex.Results[0].Score, want)
+		}
+		for i := 1; i < len(lex.Results); i++ {
+			if lex.Results[i].Score >= lex.Results[i-1].Score {
+				t.Errorf("lexical scores are not monotone decreasing at rank %d", i+1)
+			}
+		}
+	})
+
+	t.Run("lexical mode reports confidence and strategy count", func(t *testing.T) {
+		res, err := gi.Hybrid.Search(ctx, "lantern", HybridSearchOptions{Limit: 10, Mode: HybridModeLexical})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if res.Confidence != "medium" {
+			t.Errorf("confidence = %q, want medium (one strategy, results present)", res.Confidence)
+		}
+		if res.StrategiesUsed != 1 {
+			t.Errorf("StrategiesUsed = %d, want 1", res.StrategiesUsed)
+		}
+
+		empty, err := gi.Hybrid.Search(ctx, "whale", HybridSearchOptions{Limit: 10, Mode: HybridModeLexical})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if empty.Confidence != "none" {
+			t.Errorf("confidence for a miss = %q, want none", empty.Confidence)
+		}
+		if empty.StrategiesUsed != 0 {
+			t.Errorf("StrategiesUsed for a miss = %d, want 0", empty.StrategiesUsed)
+		}
+	})
+
+	t.Run("Rank is authoritative and MMR-aware", func(t *testing.T) {
+		// "people" is the query where MMR demonstrably reorders: rank 2 scores
+		// below rank 3 (see TestGolden_MMRReordersFinalRanking).
+		res, err := gi.Hybrid.Search(ctx, "people", HybridSearchOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(res.Results) < 3 {
+			t.Fatalf("expected at least three results, got %d", len(res.Results))
+		}
+		for i, h := range res.Results {
+			if h.Rank != i+1 {
+				t.Errorf("hit at position %d has Rank %d", i, h.Rank)
+			}
+		}
+		// The fixture must still exercise the interesting case, or this test is
+		// vacuous: Score alone does not imply the returned order.
+		if !(res.Results[1].Score < res.Results[2].Score) {
+			t.Errorf("fixture drifted: MMR no longer reorders 'people', so Rank is not being tested " +
+				"against a Score that disagrees with it")
+		}
+	})
+
+	t.Run("Rank is set on every fallback rung", func(t *testing.T) {
+		for _, q := range []string{"lantern", "lantern zzzznothing", "lanter harbou zzzz"} {
+			res, err := gi.Hybrid.SearchWithFallback(ctx, q, HybridSearchOptions{Limit: 5})
+			if err != nil {
+				t.Fatalf("SearchWithFallback(%q): %v", q, err)
+			}
+			for i, h := range res.Results {
+				if h.Rank != i+1 {
+					t.Errorf("query %q (level %d): hit at position %d has Rank %d", q, res.FallbackLevel, i, h.Rank)
+				}
+				if h.Score <= 0 {
+					t.Errorf("query %q (level %d): rank %d has non-positive score %.6f",
+						q, res.FallbackLevel, h.Rank, h.Score)
+				}
+			}
+		}
+	})
+
+	t.Run("single-hit confidence is not inflated", func(t *testing.T) {
+		// A query matching exactly one chunk, lexical side only: no strategy
+		// corroborated it, so it cannot be the top of the confidence scale.
+		res, err := gi.Hybrid.Search(ctx, "midnight", HybridSearchOptions{Limit: 10})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(res.Results) != 1 {
+			t.Fatalf("fixture drifted: got %d results for 'midnight', want 1", len(res.Results))
+		}
+		if res.Confidence == "very_high" {
+			t.Errorf("a single uncorroborated hit reported very_high confidence")
+		}
+	})
+}

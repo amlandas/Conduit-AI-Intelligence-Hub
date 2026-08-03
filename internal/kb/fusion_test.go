@@ -485,10 +485,16 @@ func TestCalculateOverallConfidence(t *testing.T) {
 		{name: "degraded with hits", hits: []SearchHit{hit("both", "", 1)}, strategies: 1, degraded: true, want: "medium"},
 		{name: "two strategies, half agree", hits: []SearchHit{hit("both", "", 1), hit("one", "", 1)}, strategies: 2, want: "very_high"},
 		{
-			name: "BUG SURFACE: a single hit with zero agreement still reports very_high",
-			hits: []SearchHit{hit("one", "", 1)}, strategies: 2, want: "very_high",
-			notes: "the gate is `highAgreementCount >= len(hits)/2` with integer division, so len(hits)==1 " +
-				"makes the right-hand side 0 and the condition always holds -- candidate sixth bug, pinned not fixed",
+			name: "#77: a single hit with zero agreement is not very_high",
+			hits: []SearchHit{hit("one", "", 1)}, strategies: 2, want: "medium",
+			notes: "the gate used to be `highAgreementCount >= len(hits)/2` with integer division, so " +
+				"len(hits)==1 made the right-hand side 0 and the condition always held -- the highest " +
+				"confidence in the vocabulary awarded to the least corroborated case",
+		},
+		{
+			name: "#77: a single hit that BOTH strategies found is very_high",
+			hits: []SearchHit{hit("both", "", 1)}, strategies: 2, want: "very_high",
+			notes: "one hit, one corroboration: a real majority, not an artefact of truncating division",
 		},
 		{
 			name: "two strategies, minority agreement",

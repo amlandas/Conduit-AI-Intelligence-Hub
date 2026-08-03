@@ -242,11 +242,17 @@ type HybridSearchResult struct {
 	Reranked        bool `json:"reranked,omitempty"`          // Whether reranking was applied
 
 	// Query-adaptive confidence model (Phase 12)
-	Confidence     string `json:"confidence,omitempty"`      // Overall confidence: very_high, high, medium, low
+	Confidence     string `json:"confidence,omitempty"`      // Overall confidence: very_high, high, medium, low, speculative, none
 	StrategiesUsed int    `json:"strategies_used,omitempty"` // Number of strategies that contributed
-	DegradedMode   bool   `json:"degraded_mode,omitempty"`   // True if semantic search timed out/failed
-	Note           string `json:"note,omitempty"`            // Human-readable note about results
-	FallbackLevel  int    `json:"fallback_level,omitempty"`  // 0=primary, 1=relaxed, 2=partial
+
+	// DegradedMode is true when a retrieval strategy FAILED, as opposed to
+	// matching nothing. Note carries the reason. Issue #75 widened this from
+	// "semantic search failed" to cover the lexical half too, which used to
+	// report an outright FTS5 error as an ordinary empty result.
+	DegradedMode bool `json:"degraded_mode,omitempty"`
+
+	Note          string `json:"note,omitempty"`           // Human-readable note about results
+	FallbackLevel int    `json:"fallback_level,omitempty"` // 0=primary, 1=relaxed, 2=partial, 3=none
 }
 
 // QueryAnalysis provides insight into how the query was interpreted.
@@ -340,8 +346,19 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, opts HybridS
 	result.Mode = mode
 	result.SearchTime = float64(time.Since(start).Milliseconds())
 	result.QueryAnalysis = analysis
+	assignRanks(result.Results)
 
 	return result, nil
+}
+
+// assignRanks stamps the 1-based position of every hit in the returned order.
+//
+// It is called at the last possible moment on every path, after MMR has had its
+// say, so Rank always describes the order the caller actually receives.
+func assignRanks(hits []SearchHit) {
+	for i := range hits {
+		hits[i].Rank = i + 1
+	}
 }
 
 // analyzeQuery examines the query to determine the best search strategy.
@@ -712,9 +729,19 @@ func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHi
 		})
 	}
 
-	// Sort by RRF score descending
+	// Sort by RRF score descending, breaking ties on chunk id.
+	//
+	// The tie-break is load-bearing, not cosmetic: `scored` is built by ranging
+	// over a map, so its incoming order is randomised per run, and sort.Slice is
+	// not stable. Two chunks with equal fused scores -- which is common now that
+	// fusion is unweighted, e.g. one chunk at lexical rank 1 / semantic rank 3
+	// against another at lexical rank 3 / semantic rank 1 -- would otherwise
+	// swap places between identical searches over an unchanged index.
 	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].rrfScore > scored[j].rrfScore
+		if scored[i].rrfScore != scored[j].rrfScore {
+			return scored[i].rrfScore > scored[j].rrfScore
+		}
+		return scored[i].hit.ChunkID < scored[j].hit.ChunkID
 	})
 
 	// Convert back to SearchHit slice with RRF scores
@@ -758,8 +785,9 @@ func (hs *HybridSearcher) applyAgreementBoost(hits []SearchHit, info agreementIn
 		hits[i].Score *= agreementBonus
 	}
 
-	// Re-sort after boosting
-	sort.Slice(hits, func(i, j int) bool {
+	// Re-sort after boosting. Stable, so equally scored hits keep the order the
+	// fusion stage put them in rather than being reshuffled.
+	sort.SliceStable(hits, func(i, j int) bool {
 		return hits[i].Score > hits[j].Score
 	})
 
@@ -789,7 +817,13 @@ func (hs *HybridSearcher) calculateOverallConfidence(hits []SearchHit, info agre
 		return "low"
 	}
 
-	if strategiesUsed >= 2 && highAgreementCount >= len(hits)/2 {
+	// Issue #77: the gate was `highAgreementCount >= len(hits)/2` using integer
+	// division, so a SINGLE result with zero agreement scored 0 >= 0 and came
+	// back "very_high" -- the highest confidence in the vocabulary, awarded to
+	// the case with the least corroboration. The comparison is now
+	// multiplication (a real majority, no truncation) with an explicit minimum
+	// of one corroborated hit.
+	if strategiesUsed >= 2 && highAgreementCount > 0 && highAgreementCount*2 >= len(hits) {
 		return "very_high"
 	}
 
@@ -846,8 +880,8 @@ func (hs *HybridSearcher) boostExactMatches(hits []SearchHit, entities []string)
 		hits[i].Score *= totalBoost
 	}
 
-	// Re-sort after boosting
-	sort.Slice(hits, func(i, j int) bool {
+	// Re-sort after boosting. Stable, for the same reason as above.
+	sort.SliceStable(hits, func(i, j int) bool {
 		return hits[i].Score > hits[j].Score
 	})
 
@@ -909,8 +943,8 @@ func (hs *HybridSearcher) applyReranking(hits []SearchHit, query string, topN in
 		}
 	}
 
-	// Re-sort by new scores
-	sort.Slice(candidates, func(i, j int) bool {
+	// Re-sort by new scores, stably.
+	sort.SliceStable(candidates, func(i, j int) bool {
 		return candidates[i].Score > candidates[j].Score
 	})
 
@@ -1040,6 +1074,52 @@ func (hs *HybridSearcher) tokenize(text string) []string {
 	return tokens
 }
 
+// normalizeToReciprocalRank rewrites Score onto the same scale fusion uses.
+//
+// Issue #77: the single-strategy modes passed their native score straight
+// through. Lexical mode returned raw SQLite bm25 -- negative-is-better,
+// unbounded, and not comparable between queries -- under the same JSON `score`
+// key that fusion fills with a small positive RRF value. A client had no way to
+// know which convention it was reading, and no way to compare the two.
+//
+// The chosen normalization is the reciprocal rank itself:
+//
+//	score(rank) = 1/(k + rank)
+//
+// which is exactly what fusion computes for a hit that one strategy found at
+// that rank. So a lexical-mode result and a single-strategy fusion result now
+// carry not merely comparable numbers but the SAME number. It is monotone
+// decreasing in rank, positive, bounded by 1/(k+1), and loses nothing a caller
+// could act on: the underlying bm25 magnitude was never comparable across
+// queries, only the ordering was, and the ordering is preserved exactly.
+func (hs *HybridSearcher) normalizeToReciprocalRank(hits []SearchHit) {
+	for i := range hits {
+		hits[i].Score = 1.0 / float64(hs.rrfConstant+i+1)
+	}
+}
+
+// singleStrategyResult builds the result envelope for a mode that ran exactly
+// one strategy, so that Confidence and StrategiesUsed are populated the way
+// fusion populates them (issue #77: searchFTSOnly and searchSemanticOnly left
+// both fields at their zero values, and a client reading `confidence` could not
+// tell "not computed" from "no confidence").
+func (hs *HybridSearcher) singleStrategyResult(hits []SearchHit, totalHits int) *HybridSearchResult {
+	hs.normalizeToReciprocalRank(hits)
+
+	strategiesUsed := 0
+	if len(hits) > 0 {
+		strategiesUsed = 1
+	}
+
+	return &HybridSearchResult{
+		Results:        hits,
+		TotalHits:      totalHits,
+		StrategiesUsed: strategiesUsed,
+		Confidence: hs.calculateOverallConfidence(
+			hits, agreementInfo{chunkStrategies: map[string][]SearchStrategy{}}, strategiesUsed, false),
+	}
+}
+
 // searchFTSOnly performs FTS5-only search.
 func (hs *HybridSearcher) searchFTSOnly(ctx context.Context, query string, opts HybridSearchOptions) *HybridSearchResult {
 	ftsOpts := SearchOptions{
@@ -1061,11 +1141,9 @@ func (hs *HybridSearcher) searchFTSOnly(ctx context.Context, query string, opts 
 		}
 	}
 
-	return &HybridSearchResult{
-		Results:   result.Results,
-		TotalHits: result.TotalHits,
-		FTSHits:   len(result.Results),
-	}
+	out := hs.singleStrategyResult(result.Results, result.TotalHits)
+	out.FTSHits = len(result.Results)
+	return out
 }
 
 // searchSemanticOnly performs semantic-only search.
@@ -1105,11 +1183,13 @@ func (hs *HybridSearcher) searchSemanticOnly(ctx context.Context, query string, 
 		})
 	}
 
-	return &HybridSearchResult{
-		Results:      hits,
-		TotalHits:    result.TotalHits,
-		SemanticHits: len(hits),
-	}
+	// Semantic-only goes through the same normalization as lexical-only, so
+	// HybridSearcher.Score means one thing in every mode. Callers that want the
+	// raw cosine similarity call SemanticSearcher directly -- kbservice's
+	// "semantic" search mode does exactly that and is unaffected.
+	out := hs.singleStrategyResult(hits, result.TotalHits)
+	out.SemanticHits = len(hits)
+	return out
 }
 
 // HasSemanticSearch returns true if semantic search is available.
@@ -1156,6 +1236,9 @@ func (hs *HybridSearcher) SearchWithFallback(ctx context.Context, query string, 
 		relaxedResult.Confidence = "low"
 		relaxedResult.Note = "Using relaxed matching - verify relevance"
 		relaxedResult.SearchTime = float64(time.Since(start).Milliseconds())
+		relaxedResult.Query = query
+		hs.normalizeToReciprocalRank(relaxedResult.Results)
+		assignRanks(relaxedResult.Results)
 		return relaxedResult, nil
 	}
 
@@ -1168,6 +1251,9 @@ func (hs *HybridSearcher) SearchWithFallback(ctx context.Context, query string, 
 		partialResult.Confidence = "speculative"
 		partialResult.Note = "Partial word matching - results may not fully match query"
 		partialResult.SearchTime = float64(time.Since(start).Milliseconds())
+		partialResult.Query = query
+		hs.normalizeToReciprocalRank(partialResult.Results)
+		assignRanks(partialResult.Results)
 		return partialResult, nil
 	}
 
@@ -1289,7 +1375,7 @@ func (hs *HybridSearcher) searchPartial(ctx context.Context, query string, opts 
 	// where more negative is a better match -- searcher.go orders by `score ASC`
 	// for exactly that reason -- so a descending sort put the worst match at
 	// rank 1 on every query that reached this rung.
-	sort.Slice(allHits, func(i, j int) bool {
+	sort.SliceStable(allHits, func(i, j int) bool {
 		return allHits[i].Score < allHits[j].Score
 	})
 

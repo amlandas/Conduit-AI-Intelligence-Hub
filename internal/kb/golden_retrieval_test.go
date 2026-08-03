@@ -253,14 +253,16 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 		},
 		{
 			// The control: a genuine double-quoted phrase still selects lexical
-			// mode.
+			// mode. #77: its score is now on the same reciprocal-rank scale
+			// fusion uses -- 1/(60+1) for rank 1 -- rather than raw negative
+			// bm25, and Confidence and StrategiesUsed are populated.
 			name:           "a double-quoted phrase still selects lexical mode",
 			query:          `"summer's day"`,
 			wantMode:       HybridModeLexical,
 			wantDocs:       []string{"05-sonnet-18"},
-			wantTopScore:   -1.2461497559769139,
-			wantConfidence: "", // KNOWN GAP: searchFTSOnly never sets Confidence or StrategiesUsed. Fixed by #77.
-			wantStrategies: 0,
+			wantTopScore:   0.01639344262295082,
+			wantConfidence: "medium",
+			wantStrategies: 1,
 		},
 		{
 			name:           "no match returns an empty fusion result",
@@ -304,8 +306,12 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 
 // TestGolden_MMRReordersFinalRanking pins the fact that the final ranking is
 // NOT sorted by the Score field: MMR runs last and reorders for diversity while
-// leaving Score untouched. Consumers that re-sort by Score get a different order
-// than the one Conduit returned.
+// leaving Score untouched.
+//
+// #77 made that safe rather than silent: SearchHit.Rank now carries the
+// authoritative position, so a consumer has something to trust instead of
+// having to infer the order from a field that no longer implies it. See
+// TestIssue77_RankIsAuthoritative.
 func TestGolden_MMRReordersFinalRanking(t *testing.T) {
 	gi := ingestGoldenCorpus(t)
 	ctx := context.Background()
