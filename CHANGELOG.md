@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [2.0.0-beta] - Unreleased
+
+### v2 Rebuild (in progress)
+
+Conduit v2 is a ground-up simplification: **one binary, zero containers, zero external services.**
+
+- SQLite becomes the only store: FTS5 + vectors (sqlite-vec) + metadata in one file
+- Embeddings served by a bundled llama-server sidecar (Ollama becomes optional)
+- MCP server ported to the official Go SDK (2026-07-28 spec) + new lexical search tool
+- Retired: daemon, Qdrant, FalkorDB, Docker/Podman requirement, Electron desktop app
+- Plan and status: `.eng-lead-kb/IMPLEMENTATION-PLAN-V2.md`
+
+---
+
 ## [1.0.42] - 2026-01-07
 
 ### V1.0 Release - Private Knowledge Base for AI Tools
