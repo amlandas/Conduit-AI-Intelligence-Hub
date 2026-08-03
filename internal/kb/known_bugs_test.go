@@ -16,15 +16,34 @@ package kb
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/simpleflo/conduit/internal/embed"
 )
+
+// errStubSemanticDown is the failure stubSemanticProvider reports.
+var errStubSemanticDown = errors.New("semantic backend down")
+
+// stubSemanticProvider is a SemanticProvider returning fixed hits or a fixed
+// error, so the semantic-only branch can be driven without an embedder.
+type stubSemanticProvider struct {
+	hits []SemanticSearchHit
+	err  error
+}
+
+func (s stubSemanticProvider) Search(context.Context, string, SemanticSearchOptions) (*SemanticSearchResult, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &SemanticSearchResult{Results: s.hits, TotalHits: len(s.hits)}, nil
+}
 
 // ISSUE #69 -- FIXED in WP-3.4 by deletion. Regression test.
 //
@@ -542,6 +561,55 @@ func TestIssue77_ResponseContract(t *testing.T) {
 						q, res.FallbackLevel, h.Rank, h.Score)
 				}
 			}
+		}
+	})
+
+	t.Run("semantic-only mode is normalized too", func(t *testing.T) {
+		// A stub provider returning cosine-scale scores. Before #77 these came
+		// straight through, so `score` meant cosine in semantic mode, bm25 in
+		// lexical mode and RRF in fusion -- three conventions, one field.
+		stub := stubSemanticProvider{hits: []SemanticSearchHit{
+			{DocumentID: "d1", ChunkID: "c1", Title: "One", Score: 0.93},
+			{DocumentID: "d2", ChunkID: "c2", Title: "Two", Score: 0.41},
+		}}
+		hs := NewHybridSearcherWith(gi.Searcher, stub)
+
+		res, err := hs.Search(ctx, "anything", HybridSearchOptions{Limit: 10, Mode: HybridModeSemantic})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(res.Results) != 2 {
+			t.Fatalf("got %d results, want 2", len(res.Results))
+		}
+		for i, h := range res.Results {
+			want := 1.0 / float64(DefaultRRFConstant+i+1)
+			if math.Abs(h.Score-want) > 1e-12 {
+				t.Errorf("rank %d score = %.12f, want %.12f (reciprocal rank)", i+1, h.Score, want)
+			}
+			if h.Rank != i+1 {
+				t.Errorf("rank %d has Rank %d", i+1, h.Rank)
+			}
+		}
+		if res.Confidence != "medium" || res.StrategiesUsed != 1 {
+			t.Errorf("confidence=%q strategies=%d, want medium/1", res.Confidence, res.StrategiesUsed)
+		}
+		if res.SemanticHits != 2 {
+			t.Errorf("SemanticHits = %d, want 2", res.SemanticHits)
+		}
+	})
+
+	t.Run("a failing semantic provider is signalled, not silently empty", func(t *testing.T) {
+		hs := NewHybridSearcherWith(gi.Searcher, stubSemanticProvider{err: errStubSemanticDown})
+
+		res, err := hs.Search(ctx, "anything", HybridSearchOptions{Limit: 10, Mode: HybridModeSemantic})
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if !res.DegradedMode || res.Confidence != "none" {
+			t.Errorf("degraded=%v confidence=%q, want true/none", res.DegradedMode, res.Confidence)
+		}
+		if !strings.Contains(res.Note, "Semantic search failed") {
+			t.Errorf("note does not name the failure: %q", res.Note)
 		}
 	})
 
