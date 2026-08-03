@@ -29,7 +29,6 @@ const (
 	bug69Fixed = false // #69 adaptive query-type weighting is dead code
 	bug70Fixed = false // #70 any apostrophe forces lexical-only search
 	bug71Fixed = false // #71 embedding client has no timeout
-	bug72Fixed = false // #72 chunkID ignores its index parameter
 	bug73Fixed = false // #73 fallback ladder: inverted sort and stripped wildcards
 )
 
@@ -297,65 +296,70 @@ func TestKnownBug_Issue71(t *testing.T) {
 	}
 }
 
-// KNOWN BUG #72 -- this test documents current broken behavior. WP-3.4 flips these assertions.
-// Correct behavior: chunkID must mix its index parameter (and ideally a document identifier)
-// into the hash, so that identical text in two places gets two distinct chunk ids.
+// ISSUE #72 -- FIXED in WP-3.4. Regression test.
 //
-// Mechanism (verified against internal/kb/chunker.go on branch v2):
+// Was: Chunker.chunkID(content, index) hashed the content alone, so two
+// documents sharing a paragraph verbatim got one chunk id for it, and the index
+// parameter was accepted and discarded. Indexer.Index papered over this by
+// overwriting every id with its OWN generator, generateUniqueChunkID -- two
+// functions that could disagree about the identity of the same chunk.
 //
-//	:178-181  func (c *Chunker) chunkID(content string, index int) string {
-//	              h := sha256.Sum256([]byte(content))
-//	              return "chunk_" + hex.EncodeToString(h[:8])
-//	          }
-//
-// `index` is accepted and never read. Two documents that share a paragraph get
-// the same chunk id for it.
-//
-// Blast radius note: Indexer.Index does NOT use these ids. It calls
-// generateUniqueChunkID(documentID, content, index) at indexer.go:463 and
-// overwrites Chunk.ChunkID before insert, which is why the collision does not
-// corrupt SQLite today. Anything that consumes Chunker output directly --
-// chunker.go:453 within ChunkSmart, and any future caller -- is exposed.
-func TestKnownBug_Issue72(t *testing.T) {
+// Now: kb.ChunkID(documentID, index, content) is the only chunk-id function in
+// the package; the chunker and the indexer both call it.
+func TestIssue72_ChunkIDsIncludeDocumentAndIndex(t *testing.T) {
 	c := NewChunker()
 
-	// Two different "documents" that happen to share a paragraph verbatim.
+	// Two different documents that happen to share a paragraph verbatim.
 	// This is exactly the shape of the boilerplate paragraph shared by
 	// 06-fixture-lantern-keeper.txt and 07-fixture-harbour-ledger.txt.
 	shared := "Boilerplate notice: this paragraph is repeated verbatim in another fixture document."
-	docA := c.Chunk(shared, ChunkOptions{MaxSize: 1000})
-	docB := c.Chunk(shared, ChunkOptions{MaxSize: 1000})
+	docA := c.Chunk(shared, ChunkOptions{MaxSize: 1000, DocumentID: "docA"})
+	docB := c.Chunk(shared, ChunkOptions{MaxSize: 1000, DocumentID: "docB"})
 
 	if len(docA) != 1 || len(docB) != 1 {
 		t.Fatalf("fixture drifted: got %d and %d chunks, want 1 each", len(docA), len(docB))
 	}
 
-	if bug72Fixed {
-		// Correct behaviour: identical text in two documents gets two ids.
-		if docA[0].ChunkID == docB[0].ChunkID {
-			t.Errorf("identical content in two documents still collides: %s", docA[0].ChunkID)
-		}
-		if c.chunkID("same", 0) == c.chunkID("same", 7) {
-			t.Errorf("chunkID still ignores its index parameter")
-		}
-	} else {
-		// Current behaviour: content-only hashing, so both collide.
-		if docA[0].ChunkID != docB[0].ChunkID {
-			t.Errorf("expected a cross-document chunk id collision; got %s and %s", docA[0].ChunkID, docB[0].ChunkID)
-		}
-		if c.chunkID("same", 0) != c.chunkID("same", 7) {
-			t.Errorf("expected chunkID to ignore its index parameter")
+	if docA[0].ChunkID == docB[0].ChunkID {
+		t.Errorf("identical content in two documents still collides: %s", docA[0].ChunkID)
+	}
+	if ChunkID("d", 0, "same") == ChunkID("d", 7, "same") {
+		t.Errorf("ChunkID ignores its index parameter")
+	}
+	if ChunkID("docA", 0, "same") == ChunkID("docB", 0, "same") {
+		t.Errorf("ChunkID ignores its document parameter")
+	}
+
+	// There is exactly one id function, and the indexer uses it: an indexed
+	// chunk carries the id the chunker would have produced for the same
+	// document, index and content.
+	gi := ingestGoldenCorpus(t)
+	ctx := context.Background()
+	chunks, err := gi.Indexer.GetChunks(ctx, "06-fixture-lantern-keeper")
+	if err != nil {
+		t.Fatalf("GetChunks: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected indexed chunks")
+	}
+	for i, ch := range chunks {
+		if want := ChunkID("06-fixture-lantern-keeper", i, ch.Content); ch.ChunkID != want {
+			t.Errorf("indexed chunk %d has id %s, want %s -- the indexer is not using kb.ChunkID", i, ch.ChunkID, want)
 		}
 	}
 
-	// The indexer's own id generator is the thing that saves the database
-	// today. It is unaffected by this bug and must keep behaving this way.
-	idx := NewIndexer(nil)
-	if idx.generateUniqueChunkID("docA", shared, 0) == idx.generateUniqueChunkID("docB", shared, 0) {
-		t.Errorf("Indexer.generateUniqueChunkID must not collide across documents")
+	// And the corpus really does contain duplicate content across documents, so
+	// the collision this fix prevents is reachable in practice.
+	keeper, err := gi.Indexer.GetChunks(ctx, "07-fixture-harbour-ledger")
+	if err != nil {
+		t.Fatalf("GetChunks: %v", err)
 	}
-	if idx.generateUniqueChunkID("docA", shared, 0) == idx.generateUniqueChunkID("docA", shared, 1) {
-		t.Errorf("Indexer.generateUniqueChunkID must not collide across chunk indexes")
+	for _, a := range chunks {
+		for _, b := range keeper {
+			if a.ChunkID == b.ChunkID {
+				t.Errorf("chunk id %s is shared across two documents", a.ChunkID)
+			}
+		}
 	}
 }
 

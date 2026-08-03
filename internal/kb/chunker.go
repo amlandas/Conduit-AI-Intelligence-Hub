@@ -3,6 +3,7 @@ package kb
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -73,7 +74,7 @@ func (c *Chunker) Chunk(content string, opts ChunkOptions) []Chunk {
 
 	if utf8.RuneCountInString(content) <= opts.MaxSize {
 		return []Chunk{{
-			ChunkID:   c.chunkID(content, 0),
+			ChunkID:   ChunkID(opts.DocumentID, 0, content),
 			Index:     0,
 			Content:   content,
 			StartChar: 0,
@@ -109,7 +110,7 @@ func (c *Chunker) splitRecursive(content string, opts ChunkOptions) []Chunk {
 		trimmedText := strings.TrimSpace(chunkText)
 		if len(trimmedText) > 0 {
 			chunks = append(chunks, Chunk{
-				ChunkID:   c.chunkID(trimmedText, index),
+				ChunkID:   ChunkID(opts.DocumentID, index, trimmedText),
 				Index:     index,
 				Content:   trimmedText,
 				StartChar: currentPos,
@@ -174,9 +175,20 @@ func (c *Chunker) findBestSplit(text string, splitters []string, maxSize int) in
 	return maxSize
 }
 
-// chunkID generates a unique ID for a chunk.
-func (c *Chunker) chunkID(content string, index int) string {
-	h := sha256.Sum256([]byte(content))
+// ChunkID derives the identifier for one chunk.
+//
+// This is the ONLY chunk-id function in the package. Issue #72 was two of them:
+// Chunker.chunkID hashed content alone (so a paragraph repeated in two
+// documents produced one id) while Indexer.generateUniqueChunkID hashed
+// document + index + content and silently overwrote the chunker's id at insert
+// time. The two could -- and did -- disagree, so anything consuming Chunker
+// output directly saw colliding ids while the database saw unique ones.
+//
+// The hashed payload is "documentID:index:content", byte-for-byte what the
+// indexer already used. That is deliberate: existing knowledge bases keep their
+// chunk ids, so vectors stored against them are not orphaned.
+func ChunkID(documentID string, index int, content string) string {
+	h := sha256.Sum256(fmt.Appendf(nil, "%s:%d:%s", documentID, index, content))
 	return "chunk_" + hex.EncodeToString(h[:8])
 }
 
@@ -250,7 +262,7 @@ func (c *Chunker) chunkSentenceAware(content string, opts ChunkOptions) []Chunk 
 
 	if utf8.RuneCountInString(content) <= opts.MaxSize {
 		return []Chunk{{
-			ChunkID:   c.chunkID(content, 0),
+			ChunkID:   ChunkID(opts.DocumentID, 0, content),
 			Index:     0,
 			Content:   content,
 			StartChar: 0,
@@ -279,7 +291,7 @@ func (c *Chunker) chunkSentenceAware(content string, opts ChunkOptions) []Chunk 
 			chunkContent := strings.TrimSpace(currentChunk.String())
 			if len(chunkContent) > 0 {
 				chunks = append(chunks, Chunk{
-					ChunkID:   c.chunkID(chunkContent, index),
+					ChunkID:   ChunkID(opts.DocumentID, index, chunkContent),
 					Index:     index,
 					Content:   chunkContent,
 					StartChar: chunkStart,
@@ -310,7 +322,7 @@ func (c *Chunker) chunkSentenceAware(content string, opts ChunkOptions) []Chunk 
 		chunkContent := strings.TrimSpace(currentChunk.String())
 		if len(chunkContent) > 0 {
 			chunks = append(chunks, Chunk{
-				ChunkID:   c.chunkID(chunkContent, index),
+				ChunkID:   ChunkID(opts.DocumentID, index, chunkContent),
 				Index:     index,
 				Content:   chunkContent,
 				StartChar: chunkStart,
@@ -417,7 +429,7 @@ func (c *Chunker) chunkCode(content string, path string, opts ChunkOptions) []Ch
 
 	if utf8.RuneCountInString(content) <= opts.MaxSize {
 		return []Chunk{{
-			ChunkID:   c.chunkID(content, 0),
+			ChunkID:   ChunkID(opts.DocumentID, 0, content),
 			Index:     0,
 			Content:   content,
 			StartChar: 0,
@@ -450,7 +462,7 @@ func (c *Chunker) chunkCode(content string, path string, opts ChunkOptions) []Ch
 				sub.Index = index
 				sub.StartChar += boundary.start
 				sub.EndChar += boundary.start
-				sub.ChunkID = c.chunkID(sub.Content, index)
+				sub.ChunkID = ChunkID(opts.DocumentID, index, sub.Content)
 				if sub.Metadata == nil {
 					sub.Metadata = make(map[string]string)
 				}
@@ -460,7 +472,7 @@ func (c *Chunker) chunkCode(content string, path string, opts ChunkOptions) []Ch
 			}
 		} else {
 			chunk := Chunk{
-				ChunkID:   c.chunkID(blockContent, index),
+				ChunkID:   ChunkID(opts.DocumentID, index, blockContent),
 				Index:     index,
 				Content:   blockContent,
 				StartChar: boundary.start,
@@ -613,7 +625,7 @@ func (c *Chunker) chunkMarkdown(content string, opts ChunkOptions) []Chunk {
 
 	if utf8.RuneCountInString(content) <= opts.MaxSize {
 		return []Chunk{{
-			ChunkID:   c.chunkID(content, 0),
+			ChunkID:   ChunkID(opts.DocumentID, 0, content),
 			Index:     0,
 			Content:   content,
 			StartChar: 0,
@@ -678,7 +690,7 @@ func (c *Chunker) chunkMarkdown(content string, opts ChunkOptions) []Chunk {
 func (c *Chunker) createChunksFromSection(content string, offset int, opts ChunkOptions, startIndex int) []Chunk {
 	if utf8.RuneCountInString(content) <= opts.MaxSize {
 		return []Chunk{{
-			ChunkID:   c.chunkID(content, startIndex),
+			ChunkID:   ChunkID(opts.DocumentID, startIndex, content),
 			Index:     startIndex,
 			Content:   content,
 			StartChar: offset,
@@ -717,7 +729,7 @@ func (c *Chunker) chunkPDF(content string, opts ChunkOptions) []Chunk {
 
 	if utf8.RuneCountInString(content) <= opts.MaxSize {
 		return []Chunk{{
-			ChunkID:   c.chunkID(content, 0),
+			ChunkID:   ChunkID(opts.DocumentID, 0, content),
 			Index:     0,
 			Content:   content,
 			StartChar: 0,
@@ -746,7 +758,7 @@ func (c *Chunker) chunkPDF(content string, opts ChunkOptions) []Chunk {
 			chunkContent := strings.TrimSpace(currentChunk.String())
 			if len(chunkContent) > 0 {
 				chunks = append(chunks, Chunk{
-					ChunkID:   c.chunkID(chunkContent, index),
+					ChunkID:   ChunkID(opts.DocumentID, index, chunkContent),
 					Index:     index,
 					Content:   chunkContent,
 					StartChar: chunkStart,
@@ -777,7 +789,7 @@ func (c *Chunker) chunkPDF(content string, opts ChunkOptions) []Chunk {
 		chunkContent := strings.TrimSpace(currentChunk.String())
 		if len(chunkContent) > 0 {
 			chunks = append(chunks, Chunk{
-				ChunkID:   c.chunkID(chunkContent, index),
+				ChunkID:   ChunkID(opts.DocumentID, index, chunkContent),
 				Index:     index,
 				Content:   chunkContent,
 				StartChar: chunkStart,

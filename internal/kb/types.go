@@ -94,6 +94,14 @@ type ChunkOptions struct {
 	MaxSize   int      // Max chunk size in characters
 	Overlap   int      // Overlap between chunks
 	Splitters []string // Priority-ordered split points
+
+	// DocumentID identifies the document being chunked. It is mixed into every
+	// generated ChunkID (see ChunkID), which is what keeps a paragraph that
+	// appears verbatim in two documents from producing one shared id.
+	//
+	// Leaving it empty is legal -- ids stay unique within the document -- but
+	// any caller that persists chunks must set it. Indexer.Index does.
+	DocumentID string
 }
 
 // FileMetadata contains file metadata for indexing.

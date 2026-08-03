@@ -6,6 +6,8 @@ package kb
 // that are NOT among the tracked issues #69-#73.
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"strings"
 	"testing"
 )
@@ -237,41 +239,57 @@ func TestChunker_EstimateVsActual(t *testing.T) {
 	}
 }
 
+// TestChunker_IDsTable covers kb.ChunkID, the single chunk-id function left
+// after issue #72 (see chunker.go). An id is a function of document identity,
+// chunk index and chunk content -- all three.
 func TestChunker_IDsTable(t *testing.T) {
-	c := NewChunker()
-
 	tests := []struct {
 		name     string
+		aDoc     string
 		a        string
 		aIndex   int
+		bDoc     string
 		b        string
 		bIndex   int
 		wantSame bool
 		notes    string
 	}{
-		{name: "same content, same index", a: "hello", aIndex: 0, b: "hello", bIndex: 0, wantSame: true},
+		{name: "same document, content and index", aDoc: "d", a: "hello", aIndex: 0, bDoc: "d", b: "hello", bIndex: 0, wantSame: true},
 		{
-			name: "KNOWN BUG #72: same content, different index still collides",
-			a:    "hello", aIndex: 0, b: "hello", bIndex: 9, wantSame: true,
-			notes: "chunkID hashes only the content; the index parameter is accepted and discarded",
+			name: "issue #72 fixed: same content at a different index is a different chunk",
+			aDoc: "d", a: "hello", aIndex: 0, bDoc: "d", b: "hello", bIndex: 9, wantSame: false,
+			notes: "the index is now part of the hashed payload",
 		},
-		{name: "different content", a: "hello", aIndex: 0, b: "world", bIndex: 0, wantSame: false},
-		{name: "whitespace difference changes the id", a: "hello ", aIndex: 0, b: "hello", bIndex: 0, wantSame: false},
+		{
+			name: "issue #72 fixed: identical content in two documents does not collide",
+			aDoc: "docA", a: "shared paragraph", aIndex: 0, bDoc: "docB", b: "shared paragraph", bIndex: 0, wantSame: false,
+			notes: "the document id is part of the hashed payload",
+		},
+		{name: "different content", aDoc: "d", a: "hello", aIndex: 0, bDoc: "d", b: "world", bIndex: 0, wantSame: false},
+		{name: "whitespace difference changes the id", aDoc: "d", a: "hello ", aIndex: 0, bDoc: "d", b: "hello", bIndex: 0, wantSame: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := c.chunkID(tt.a, tt.aIndex) == c.chunkID(tt.b, tt.bIndex)
+			got := ChunkID(tt.aDoc, tt.aIndex, tt.a) == ChunkID(tt.bDoc, tt.bIndex, tt.b)
 			if got != tt.wantSame {
-				t.Errorf("chunkID collision = %v, want %v\n%s", got, tt.wantSame, tt.notes)
+				t.Errorf("ChunkID collision = %v, want %v\n%s", got, tt.wantSame, tt.notes)
 			}
 		})
 	}
 
 	// The id format is part of the on-disk contract for the vector store.
-	id := c.chunkID("anything", 0)
+	id := ChunkID("doc", 0, "anything")
 	if !strings.HasPrefix(id, "chunk_") || len(id) != len("chunk_")+16 {
 		t.Errorf("chunk id format changed: %q (want chunk_ + 16 hex characters)", id)
+	}
+
+	// The hashed payload must stay byte-identical to the one the old
+	// Indexer.generateUniqueChunkID used, or every already-indexed knowledge
+	// base loses the link between its chunks and its stored vectors.
+	want := sha256.Sum256([]byte("doc:3:body text"))
+	if got := ChunkID("doc", 3, "body text"); got != "chunk_"+hex.EncodeToString(want[:8]) {
+		t.Errorf("ChunkID payload changed: %s -- existing knowledge bases would be orphaned", got)
 	}
 }
 
