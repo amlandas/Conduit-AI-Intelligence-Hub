@@ -68,6 +68,51 @@ func TestUninstall_PrefixDoesNotReachOutsideIt(t *testing.T) {
 	}
 }
 
+// The data directory is shared between installs and sits outside every prefix.
+// A prefix-scoped uninstall that deleted it would be the worst possible
+// violation of what --prefix promises, because the thing lost is the knowledge
+// base rather than a 13MB binary that can be rebuilt.
+func TestUninstall_PrefixNeverRemovesTheDataDirectory(t *testing.T) {
+	home := isolate(t)
+	dataDir := filepath.Join(home, ".conduit")
+
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	db := filepath.Join(dataDir, "conduit.db")
+	if err := os.WriteFile(db, []byte("pretend sqlite"), 0o644); err != nil {
+		t.Fatalf("write db: %v", err)
+	}
+
+	scratch := t.TempDir()
+	if err := os.WriteFile(filepath.Join(scratch, "conduit"), []byte("bin"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// RemoveDataDir and RemoveConfigOnly both have to be neutralised, or the
+	// gate only half exists.
+	for _, opts := range []UninstallOptions{
+		{RemoveBinaries: true, RemoveDataDir: true, Force: true, Prefix: scratch},
+		{RemoveBinaries: true, RemoveConfigOnly: true, Force: true, Prefix: scratch},
+	} {
+		cfgFile := filepath.Join(dataDir, "conduit.yaml")
+		if err := os.WriteFile(cfgFile, []byte("kb: {}\n"), 0o644); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+
+		if _, err := Uninstall(context.Background(), dataDir, opts); err != nil {
+			t.Fatalf("Uninstall: %v", err)
+		}
+
+		if _, err := os.Stat(db); err != nil {
+			t.Fatalf("--prefix deleted the knowledge base: %v", err)
+		}
+		if _, err := os.Stat(cfgFile); err != nil {
+			t.Errorf("--prefix deleted the config file: %v", err)
+		}
+	}
+}
+
 // Without a prefix the default locations are still swept, or the flag's
 // existence would have quietly changed normal uninstall behaviour.
 func TestUninstall_NoPrefixRemovesDefaultLocations(t *testing.T) {
@@ -89,6 +134,29 @@ func TestUninstall_NoPrefixRemovesDefaultLocations(t *testing.T) {
 	}
 	if _, err := os.Stat(realBin); !os.IsNotExist(err) {
 		t.Error("the default-location binary survived an unprefixed uninstall")
+	}
+}
+
+// The gate above must not have disabled data removal for everyone else.
+func TestUninstall_NoPrefixStillRemovesTheDataDirectory(t *testing.T) {
+	home := isolate(t)
+	dataDir := filepath.Join(home, ".conduit")
+
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "conduit.db"), []byte("db"), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	opts := NewUninstallOptionsAll()
+	opts.Force = true
+
+	if _, err := Uninstall(context.Background(), dataDir, opts); err != nil {
+		t.Fatalf("Uninstall: %v", err)
+	}
+	if _, err := os.Stat(dataDir); !os.IsNotExist(err) {
+		t.Error("--all did not remove the data directory")
 	}
 }
 

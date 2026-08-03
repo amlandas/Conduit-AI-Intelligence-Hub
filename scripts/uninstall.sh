@@ -138,6 +138,16 @@ if [[ -n "$PREFIX" ]]; then
     SYMLINK_PATHS=()
 fi
 
+# The data directory is shared between installs and lives outside every prefix,
+# so --prefix and --remove-data ask for contradictory things. Refusing is the
+# only safe reading: the alternative is deleting a knowledge base on the
+# strength of a guess about which half the user meant.
+if [[ -n "$PREFIX" && "$REMOVE_DATA" == true ]]; then
+    die "--prefix and --remove-data are mutually exclusive.
+  --prefix removes one install; --remove-data deletes the shared data directory.
+  Run them separately if you mean both."
+fi
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -207,7 +217,13 @@ confirm() {
     fi
 
     printf '%s' "$prompt"
-    read -r answer
+    # `read` returns non-zero on EOF (Ctrl-D). Left bare, that aborts the whole
+    # script under `set -e` with no message, which looks like a crash rather
+    # than the cancellation it is.
+    if ! read -r answer; then
+        printf '\n'
+        return 1
+    fi
     [[ "$answer" == "$want" ]]
 }
 
@@ -243,7 +259,21 @@ find_binary() {
 
 delegate_to_binary() {
     local conduit="$1"
-    local -a args=("uninstall" "--force")
+
+    # --data-dir must be forwarded, and it must come before the subcommand.
+    # Without it the binary fell back to its own default (~/.conduit) while the
+    # script reported and confirmed against whatever --data-dir named. So
+    # `uninstall.sh --data-dir /tmp/scratch --remove-data` prompted about
+    # /tmp/scratch and then deleted the user's real knowledge base.
+    local -a args=("--data-dir" "$DATA_DIR" "uninstall")
+
+    # --force is forwarded, never assumed. Hardcoding it here meant that
+    # `uninstall.sh --remove-data` -- with no --force anywhere on the command
+    # line -- delegated to `conduit uninstall --force --all`, which skipped the
+    # binary's own "type UNINSTALL to confirm" gate. The script's confirmation
+    # then ran afterwards, against a data directory that was already deleted.
+    # Both prompts existed; neither one fired.
+    [[ "$FORCE" == true ]] && args+=("--force")
 
     if [[ "$REMOVE_DATA" == true ]]; then
         args+=("--all")
@@ -293,6 +323,18 @@ remove_binaries() {
     done
 }
 
+# shell_path_line_pattern matches only what an installer added: the marker
+# comment, or a PATH export naming Conduit's bin directory.
+#
+# It is deliberately not a bare "conduit" search. That would also delete a
+# user's own aliases, comments and unrelated exports that happen to mention the
+# word -- and this fallback runs precisely when no binary is available to do the
+# job properly, so there is nothing to catch the overreach. The Go
+# implementation (internal/setup.stripShellConfig) keys off the same marker.
+shell_path_line_pattern() {
+    printf '%s' "^[[:space:]]*# Conduit|export PATH=.*(\.local/bin|/bin/conduit|conduit)"
+}
+
 remove_shell_path_lines() {
     info "Shell profiles"
 
@@ -303,16 +345,19 @@ remove_shell_path_lines() {
         "${HOME}/.profile"
     )
 
+    local pattern
+    pattern="$(shell_path_line_pattern)"
+
     local file
     for file in "${files[@]}"; do
         [[ -f "$file" ]] || continue
-        grep -q 'conduit' "$file" 2>/dev/null || continue
+        grep -qE "$pattern" "$file" 2>/dev/null || continue
 
         FOUND=$((FOUND + 1))
 
         if [[ "$DRY_RUN" == true ]]; then
-            plan "Conduit lines in $file"
-            grep -n 'conduit' "$file" | sed 's/^/      /'
+            plan "Conduit PATH lines in $file"
+            grep -nE "$pattern" "$file" | sed 's/^/      /'
             continue
         fi
 
@@ -323,11 +368,11 @@ remove_shell_path_lines() {
 
         local tmp
         tmp="$(mktemp)"
-        grep -v 'conduit' "$file" > "$tmp" || true
+        grep -vE "$pattern" "$file" > "$tmp" || true
 
         if mv -f -- "$tmp" "$file"; then
             REMOVED=$((REMOVED + 1))
-            ok "Conduit lines in $file  (backup: $backup)"
+            ok "Conduit PATH lines in $file  (backup: $backup)"
         else
             rm -f -- "$tmp"
             FAILED=$((FAILED + 1))

@@ -279,6 +279,27 @@ func TestDoctorSkipsModelCheckWhenEmbeddingsDisabled(t *testing.T) {
 	t.Error("doctor --json has no embedding model check")
 }
 
+// --prefix removes one install; --all removes the shared data directory, which
+// is outside every prefix. Accepting both would mean guessing which half the
+// user meant, with a knowledge base riding on the guess.
+func TestUninstallRejectsPrefixWithAll(t *testing.T) {
+	env := newTestEnv(t)
+
+	out, code := env.run(t, "uninstall", "--all", "--prefix", t.TempDir(), "--force")
+	if code == 0 {
+		t.Fatalf("--all --prefix was accepted\n%s", out)
+	}
+	if !strings.Contains(out, "mutually exclusive") {
+		t.Errorf("error should say the flags are mutually exclusive:\n%s", out)
+	}
+
+	// Each flag alone must still work, or the guard has broken the feature it
+	// was meant to protect.
+	if _, code := env.run(t, "uninstall", "--keep-data", "--prefix", t.TempDir(), "--force"); code != 0 {
+		t.Errorf("--prefix alone exited %d", code)
+	}
+}
+
 func TestProgressBar(t *testing.T) {
 	cases := []struct {
 		pct   float64

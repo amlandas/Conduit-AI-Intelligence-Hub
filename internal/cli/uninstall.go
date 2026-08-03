@@ -62,6 +62,17 @@ Examples:
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 
+			// --prefix scopes removal to one install directory; --all deletes
+			// the shared data directory, which is not inside any prefix. Asking
+			// for both is a contradiction, and the safe reading of it is not
+			// obvious enough to guess at when the cost of guessing wrong is a
+			// deleted knowledge base.
+			if prefix != "" && all {
+				return fmt.Errorf("--prefix and --all are mutually exclusive: " +
+					"--prefix removes one install, --all removes the shared data directory.\n" +
+					"Run them separately if you mean both")
+			}
+
 			cfg, err := loadConfig()
 			if err != nil {
 				return fmt.Errorf("load config: %w", err)

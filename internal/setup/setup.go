@@ -511,11 +511,20 @@ func Uninstall(ctx context.Context, dataDir string, opts UninstallOptions) (*Uni
 		}
 	}
 
-	switch {
-	case opts.RemoveDataDir:
-		remove("data directory", dataDir, true)
-	case opts.RemoveConfigOnly:
-		remove("config", filepath.Join(dataDir, "conduit.yaml"), false)
+	// The data directory has nothing to do with the prefix a binary was
+	// installed under, so a prefix-scoped uninstall must not delete it. Without
+	// this gate, `--all --prefix /tmp/scratch` wiped the real ~/.conduit while
+	// reporting that it had touched only the scratch directory -- the exact
+	// opposite of what Prefix promises. Callers should reject that flag
+	// combination outright; this is the backstop that makes the promise true
+	// for every caller of the library.
+	if opts.Prefix == "" {
+		switch {
+		case opts.RemoveDataDir:
+			remove("data directory", dataDir, true)
+		case opts.RemoveConfigOnly:
+			remove("config", filepath.Join(dataDir, "conduit.yaml"), false)
+		}
 	}
 
 	return result, nil
