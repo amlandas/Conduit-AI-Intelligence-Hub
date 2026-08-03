@@ -42,8 +42,8 @@ If fewer than two of those clauses describe you, the folder or the upload button
 
 ## Caveats, since this page promised honesty
 
-- Conduit v1's install is heavy for what it does: containers plus local models. A single-binary rebuild is under evaluation, and whether it happens depends on whether enough people recognize themselves in the paragraph above.
-- Search results go to your AI client verbatim. If you index documents you don't trust, whatever instructions they contain reach your AI as tool output (prompt injection). Index what you trust.
+- Conduit v1's install was heavy for what it did: containers plus local models. **That rebuild happened.** Conduit 2.0 is a single binary with no daemon, no containers and no external services; everything lives in one SQLite file. See [what changed in v2](../README.md#what-changed-in-v2).
+- Search results go to your AI client verbatim. If you index documents you don't trust, whatever instructions they contain reach your AI as tool output (prompt injection). Index what you trust, and keep untrusted corpora in a separate knowledge base with `--db`. See [SEC-003](KNOWN_ISSUES.md).
 - Don't take retrieval quality on faith, from us or anyone. Test it on your own material against the simplest alternative before adopting any tool in this category.
 
 *If you read this and thought "I just use X and it works fine," that's useful information. Tell us. Collecting exactly that signal is what this page is for.*
