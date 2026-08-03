@@ -226,7 +226,10 @@ canonicalize_path() {
 # other byte for byte. Device and inode are what the kernel itself uses to
 # decide whether two names are one directory, and they cannot be spelled around.
 path_identity() {
-    stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null || printf ''
+    # -L dereferences: we must compare the identity of the TARGET, not the link.
+    # Without it /etc (a symlink to /private/etc on macOS) and /private/etc get
+    # different identities, and the guard refuses one spelling but not the other.
+    stat -L -f '%d:%i' "$1" 2>/dev/null || stat -L -c '%d:%i' "$1" 2>/dev/null || printf ''
 }
 
 # protected_dirs lists every path that must never be a Conduit data directory.
