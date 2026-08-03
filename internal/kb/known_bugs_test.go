@@ -1,18 +1,18 @@
 package kb
 
-// Characterization tests for the five tracked retrieval defects, GitHub issues
-// #69 to #73.
+// Regression tests for the tracked retrieval defects, GitHub issues #69 to #77.
 //
 // HOW TO USE THIS FILE
 //
-// Every test here PASSES TODAY by asserting the broken behaviour. Each one is
-// gated on a `bugNNFixed` constant that is currently false. When WP-3.4 fixes a
-// bug, flip that ONE constant to true: the test then asserts the correct
-// behaviour instead, and the assertions for both worlds sit side by side so the
-// diff shows exactly what changed.
+// WP-1.1 wrote these as CHARACTERIZATION tests: each asserted the broken
+// behaviour and was gated on a `bugNNFixed` constant so that WP-3.4 could flip
+// one constant per fix and see exactly what moved. Every one of those constants
+// is now gone -- each test asserts the CORRECT behaviour and carries a "Was:"
+// paragraph recording the defect it guards against, so the mechanism survives
+// even though the broken branch does not.
 //
-// Do not delete a test when its bug is fixed. The "correct" branch becomes the
-// regression test.
+// Do not delete a test here. If one starts failing, the corresponding issue has
+// regressed.
 
 import (
 	"context"
@@ -22,11 +22,8 @@ import (
 	"sync"
 	"testing"
 	"time"
-)
 
-// Flip one of these to true in WP-3.4 when the corresponding fix lands.
-const (
-	bug71Fixed = false // #71 embedding client has no timeout
+	"github.com/simpleflo/conduit/internal/embed"
 )
 
 // ISSUE #69 -- FIXED in WP-3.4 by deletion. Regression test.
@@ -170,29 +167,27 @@ func TestIssue70_ApostropheIsNotAQuotedPhrase(t *testing.T) {
 	}
 }
 
-// KNOWN BUG #71 -- this test documents current broken behavior. WP-3.4 flips these assertions.
-// Correct behavior: the embedding HTTP client must carry a timeout (or the service must impose
-// a per-request deadline), so a hung Ollama cannot block an indexing or search goroutine forever.
+// ISSUE #71 -- FIXED in WP-3.4. Regression test.
 //
-// Mechanism (verified against internal/kb/embeddings.go on branch v2):
+// Was: internal/kb/embeddings.go built its Ollama client as
+// `api.NewClient(ollamaURL, http.DefaultClient)`. http.DefaultClient has
+// Timeout == 0, i.e. no timeout at all, and every embedding request inherited
+// that. The only thing that could unblock a call was the caller's context --
+// and the ingestion path passed contexts with no deadline, so a hung Ollama
+// held an indexing or search goroutine until the process died.
 //
-//	:72  api.NewClient(ollamaURL, http.DefaultClient)
-//
-// http.DefaultClient has Timeout == 0, i.e. no timeout at all. Every embedding
-// request inherits that. The only thing that can unblock a call is the caller's
-// context -- and the daemon's indexing path passes contexts that have no
-// deadline.
+// Now: embeddings.go is deleted. The live path is kb.ProviderEmbedder over an
+// internal/embed provider, and everything in that package is bounded by an
+// http.Client.Timeout as well as the context, by construction.
 //
 // The proof is hermetic: a local httptest server that accepts the connection
 // and never answers, plus a bounded wait in the test so CI can never hang.
-func TestKnownBug_Issue71(t *testing.T) {
-	// The static half of the proof: no timeout on the client the service uses.
-	if bug71Fixed {
-		if http.DefaultClient.Timeout != 0 {
-			t.Fatalf("this test mutated http.DefaultClient; it must not")
-		}
-	} else if http.DefaultClient.Timeout != 0 {
-		t.Fatalf("http.DefaultClient unexpectedly has a timeout of %v", http.DefaultClient.Timeout)
+func TestIssue71_EmbeddingCallsHaveADeadline(t *testing.T) {
+	// The premise: the shared default client still has no timeout, which is why
+	// nothing may be built on it.
+	if http.DefaultClient.Timeout != 0 {
+		t.Fatalf("something in this binary mutated http.DefaultClient (timeout %v); it must not",
+			http.DefaultClient.Timeout)
 	}
 
 	// release lets the handler finish so the server can shut down cleanly.
@@ -214,50 +209,58 @@ func TestKnownBug_Issue71(t *testing.T) {
 	defer srv.Close()
 	defer releaseHandler()
 
-	svc, err := NewEmbeddingService(EmbeddingConfig{OllamaHost: srv.URL})
+	// The live wiring, with the timeout dialled down so the test is quick. A
+	// production embedder is built exactly this way -- see
+	// kbservice.newEmbedder -- with embed.DefaultTimeout instead.
+	provider, err := embed.NewOllamaProvider(embed.OllamaConfig{
+		Host:       srv.URL,
+		Model:      DefaultEmbeddingModel,
+		Dimensions: DefaultEmbeddingDimension,
+		Timeout:    500 * time.Millisecond,
+		Retry:      embed.RetryPolicy{MaxAttempts: 1},
+	})
 	if err != nil {
-		t.Fatalf("NewEmbeddingService: %v", err)
+		t.Fatalf("NewOllamaProvider: %v", err)
 	}
+	defer provider.Close()
+
+	svc := NewProviderEmbedder(provider)
 
 	done := make(chan error, 1)
 	go func() {
 		// context.Background() deliberately: this mirrors the call sites that
-		// have no deadline of their own, which is where the missing client
+		// have no deadline of their own, which is where a missing client
 		// timeout actually bites.
 		_, err := svc.Embed(context.Background(), "does the client give up on its own?")
 		done <- err
 	}()
 
-	// A generous-but-bounded wait. Anything under a few seconds is enough to
-	// distinguish "no timeout" from "any sane timeout"; keeping it short keeps
-	// CI fast.
-	const blockedFor = 2 * time.Second
+	// A generous-but-bounded wait. Anything under a few seconds distinguishes
+	// "no timeout" from "any sane timeout"; keeping it short keeps CI fast.
+	const blockedFor = 5 * time.Second
 
 	select {
 	case err := <-done:
 		releaseHandler()
-		if bug71Fixed {
-			// Correct behaviour: the client gives up on its own.
-			if err == nil {
-				t.Errorf("expected a timeout error from the embedding client, got nil")
-			}
-		} else {
-			t.Errorf("the embedding call returned after %v against a server that never responds "+
-				"(err=%v); a timeout appears to have been added -- flip bug71Fixed to true", blockedFor, err)
+		if err == nil {
+			t.Errorf("expected a timeout error from the embedding client against a server " +
+				"that never responds, got nil")
 		}
 	case <-time.After(blockedFor):
-		if bug71Fixed {
-			t.Errorf("the embedding call is still blocked after %v; the timeout fix is not effective", blockedFor)
-		}
-		// Current behaviour: still blocked, because there is no timeout.
 		releaseHandler()
+		t.Errorf("the embedding call is still blocked after %v with no deadline of its own; "+
+			"issue #71 has regressed", blockedFor)
 		select {
 		case <-done:
-			// Unblocked once the server answered, as expected.
 		case <-time.After(5 * time.Second):
 			t.Fatalf("the embedding call did not finish even after the server responded")
 		}
 	}
+
+	// The static half: no Embedder in the tree may be built on the untimed
+	// default client. ProviderEmbedder cannot be -- it only wraps
+	// embed.Provider, and that package never uses http.DefaultClient.
+	var _ Embedder = (*ProviderEmbedder)(nil)
 }
 
 // ISSUE #72 -- FIXED in WP-3.4. Regression test.

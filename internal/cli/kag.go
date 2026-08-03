@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/simpleflo/conduit/internal/config"
+	"github.com/simpleflo/conduit/internal/embed"
 	"github.com/simpleflo/conduit/internal/kb"
 	"github.com/simpleflo/conduit/internal/store"
 )
@@ -975,19 +976,29 @@ Examples:
 
 			ctx := cmd.Context()
 
-			// Create embedding service
+			// Create the embedding provider.
+			//
+			// WP-3.4 (#71) repointed this at internal/embed. The old
+			// kb.NewEmbeddingService built its Ollama client on
+			// http.DefaultClient, which has no timeout, so a hung daemon
+			// blocked this command forever. Every internal/embed call is
+			// bounded by an http.Client timeout as well as the context.
 			fmt.Println("Connecting to Ollama...")
-			embeddingSvc, err := kb.NewEmbeddingService(kb.EmbeddingConfig{
-				OllamaHost: ollamaHost,
+			provider, err := embed.NewOllamaProvider(embed.OllamaConfig{
+				Host:       ollamaHost,
+				Model:      kb.DefaultEmbeddingModel,
+				Dimensions: kb.DefaultEmbeddingDimension,
 				BatchSize:  batchSize,
 			})
 			if err != nil {
-				return fmt.Errorf("create embedding service: %w", err)
+				return fmt.Errorf("create embedding provider: %w", err)
 			}
+			defer provider.Close()
+			embeddingSvc := kb.NewProviderEmbedder(provider)
 
-			// Ensure embedding model is available
-			if err := embeddingSvc.EnsureModel(ctx); err != nil {
-				return fmt.Errorf("ensure embedding model: %w", err)
+			// Verify the model is reachable and usable before doing any work.
+			if err := embeddingSvc.HealthCheck(ctx); err != nil {
+				return fmt.Errorf("embedding provider unavailable: %w", err)
 			}
 
 			// Open the entity vector index in the knowledge base file
@@ -1161,13 +1172,16 @@ Examples:
 
 			// Set up hybrid search if requested
 			if hybrid {
-				// Create embedding service
-				embeddingSvc, err := kb.NewEmbeddingService(kb.EmbeddingConfig{
-					OllamaHost: ollamaHost,
+				// Create the embedding provider (#71: bounded by a timeout).
+				provider, err := embed.NewOllamaProvider(embed.OllamaConfig{
+					Host:       ollamaHost,
+					Model:      kb.DefaultEmbeddingModel,
+					Dimensions: kb.DefaultEmbeddingDimension,
 				})
 				if err != nil {
 					fmt.Printf("Warning: Could not connect to Ollama, falling back to lexical search: %v\n", err)
 				} else {
+					embeddingSvc := kb.NewProviderEmbedder(provider)
 					// Open the entity vector index in the knowledge base file
 					vectorIndex, err := kb.NewSQLiteVectorIndex(db.DB(), kb.VectorIndexConfig{
 						Dimension: embeddingSvc.Dimension(),

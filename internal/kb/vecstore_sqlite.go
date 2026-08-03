@@ -60,9 +60,9 @@ const (
 // Interfaces -- the injection seams
 // ---------------------------------------------------------------------------
 
-// Embedder turns text into vectors. *EmbeddingService is the production
-// implementation; tests substitute deterministic fakes so that retrieval can be
-// exercised without Ollama.
+// Embedder turns text into vectors. *ProviderEmbedder, wrapping an
+// internal/embed provider, is the production implementation; tests substitute
+// deterministic fakes so that retrieval can be exercised without a live model.
 type Embedder interface {
 	Embed(ctx context.Context, text string) ([]float32, error)
 	EmbedBatch(ctx context.Context, texts []string) ([][]float32, error)
@@ -97,7 +97,7 @@ type EntityVectorIndex interface {
 
 // Compile-time proof that the production types satisfy the seams.
 var (
-	_ Embedder          = (*EmbeddingService)(nil)
+	_ Embedder          = (*ProviderEmbedder)(nil)
 	_ VectorIndex       = (*SQLiteVectorIndex)(nil)
 	_ EntityVectorIndex = (*SQLiteVectorIndex)(nil)
 )
