@@ -149,6 +149,12 @@ deal of what follows is deletion.
 
 ### Fixed
 
+- MCP handoff: every search hit now prints a `document_id:` line, and
+  `kb_get_document` accepts a document path as an alternative key, so AI
+  clients can go from a search hit to the full document without touching the
+  filesystem — found on the first day of dogfooding
+  ([#91](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/91)).
+
 All nine tracked retrieval defects were fixed at root cause rather than patched
 around, and every characterization test was flipped to an enforcement test.
 ([#84](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/pull/84), on the

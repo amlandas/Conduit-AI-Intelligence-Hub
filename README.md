@@ -182,7 +182,7 @@ state honestly rather than pretending an empty graph is a no-match.
 | `kb_lexical_search` | Pure FTS5/BM25 keyword search. No vectors, no fusion, no diversity filtering — the grep of the knowledge base, for iterative refinement loops. |
 | `kb_search_with_context` | Search returning merged, boilerplate-filtered, citation-ready passages. Best for RAG. |
 | `kb_list_sources` | List sources with IDs, paths, document counts, sync status. |
-| `kb_get_document` | Fetch a full document by ID from a search result. |
+| `kb_get_document` | Fetch a full document by `document_id` (printed on every search hit) or by path. |
 | `kb_stats` | Source, document and chunk counts; search capability status. |
 | `kag_query` | Query the knowledge graph for entities and relationships. |
 

@@ -295,7 +295,7 @@ Seven tools:
 | `kb_lexical_search` | Pure FTS5/BM25 keyword search — no vectors, no fusion, no filtering. The grep of the knowledge base. Best for hunting an exact identifier, error string, symbol or config key, and for iterative refinement loops. |
 | `kb_search_with_context` | Merged, boilerplate-filtered, citation-ready passages. Best when the assistant is going to quote sources. |
 | `kb_list_sources` | Sources with IDs, paths, document counts, sync status. |
-| `kb_get_document` | Full content of one document by ID. |
+| `kb_get_document` | Full content of one document, by `document_id` (printed on every search hit) or by path. |
 | `kb_stats` | Source, document and chunk counts; search capability status. |
 | `kag_query` | Entities and relationships from the knowledge graph (if enabled). |
 
