@@ -4,10 +4,13 @@
 //
 // Values are resolved highest-wins in this order:
 //
-//  1. command-line flags   (bound explicitly via BindFlags)
+//  1. command-line flags   (--db, --data-dir, --log-level)
 //  2. environment          (CONDUIT_* , nested keys use "_" for ".")
-//  3. configuration file   (~/.conduit/conduit.yaml, /etc/conduit, ./conduit.yaml)
+//  3. configuration file   (./conduit.yaml, then ~/.conduit, then /etc/conduit)
 //  4. compiled defaults    (DefaultConfig)
+//
+// Exactly one configuration file is read: the first one found, searched most
+// specific first, so a project directory can override a user's settings.
 //
 // # One schema
 //
@@ -454,11 +457,16 @@ func LoadWithFlags(flags *pflag.FlagSet) (*LoadResult, error) {
 	v.SetConfigName("conduit")
 	v.SetConfigType("yaml")
 
-	// Configuration search paths, first match wins.
+	// Configuration search paths, first match wins: most specific to least.
+	//
+	// The working directory comes first so a project can carry its own
+	// conduit.yaml next to its own knowledge base. Before WP-3.2 the home
+	// directory was searched first, which meant a project-local config could
+	// never take effect once a user config existed.
 	homeDir, _ := os.UserHomeDir()
+	v.AddConfigPath(".")
 	v.AddConfigPath(filepath.Join(homeDir, ".conduit"))
 	v.AddConfigPath("/etc/conduit")
-	v.AddConfigPath(".")
 
 	// Environment: CONDUIT_KB_CHUNK_SIZE -> kb.chunk_size
 	v.SetEnvPrefix("CONDUIT")
