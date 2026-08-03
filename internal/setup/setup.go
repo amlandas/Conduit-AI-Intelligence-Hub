@@ -371,9 +371,19 @@ func GetUninstallInfo(ctx context.Context, dataDir string) (*UninstallInfo, erro
 // installer did, so an existing install still uninstalls cleanly.
 const conduitPathMarker = "# Conduit"
 
+// hasConduitPathLine reports whether a profile carries Conduit's PATH block.
+//
+// Detection has to use the same rule as removal. It used to return true for any
+// file merely mentioning ~/.local/bin, which meant `conduit uninstall --info`
+// reported "shell configuration found" on machines where pipx or uv had written
+// that line and Conduit never had.
 func hasConduitPathLine(content string) bool {
-	return strings.Contains(content, conduitPathMarker) ||
-		strings.Contains(content, localBinDir())
+	for _, line := range strings.Split(content, "\n") {
+		if isConduitPathMarker(line) {
+			return true
+		}
+	}
+	return false
 }
 
 func binaryVersion(ctx context.Context, path string) string {
@@ -518,12 +528,23 @@ func Uninstall(ctx context.Context, dataDir string, opts UninstallOptions) (*Uni
 	// opposite of what Prefix promises. Callers should reject that flag
 	// combination outright; this is the backstop that makes the promise true
 	// for every caller of the library.
-	if opts.Prefix == "" {
+	if opts.Prefix == "" && (opts.RemoveDataDir || opts.RemoveConfigOnly) {
+		// Canonicalise and vet the path here, not only in the wrapper scripts.
+		// This function is called directly by the CLI, by the desktop GUI and
+		// by anything else that links the package, and a guard living only in
+		// uninstall.sh protects none of them.
+		safe, err := AssertRemovableDataDir(dataDir)
+		if err != nil {
+			result.Success = false
+			result.Errors = append(result.Errors, err.Error())
+			return result, err
+		}
+
 		switch {
 		case opts.RemoveDataDir:
-			remove("data directory", dataDir, true)
+			remove("data directory", safe, true)
 		case opts.RemoveConfigOnly:
-			remove("config", filepath.Join(dataDir, "conduit.yaml"), false)
+			remove("config", filepath.Join(safe, "conduit.yaml"), false)
 		}
 	}
 
@@ -532,46 +553,48 @@ func Uninstall(ctx context.Context, dataDir string, opts UninstallOptions) (*Uni
 
 // stripShellConfig removes the PATH block an install added to an rc file.
 //
-// It removes the marker comment and the export line that follows it, and
-// nothing else: a user's own PATH edits are not Conduit's to delete.
+// Matching is strictly the marker comment plus the single line immediately
+// after it. The previous version also deleted any `export PATH` line mentioning
+// ~/.local/bin, which is not a Conduit signature at all: pipx, uv, poetry, pip
+// --user and countless hand-written profiles put that exact directory on PATH,
+// and a dry run against a real machine flagged a line Conduit had never
+// written. Deleting it would silently remove other tools from the user's PATH,
+// and the failure would surface much later as "command not found" for something
+// unrelated to Conduit.
+//
+// The cost of being strict is that a profile edited by hand, without the
+// marker, is left alone. That is the right way round: a leftover PATH entry
+// pointing at a directory that no longer exists is harmless, and a deleted one
+// that other tools needed is not.
 func stripShellConfig(path string, dryRun bool, result *UninstallResult) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil // absent file is not an error
 	}
 	content := string(data)
-	localBin := localBinDir()
-	if !hasConduitPathLine(content) {
+
+	lines := strings.Split(content, "\n")
+	out := make([]string, 0, len(lines))
+	changed := false
+	for i := 0; i < len(lines); i++ {
+		if isConduitPathMarker(lines[i]) {
+			changed = true
+			// The marker introduces exactly one line. Drop both, and drop the
+			// marker alone if it happens to be the last line in the file.
+			if i+1 < len(lines) {
+				i++
+			}
+			continue
+		}
+		out = append(out, lines[i])
+	}
+	if !changed {
 		return nil
 	}
 
 	if dryRun {
 		result.ItemsRemoved = append(result.ItemsRemoved,
 			fmt.Sprintf("[DRY RUN] Would clean PATH entry from %s", path))
-		return nil
-	}
-
-	lines := strings.Split(content, "\n")
-	out := make([]string, 0, len(lines))
-	changed := false
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		// The marker comment introduces the export line; drop both together.
-		if strings.Contains(line, conduitPathMarker) {
-			if i+1 < len(lines) && strings.Contains(lines[i+1], localBin) {
-				i++
-				changed = true
-				continue
-			}
-		}
-		// A bare export of Conduit's bin directory, with no marker above it.
-		if strings.Contains(line, localBin) && strings.Contains(line, "export PATH") {
-			changed = true
-			continue
-		}
-		out = append(out, line)
-	}
-	if !changed {
 		return nil
 	}
 
@@ -582,14 +605,33 @@ func stripShellConfig(path string, dryRun bool, result *UninstallResult) error {
 	}
 	out = append(out, "")
 
-	info, err := os.Stat(path)
 	mode := os.FileMode(0644)
-	if err == nil {
+	if info, serr := os.Stat(path); serr == nil {
 		mode = info.Mode().Perm()
 	}
-	if err := os.WriteFile(path, []byte(strings.Join(out, "\n")), mode); err != nil {
+
+	// Copy aside before rewriting. Atomic replacement guarantees the file is
+	// never truncated; it does not guarantee the edit was the one the user
+	// wanted, and a wrong edit to .zshrc breaks their next login shell.
+	backup, err := backupFile(path)
+	if err != nil {
+		return fmt.Errorf("failed to back up %s: %w", path, err)
+	}
+
+	if err := writeFileAtomic(path, []byte(strings.Join(out, "\n")), mode); err != nil {
 		return fmt.Errorf("failed to clean %s: %w", path, err)
 	}
-	result.ItemsRemoved = append(result.ItemsRemoved, fmt.Sprintf("PATH entry: %s", path))
+	result.ItemsRemoved = append(result.ItemsRemoved,
+		fmt.Sprintf("PATH entry: %s (backup: %s)", path, backup))
 	return nil
+}
+
+// isConduitPathMarker reports whether a line is the comment an installer wrote
+// above the PATH line it added.
+//
+// Anchored to the start of the line so that a user's own prose mentioning
+// "# Conduit" mid-sentence does not trigger a two-line deletion.
+func isConduitPathMarker(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return strings.HasPrefix(trimmed, conduitPathMarker)
 }

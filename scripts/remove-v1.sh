@@ -96,6 +96,9 @@ WHAT IS REMOVED
     - launchd agents: dev.simpleflo.conduit, com.simpleflo.conduit
     - systemd user units: conduit.service, conduit-daemon.service
     - the conduit-daemon binary and its symlinks
+
+WHAT --purge-data ADDS
+    - <data-dir>/qdrant and <data-dir>/falkordb (the v1 container stores)
     - <data-dir>/daemon.log
 
 WHAT IS NEVER REMOVED
@@ -139,37 +142,92 @@ done
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# assert_safe_data_dir refuses a --data-dir that would make the purge paths
-# catastrophic. `--data-dir /` would turn `<data-dir>/qdrant` into `/qdrant`,
-# and `--data-dir $HOME` would aim at ~/qdrant. Neither is a plausible Conduit
-# data directory, and a typo should not be the only thing standing between a
-# user and rm -rf on a directory they care about.
-assert_safe_data_dir() {
-    local dir="$1"
+# canonicalize_path resolves a path the way a deletion will see it.
+#
+# Every interesting way past a deny list is a spelling difference rather than a
+# different directory: "~/", "//", "/.", "/Users/" and "x/.." all name places no
+# guard should accept, and a string comparison waves every one of them through.
+# Trailing separators are not exotic either -- tab completion appends one, so
+# "$HOME/" reaching the check is the normal case.
+#
+# Done lexically, in pure bash, because `realpath -m` is not available on stock
+# macOS and the path frequently does not exist yet.
+canonicalize_path() {
+    local p="$1"
 
-    [[ -n "$dir" ]] || die "--data-dir cannot be empty"
-
-    case "$dir" in
-        /|/usr|/etc|/var|/home|/Users|/opt|/tmp)
-            die "refusing to treat $dir as a Conduit data directory" ;;
+    case "$p" in
+        "~")   p="$HOME" ;;
+        "~/"*) p="${HOME}/${p#\~/}" ;;
     esac
 
-    if [[ "$dir" == "$HOME" ]]; then
-        die "refusing to treat your home directory as a Conduit data directory"
-    fi
+    [[ "$p" == /* ]] || p="$(pwd)/$p"
 
-    # A relative path resolves against whatever directory the script happened to
-    # be run from, which is not something to guess at when removing files.
-    if [[ "$dir" != /* ]]; then
-        die "--data-dir must be an absolute path (got: $dir)"
-    fi
+    local out=() part
+    local oldifs="$IFS"
+    IFS='/'
+    for part in $p; do
+        case "$part" in
+            ''|.) ;;
+            ..) [[ ${#out[@]} -gt 0 ]] && unset "out[$(( ${#out[@]} - 1 ))]" ;;
+            *)  out+=("$part") ;;
+        esac
+    done
+    IFS="$oldifs"
+
+    local result=""
+    for part in ${out[@]+"${out[@]}"}; do
+        result="${result}/${part}"
+    done
+    printf '%s' "${result:-/}"
 }
 
-assert_safe_data_dir "$DATA_DIR"
+# assert_safe_data_dir refuses a --data-dir that would make the purge paths
+# catastrophic, and echoes the canonical form of one that is acceptable.
+#
+# `--data-dir /` would turn `<data-dir>/qdrant` into `/qdrant`, and
+# `--data-dir $HOME` would aim at ~/qdrant. Neither is a plausible Conduit data
+# directory, and a typo should not be the only thing standing between a user and
+# rm -rf on a directory they care about.
+assert_safe_data_dir() {
+    local dir="$1"
+    [[ -n "${dir// /}" ]] || die "--data-dir cannot be empty"
+
+    local canonical
+    canonical="$(canonicalize_path "$dir")"
+
+    local protected
+    for protected in / /usr /etc /var /opt /tmp /bin /sbin /home /Users /root \
+                     /System /Library /Applications /private /dev /proc /boot \
+                     "$(canonicalize_path "$HOME")"; do
+        if [[ "$canonical" == "$protected" ]]; then
+            die "refusing to treat $canonical (resolved from '$dir') as a Conduit data directory"
+        fi
+    done
+
+    # Refused rather than followed: on macOS `rm -rf dir/` empties a symlink's
+    # TARGET while the binary's os.RemoveAll removes only the link, so the two
+    # disagree about what "delete this" means and both lose data doing it.
+    if [[ -L "$canonical" ]]; then
+        die "$canonical is a symlink to $(readlink "$canonical").
+  Removing it would either delete the link and keep your data, or delete the
+  data and keep the link, depending on the tool. Re-run against the resolved
+  path if you mean to delete the data."
+    fi
+
+    printf '%s' "$canonical"
+}
+
+DATA_DIR="$(assert_safe_data_dir "$DATA_DIR")"
 
 # remove_path deletes a file or directory, honouring dry-run.
+#
+# The path is canonicalised first so that no caller can pass a trailing
+# separator through to `rm -rf`, which on macOS is the difference between
+# removing a symlink and emptying whatever it points at.
 remove_path() {
     local path="$1" label="${2:-$1}"
+
+    path="$(canonicalize_path "$path")"
 
     [[ -e "$path" || -L "$path" ]] || return 0
     FOUND=$((FOUND + 1))
@@ -419,9 +477,29 @@ remove_binaries() {
 
 remove_v1_logs() {
     info "v1 logs"
-    # The daemon log describes a daemon that no longer exists. It is not user
-    # content and carries no data, so it goes without --purge-data.
-    remove_path "${DATA_DIR}/daemon.log" "${DATA_DIR}/daemon.log"
+
+    local log="${DATA_DIR}/daemon.log"
+    if [[ ! -e "$log" ]]; then
+        printf '%s\n' "  none present"
+        return 0
+    fi
+
+    # Gated behind --purge-data, even though a dead daemon's log is not user
+    # content in any meaningful sense.
+    #
+    # It lives under the data directory, and the help says in as many words that
+    # nothing under the data directory is touched without --purge-data, while
+    # the summary prints "No user data was touched". Deleting it anyway made
+    # both statements false, and a teardown script whose documented safety
+    # guarantees are only approximately true is worth less than one that removes
+    # slightly less.
+    if [[ "$PURGE_DATA" != true ]]; then
+        FOUND=$((FOUND + 1))
+        found "$log  (kept; pass --purge-data to remove)"
+        return 0
+    fi
+
+    remove_path "$log" "$log  (--purge-data)"
 }
 
 report_or_purge_data() {

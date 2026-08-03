@@ -13,6 +13,14 @@ import (
 	setuppkg "github.com/simpleflo/conduit/internal/setup"
 )
 
+// exitCodeUserCancelled is returned when the user declines a confirmation.
+//
+// It has to be distinguishable from both success and failure. A wrapper script
+// that cannot tell "the user typed something other than UNINSTALL" from "the
+// uninstall completed" will carry on and remove the binary the user just
+// declined to remove -- which is precisely what happened before this existed.
+const exitCodeUserCancelled = 3
+
 // uninstallCmd removes Conduit
 func uninstallCmd() *cobra.Command {
 	var (
@@ -67,7 +75,16 @@ Examples:
 			// for both is a contradiction, and the safe reading of it is not
 			// obvious enough to guess at when the cost of guessing wrong is a
 			// deleted knowledge base.
-			if prefix != "" && all {
+			//
+			// Keyed off whether the flag was *given*, not whether it is
+			// non-empty. `--prefix ""` set prefix to the empty string, which
+			// slipped this check and then meant "no prefix" downstream: the
+			// user asked to scope the removal and got a full-scope one.
+			prefixGiven := cmd.Flags().Changed("prefix")
+			if prefixGiven && strings.TrimSpace(prefix) == "" {
+				return fmt.Errorf("--prefix requires a directory (got an empty value)")
+			}
+			if prefixGiven && all {
 				return fmt.Errorf("--prefix and --all are mutually exclusive: " +
 					"--prefix removes one install, --all removes the shared data directory.\n" +
 					"Run them separately if you mean both")
@@ -136,7 +153,7 @@ Examples:
 					opts = setuppkg.NewUninstallOptionsAll()
 				default:
 					fmt.Println("Uninstallation cancelled.")
-					return nil
+					return exitWith(exitCodeUserCancelled)
 				}
 			}
 
@@ -145,17 +162,55 @@ Examples:
 			opts.JSON = jsonOutput
 			opts.Prefix = prefix
 
-			// Confirmation for data removal (unless --force or --dry-run)
-			if !force && !dryRun && opts.RemoveDataDir {
-				fmt.Println()
-				fmt.Println("⚠  WARNING: This will permanently delete all Conduit data!")
-				fmt.Println()
-				reader := bufio.NewReader(os.Stdin)
-				fmt.Print("Type 'UNINSTALL' to confirm: ")
-				confirm, _ := reader.ReadString('\n')
-				if strings.TrimSpace(confirm) != "UNINSTALL" {
-					fmt.Println("Uninstallation cancelled.")
-					return nil
+			// Data removal is vetted and confirmed against the RESOLVED
+			// directory.
+			//
+			// dataDir comes from config, and config precedence includes a
+			// conduit.yaml in the working directory -- so the path about to be
+			// deleted is not necessarily the one the user has in mind, and the
+			// old prompt ("this will permanently delete all Conduit data")
+			// never said which one it was. The single fact needed to catch the
+			// mistake was the fact it omitted.
+			if opts.RemoveDataDir && !dryRun {
+				resolved, serr := setuppkg.AssertRemovableDataDir(dataDir)
+				if serr != nil {
+					return serr
+				}
+				dataDir = resolved
+				summary := setuppkg.SummarizeDataDir(resolved)
+
+				// A directory with none of Conduit's own files in it is almost
+				// certainly a mistyped --data-dir. Deleting it recursively on
+				// the strength of a typo is not a risk worth taking silently.
+				if summary.Exists && !summary.LooksLikeConduit && !force {
+					return fmt.Errorf("%s contains no conduit.db or conduit.yaml, so it does not look like a Conduit data directory.\n"+
+						"Refusing to delete it. Check --data-dir, or pass --force if you are certain", resolved)
+				}
+
+				if !force {
+					fmt.Println()
+					fmt.Println("⚠  WARNING: this permanently deletes the directory below.")
+					fmt.Println()
+					fmt.Printf("    %s\n", resolved)
+					if summary.Exists {
+						fmt.Printf("    %s on disk\n", summary.Size)
+					} else {
+						fmt.Println("    (does not exist)")
+					}
+					fmt.Println()
+
+					reader := bufio.NewReader(os.Stdin)
+					fmt.Print("Type 'UNINSTALL' to confirm: ")
+					confirm, rerr := reader.ReadString('\n')
+					if rerr != nil || strings.TrimSpace(confirm) != "UNINSTALL" {
+						fmt.Println("Uninstallation cancelled.")
+						// Non-zero, and distinct from a failure. A wrapper
+						// script has to be able to tell "the user said no" from
+						// "it worked"; returning 0 here is what let uninstall.sh
+						// carry on and delete the binary after the user had
+						// just declined.
+						return exitWith(exitCodeUserCancelled)
+					}
 				}
 			}
 

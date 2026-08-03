@@ -30,7 +30,16 @@ set -euo pipefail
 
 readonly BINARY="conduit"
 
+# EXIT_USER_CANCELLED mirrors the binary's own exit code for "the user declined
+# a confirmation". It must stay distinct from both success and failure, or a
+# caller cannot tell a refusal from a completed uninstall.
+readonly EXIT_USER_CANCELLED=3
+
 DATA_DIR="${CONDUIT_DATA_DIR:-${HOME}/.conduit}"
+# Tracks whether the user named a data directory or we defaulted to one. The
+# distinction decides whether --data-dir is forwarded to the binary: forwarding
+# a default would override the user's configured data_dir.
+DATA_DIR_EXPLICIT=false
 PREFIX=""
 REMOVE_DATA=false
 FORCE=false
@@ -121,9 +130,10 @@ while [[ $# -gt 0 ]]; do
         --dry-run)     DRY_RUN=true; shift ;;
         --data-dir)
             [[ $# -ge 2 ]] || die "--data-dir requires a directory"
-            DATA_DIR="$2"; shift 2 ;;
+            DATA_DIR="$2"; DATA_DIR_EXPLICIT=true; shift 2 ;;
         --prefix)
             [[ $# -ge 2 ]] || die "--prefix requires a directory"
+            [[ -n "${2// /}" ]] || die "--prefix requires a directory (got an empty value)"
             PREFIX="$2"; shift 2 ;;
         -h|--help)     usage; exit 0 ;;
         *)             die "unknown option: $1 (try --help)" ;;
@@ -154,31 +164,83 @@ fi
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
-# assert_safe_data_dir refuses a --data-dir that --remove-data would turn into a
-# catastrophe. `--data-dir /` or `--data-dir $HOME` is a typo, not an intent,
-# and the confirmation prompt is not enough on its own: it asks about deleting
-# "the data directory", and the user answering has no reason to suspect it now
-# means their entire home.
-assert_safe_data_dir() {
-    local dir="$1"
+# canonicalize_path resolves a path the way a deletion will see it.
+#
+# Every interesting way past a deny list is a spelling difference rather than a
+# different directory: "~/", "//", "/.", "/Users/" and "x/.." all name places no
+# guard should accept, and a string comparison waves every one of them through.
+# Trailing separators are not exotic either -- tab completion appends one, so
+# "$HOME/" reaching the check is the normal case.
+#
+# Done lexically, in pure bash, because `realpath -m` is not available on stock
+# macOS and the path frequently does not exist yet.
+canonicalize_path() {
+    local p="$1"
 
-    [[ -n "$dir" ]] || die "--data-dir cannot be empty"
-
-    case "$dir" in
-        /|/usr|/etc|/var|/home|/Users|/opt|/tmp)
-            die "refusing to treat $dir as a Conduit data directory" ;;
+    case "$p" in
+        "~")   p="$HOME" ;;
+        "~/"*) p="${HOME}/${p#\~/}" ;;
     esac
 
-    if [[ "$dir" == "$HOME" ]]; then
-        die "refusing to treat your home directory as a Conduit data directory"
-    fi
+    [[ "$p" == /* ]] || p="$(pwd)/$p"
 
-    if [[ "$dir" != /* ]]; then
-        die "--data-dir must be an absolute path (got: $dir)"
-    fi
+    local out=() part
+    local oldifs="$IFS"
+    IFS='/'
+    for part in $p; do
+        case "$part" in
+            ''|.) ;;
+            ..) [[ ${#out[@]} -gt 0 ]] && unset "out[$(( ${#out[@]} - 1 ))]" ;;
+            *)  out+=("$part") ;;
+        esac
+    done
+    IFS="$oldifs"
+
+    local result=""
+    for part in ${out[@]+"${out[@]}"}; do
+        result="${result}/${part}"
+    done
+    printf '%s' "${result:-/}"
 }
 
-assert_safe_data_dir "$DATA_DIR"
+# assert_safe_data_dir refuses a --data-dir that --remove-data would turn into a
+# catastrophe, and echoes the canonical form of one that is acceptable.
+#
+# The confirmation prompt is not a substitute for this. It asks about deleting
+# "the data directory", and a user who has just fat-fingered a path has no
+# reason to read that as "your entire home".
+assert_safe_data_dir() {
+    local dir="$1"
+    [[ -n "${dir// /}" ]] || die "--data-dir cannot be empty"
+
+    local canonical
+    canonical="$(canonicalize_path "$dir")"
+
+    local protected
+    for protected in / /usr /etc /var /opt /tmp /bin /sbin /home /Users /root \
+                     /System /Library /Applications /private /dev /proc /boot \
+                     "$(canonicalize_path "$HOME")"; do
+        if [[ "$canonical" == "$protected" ]]; then
+            die "refusing to treat $canonical (resolved from '$dir') as a Conduit data directory"
+        fi
+    done
+
+    # A symlinked data directory is refused rather than followed, because the
+    # two obvious behaviours disagree and both lose: on macOS `rm -rf dir/`
+    # empties the TARGET and keeps the link, while the binary's os.RemoveAll
+    # removes the link and keeps the data. Refusing is the only answer that is
+    # the same in the script and in the binary.
+    if [[ -L "$canonical" ]]; then
+        die "$canonical is a symlink to $(readlink "$canonical").
+  Removing it would either delete the link and keep your data, or delete the
+  data and keep the link, depending on the tool. Re-run against the resolved
+  path if you mean to delete the data."
+    fi
+
+    printf '%s' "$canonical"
+}
+
+DATA_DIR="$(assert_safe_data_dir "$DATA_DIR")"
 
 remove_path() {
     local path="$1"
@@ -257,15 +319,52 @@ find_binary() {
 # script would be the one that is wrong.
 # ---------------------------------------------------------------------------
 
+# binary_supports reports whether a binary's help text advertises a flag.
+#
+# Version 1 binaries have no --prefix and no --data-dir. Passing an unknown flag
+# to them is not a soft failure: cobra exits non-zero without doing anything,
+# which used to be indistinguishable from "the uninstall failed" and dropped the
+# whole run into the manual path -- the dangerous one -- on every v1 machine.
+binary_supports() {
+    local conduit="$1" flag="$2" help_text
+
+    # Captured, not piped into `grep -q`.
+    #
+    # grep -q exits at the first match, which SIGPIPEs the still-writing binary;
+    # under `pipefail` the pipeline then reports 141 and the probe concludes the
+    # flag is unsupported. Whether that happened depended on which process was
+    # scheduled first, so it made the probe intermittently claim every binary
+    # was a v1 one.
+    help_text="$("$conduit" uninstall --help 2>&1 || true)"
+
+    case "$help_text" in
+        *"$flag"*) return 0 ;;
+        *)         return 1 ;;
+    esac
+}
+
 delegate_to_binary() {
     local conduit="$1"
+    local -a args=()
 
-    # --data-dir must be forwarded, and it must come before the subcommand.
-    # Without it the binary fell back to its own default (~/.conduit) while the
-    # script reported and confirmed against whatever --data-dir named. So
-    # `uninstall.sh --data-dir /tmp/scratch --remove-data` prompted about
-    # /tmp/scratch and then deleted the user's real knowledge base.
-    local -a args=("--data-dir" "$DATA_DIR" "uninstall")
+    # --data-dir is forwarded ONLY when the user actually passed it.
+    #
+    # Forwarding it unconditionally is the mirror image of not forwarding it at
+    # all: the script's default (~/.conduit) would override a data_dir the user
+    # had configured in conduit.yaml, and the binary would then act on a
+    # directory its own configuration says is the wrong one.
+    if [[ "$DATA_DIR_EXPLICIT" == true ]]; then
+        if binary_supports "$conduit" "--data-dir"; then
+            args+=("--data-dir" "$DATA_DIR")
+        else
+            die "$conduit does not support --data-dir (it looks like a Conduit 1.x binary).
+  Refusing to delegate: it would act on its own default data directory instead
+  of the one you named, which is how a wrapper deletes the wrong thing.
+  Remove that binary first, or re-run without --data-dir."
+        fi
+    fi
+
+    args+=("uninstall")
 
     # --force is forwarded, never assumed. Hardcoding it here meant that
     # `uninstall.sh --remove-data` -- with no --force anywhere on the command
@@ -281,21 +380,48 @@ delegate_to_binary() {
         args+=("--keep-data")
     fi
     [[ "$DRY_RUN" == true ]] && args+=("--dry-run")
+
     # Without this, `uninstall.sh --prefix /tmp/x` would delegate to a binary
     # that then removes the copy in ~/.local/bin: the exact install the flag
-    # promised to leave alone.
-    [[ -n "$PREFIX" ]] && args+=("--prefix" "$PREFIX")
+    # promised to leave alone. A binary too old to understand --prefix cannot
+    # honour that promise, so it is not asked to try.
+    if [[ -n "$PREFIX" ]]; then
+        if binary_supports "$conduit" "--prefix"; then
+            args+=("--prefix" "$PREFIX")
+        else
+            die "$conduit does not support --prefix (it looks like a Conduit 1.x binary).
+  Refusing to delegate: it would remove the install in ~/.local/bin rather than
+  the one in $PREFIX. Delete $PREFIX/$BINARY by hand instead."
+        fi
+    fi
 
     info "Delegating to ${conduit} uninstall"
 
-    # A binary that cannot run -- wrong architecture, missing library, or
-    # simply broken -- must not stop the uninstall. Fall through to the manual
-    # path instead.
-    if ! "$conduit" "${args[@]}"; then
-        warn "'${conduit} uninstall' failed; falling back to manual removal"
-        return 1
-    fi
-    return 0
+    local rc=0
+    "$conduit" "${args[@]}" || rc=$?
+
+    case "$rc" in
+        0) return 0 ;;
+        "$EXIT_USER_CANCELLED")
+            # The user declined the binary's confirmation. Carrying on would
+            # delete the binary they just refused to remove and then ask them
+            # the same question again, which is how a "no" became a "yes".
+            printf '\n%s\n' "${C_YELLOW}Cancelled at your request. Nothing further was removed.${C_RESET}"
+            exit "$EXIT_USER_CANCELLED"
+            ;;
+        *)
+            # Not a fallback. The manual path is strictly less careful than the
+            # binary -- it cannot safely edit JSON configs and it knows less
+            # about what was installed -- so silently downgrading to it after a
+            # failure is how a wrapper does damage the tool it wrapped refused
+            # to do.
+            die "'${conduit} uninstall' failed (exit $rc).
+  Refusing to fall back to manual removal: the binary is the careful path, and
+  something about this machine made it stop. Fix that first, or remove the
+  files by hand.
+  Re-run with --dry-run to see what would have been removed."
+            ;;
+    esac
 }
 
 # ---------------------------------------------------------------------------
@@ -323,16 +449,38 @@ remove_binaries() {
     done
 }
 
-# shell_path_line_pattern matches only what an installer added: the marker
-# comment, or a PATH export naming Conduit's bin directory.
+# CONDUIT_PATH_MARKER is the comment an installer writes above the PATH line it
+# adds. It is the ONLY signature used, and it must stay identical to
+# conduitPathMarker in internal/setup/setup.go.
 #
-# It is deliberately not a bare "conduit" search. That would also delete a
-# user's own aliases, comments and unrelated exports that happen to mention the
-# word -- and this fallback runs precisely when no binary is available to do the
-# job properly, so there is nothing to catch the overreach. The Go
-# implementation (internal/setup.stripShellConfig) keys off the same marker.
-shell_path_line_pattern() {
-    printf '%s' "^[[:space:]]*# Conduit|export PATH=.*(\.local/bin|/bin/conduit|conduit)"
+# The previous pattern also matched any `export PATH` line mentioning
+# .local/bin. That is not a Conduit signature: pipx, uv, poetry and pip --user
+# all put that directory on PATH, and a dry run against a real machine flagged a
+# line Conduit had never written. Deleting it would have removed other tools
+# from the user's PATH, surfacing much later as "command not found" for
+# something unrelated to Conduit.
+#
+# Being strict means a hand-edited profile with no marker is left alone. That is
+# the right way round: a stale PATH entry pointing at a directory that no longer
+# exists is harmless, and a deleted one that other tools needed is not.
+readonly CONDUIT_PATH_MARKER='^[[:space:]]*# Conduit'
+
+# profile_has_marker reports whether a file carries Conduit's marker comment.
+profile_has_marker() {
+    grep -qE "$CONDUIT_PATH_MARKER" "$1" 2>/dev/null
+}
+
+# strip_conduit_path_block removes each marker line and the single line that
+# follows it, writing the result to stdout.
+#
+# awk rather than grep -v: the block is two lines and only the first is
+# identifiable, so a line-independent filter cannot express it.
+strip_conduit_path_block() {
+    awk '
+        skip == 1 { skip = 0; next }
+        /^[[:space:]]*# Conduit/ { skip = 1; next }
+        { print }
+    ' "$1"
 }
 
 remove_shell_path_lines() {
@@ -345,19 +493,16 @@ remove_shell_path_lines() {
         "${HOME}/.profile"
     )
 
-    local pattern
-    pattern="$(shell_path_line_pattern)"
-
     local file
     for file in "${files[@]}"; do
         [[ -f "$file" ]] || continue
-        grep -qE "$pattern" "$file" 2>/dev/null || continue
+        profile_has_marker "$file" || continue
 
         FOUND=$((FOUND + 1))
 
         if [[ "$DRY_RUN" == true ]]; then
-            plan "Conduit PATH lines in $file"
-            grep -nE "$pattern" "$file" | sed 's/^/      /'
+            plan "Conduit PATH block in $file"
+            grep -nE -A1 "$CONDUIT_PATH_MARKER" "$file" | sed 's/^/      /'
             continue
         fi
 
@@ -368,17 +513,44 @@ remove_shell_path_lines() {
 
         local tmp
         tmp="$(mktemp)"
-        grep -vE "$pattern" "$file" > "$tmp" || true
+
+        # An awk failure must not be mistaken for "nothing matched". The old
+        # code ended in `|| true`, which swallowed every non-zero exit --
+        # including a read error or a full disk -- and then moved the resulting
+        # empty file over the user's profile.
+        local rc=0
+        strip_conduit_path_block "$file" > "$tmp" || rc=$?
+        if [[ "$rc" -ne 0 ]]; then
+            rm -f -- "$tmp"
+            FAILED=$((FAILED + 1))
+            bad "$file (could not be rewritten; left unchanged, backup: $backup)"
+            continue
+        fi
+
+        # Preserve the original permissions. mktemp creates 0600, so moving it
+        # into place unchanged would silently tighten a profile that was
+        # deliberately group-readable.
+        local mode
+        mode="$(file_mode "$file")"
+        chmod "$mode" "$tmp" 2>/dev/null || true
 
         if mv -f -- "$tmp" "$file"; then
             REMOVED=$((REMOVED + 1))
-            ok "Conduit PATH lines in $file  (backup: $backup)"
+            ok "Conduit PATH block in $file  (backup: $backup)"
         else
             rm -f -- "$tmp"
             FAILED=$((FAILED + 1))
             bad "$file"
         fi
     done
+}
+
+# file_mode prints a file's permission bits as an octal string.
+file_mode() {
+    local m
+    # BSD stat (macOS) and GNU stat (Linux) disagree on flags; try both.
+    m="$(stat -f '%Lp' "$1" 2>/dev/null || stat -c '%a' "$1" 2>/dev/null || true)"
+    printf '%s' "${m:-644}"
 }
 
 remove_mcp_entries_manually() {
@@ -444,6 +616,26 @@ remove_data_dir() {
     remove_path "$DATA_DIR"
 }
 
+# preview_fallback shows what the manual path would do, without doing it.
+#
+# It runs the same reporting functions the fallback uses, with DRY_RUN forced
+# on, so the preview cannot drift away from the behaviour it describes. The
+# counters are restored afterwards: this is a hypothetical, and it must not
+# inflate the summary for the path that is actually running.
+preview_fallback() {
+    local saved_found="$FOUND" saved_removed="$REMOVED" saved_failed="$FAILED"
+    local saved_dry="$DRY_RUN"
+
+    DRY_RUN=true
+    remove_shell_path_lines
+    remove_mcp_entries_manually
+    DRY_RUN="$saved_dry"
+
+    FOUND="$saved_found"
+    REMOVED="$saved_removed"
+    FAILED="$saved_failed"
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -482,6 +674,14 @@ main() {
     elif [[ "$delegated" != true && -n "$PREFIX" ]]; then
         info "Shell profiles and MCP entries"
         printf '%s\n' "  skipped: --prefix targets one install, these are shared"
+    elif [[ "$DRY_RUN" == true ]]; then
+        # A dry run that only previews the delegated path is not a preview of
+        # the run the user is about to make. If the binary is missing or broken
+        # on the day, the real run takes the fallback -- which touches shell
+        # profiles and reports MCP entries -- and none of that appeared here.
+        printf '\n'
+        info "If the binary were unavailable, the fallback would also:"
+        preview_fallback
     fi
 
     remove_data_dir

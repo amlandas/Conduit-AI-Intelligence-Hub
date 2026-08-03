@@ -207,14 +207,6 @@ Examples:
 				return fmt.Errorf("create data directory: %w", err)
 			}
 
-			// --force means "fetch it again regardless"; the simplest honest
-			// implementation is to drop the existing file first.
-			if force {
-				if err := os.Remove(spec.LocalPath(cfg.DataDir)); err != nil && !os.IsNotExist(err) {
-					return fmt.Errorf("remove existing model: %w", err)
-				}
-			}
-
 			ctx := cmd.Context()
 			if ctx == nil {
 				ctx = context.Background()
@@ -225,7 +217,10 @@ Examples:
 				defer cancel()
 			}
 
-			d := &embed.Downloader{}
+			// Force only skips the "already present and verified" shortcut. The
+			// existing model is replaced by the verified atomic rename, so an
+			// interrupted or offline --force leaves the working copy intact.
+			d := &embed.Downloader{Force: force}
 			if !jsonOutput {
 				fmt.Fprintf(os.Stderr, "Downloading %s (%s)\n", spec.ID, humanBytes(spec.SizeBytes))
 				fmt.Fprintf(os.Stderr, "  from %s\n", spec.DownloadURL())
@@ -269,7 +264,8 @@ Examples:
 	}
 
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
-	cmd.Flags().BoolVar(&force, "force", false, "Re-download even if a valid copy exists")
+	cmd.Flags().BoolVar(&force, "force", false,
+		"Re-download even if a valid copy exists (the existing file is kept until the new one verifies)")
 	cmd.Flags().DurationVar(&timeout, "timeout", 0, "Abort the download after this long (e.g. 30m)")
 	return cmd
 }

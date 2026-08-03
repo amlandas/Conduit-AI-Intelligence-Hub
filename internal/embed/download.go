@@ -113,6 +113,12 @@ type Downloader struct {
 
 	// Progress, if non-nil, receives throttled transfer updates.
 	Progress func(ProgressEvent)
+
+	// Force re-fetches the artifact even when a verified copy is already on
+	// disk. It skips the already-present short-circuit and nothing else: the
+	// existing file is replaced by the atomic rename at the end of a successful
+	// download, never deleted up front.
+	Force bool
 }
 
 // client returns the HTTP client to use.
@@ -178,26 +184,36 @@ func (d *Downloader) Download(ctx context.Context, spec ModelSpec, dataDir strin
 
 	// Already there and correct? Nothing to do. This is what makes `conduit
 	// model download` safe to put in an install script.
-	if sum, err := hashFile(dest); err == nil {
-		if strings.EqualFold(sum, spec.SHA256) {
-			info, statErr := os.Stat(dest)
-			var size int64
-			if statErr == nil {
-				size = info.Size()
+	//
+	// Force skips this short-circuit and nothing else. It deliberately does NOT
+	// delete the existing file first: the download lands in a temp file and is
+	// renamed over the destination only after its hash matches, so the working
+	// model stays in place and usable right up to the instant a verified
+	// replacement exists. Deleting first meant that `--force` on a flaky
+	// connection -- or interrupted with Ctrl-C, or run offline by mistake --
+	// left the machine with no model at all, having destroyed a good one to go
+	// looking for an identical copy.
+	if !d.Force {
+		if sum, err := hashFile(dest); err == nil {
+			if strings.EqualFold(sum, spec.SHA256) {
+				info, statErr := os.Stat(dest)
+				var size int64
+				if statErr == nil {
+					size = info.Size()
+				}
+				d.emit(ProgressEvent{ModelID: spec.ID, Downloaded: size, Total: spec.SizeBytes, Done: true})
+				return &DownloadResult{
+					ModelID:        spec.ID,
+					Path:           dest,
+					Bytes:          size,
+					SHA256:         sum,
+					AlreadyPresent: true,
+				}, nil
 			}
-			d.emit(ProgressEvent{ModelID: spec.ID, Downloaded: size, Total: spec.SizeBytes, Done: true})
-			return &DownloadResult{
-				ModelID:        spec.ID,
-				Path:           dest,
-				Bytes:          size,
-				SHA256:         sum,
-				AlreadyPresent: true,
-			}, nil
-		}
-		// Wrong bytes at our own path: unusable, and keeping it would make the
-		// sidecar fail later with a much worse error than this one.
-		if err := os.Remove(dest); err != nil {
-			return nil, fmt.Errorf("embed: remove corrupt model at %s: %w", dest, err)
+			// Wrong bytes at our own path. The file is unusable, but it is not
+			// removed here either: the verified rename replaces it, and if the
+			// download fails the user still has whatever they had before, which
+			// is no worse than nothing.
 		}
 	}
 

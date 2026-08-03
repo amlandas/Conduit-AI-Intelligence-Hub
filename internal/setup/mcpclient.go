@@ -122,7 +122,7 @@ func ConfigureMCPClient(clientID string, force bool) (*ConfigureResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	if err := os.WriteFile(client.ConfigPath, data, 0644); err != nil {
+	if err := writeFileAtomic(client.ConfigPath, data, configFileMode(client.ConfigPath)); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
@@ -187,12 +187,29 @@ func RemoveMCPClient(clientID string) (*RemoveResult, error) {
 	if err != nil {
 		return nil, fmt.Errorf("marshal config: %w", err)
 	}
-	if err := os.WriteFile(client.ConfigPath, out, 0644); err != nil {
+	// Atomic replacement. ~/.claude.json holds every MCP server the user has
+	// configured plus Claude Code's own state; a truncating write that dies
+	// part way through costs them all of it, and an uninstall is exactly the
+	// moment nobody is watching closely.
+	if err := writeFileAtomic(client.ConfigPath, out, configFileMode(client.ConfigPath)); err != nil {
 		return nil, fmt.Errorf("write config: %w", err)
 	}
 
 	res.Removed = true
 	return res, nil
+}
+
+// configFileMode returns an existing file's permissions, or a sane default.
+//
+// Rewriting a config must not change who can read it. CreateTemp starts at
+// 0600, so without this an atomic replace would quietly tighten -- or, against
+// a deliberately group-readable file, alter -- the permissions of a file
+// Conduit does not own.
+func configFileMode(path string) os.FileMode {
+	if info, err := os.Stat(path); err == nil {
+		return info.Mode().Perm()
+	}
+	return 0644
 }
 
 // RemoveAllMCPClients strips Conduit from every supported client.

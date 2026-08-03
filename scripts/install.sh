@@ -329,7 +329,21 @@ install_binary() {
     # rename, so an interrupted install cannot leave a truncated executable on
     # PATH. Rename is atomic within a filesystem, which is why the temp file
     # goes in PREFIX rather than /tmp.
+    # Sweep staging files from earlier runs that were killed between the copy
+    # and the rename. They are inert, but they are also full-size copies of the
+    # binary sitting in a directory on the user's PATH, and nothing else will
+    # ever clean them up.
+    local stale
+    for stale in "${dest}".new.*; do
+        [[ -e "$stale" ]] || continue   # no match: the glob stayed literal
+        rm -f -- "$stale" || true
+    done
+
     local staged="${dest}.new.$$"
+    # Remove the staging file on any exit from here on, so an interrupted copy
+    # does not become the leftover this function just swept.
+    trap 'rm -f -- "'"$staged"'"' EXIT
+
     cp -- "$src" "$staged" || die "could not copy the binary into ${PREFIX}"
     chmod 755 "$staged"
 
@@ -337,6 +351,9 @@ install_binary() {
         rm -f -- "$staged"
         die "could not install to ${dest}"
     fi
+
+    # Reinstate the workdir cleanup the staging trap displaced.
+    trap cleanup EXIT
 
     success "installed ${dest}"
 
