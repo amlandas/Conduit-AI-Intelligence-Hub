@@ -26,11 +26,11 @@ const (
 type QueryType string
 
 const (
-	QueryTypeExactQuote  QueryType = "exact_quote"  // User wants literal text match
-	QueryTypeEntity      QueryType = "entity"       // Query focuses on named entities
-	QueryTypeConceptual  QueryType = "conceptual"   // User seeking understanding/explanation
-	QueryTypeFactual     QueryType = "factual"      // User wants specific data/facts
-	QueryTypeExploratory QueryType = "exploratory"  // Broad topic exploration
+	QueryTypeExactQuote  QueryType = "exact_quote" // User wants literal text match
+	QueryTypeEntity      QueryType = "entity"      // Query focuses on named entities
+	QueryTypeConceptual  QueryType = "conceptual"  // User seeking understanding/explanation
+	QueryTypeFactual     QueryType = "factual"     // User wants specific data/facts
+	QueryTypeExploratory QueryType = "exploratory" // Broad topic exploration
 )
 
 // SearchStrategy identifies which search method found a result.
@@ -50,11 +50,11 @@ type StrategyWeights struct {
 
 // strategyWeightMatrix maps query types to optimal strategy weights.
 var strategyWeightMatrix = map[QueryType]StrategyWeights{
-	QueryTypeExactQuote:  {Semantic: 0.1, Lexical: 0.9},  // Lexical dominant
-	QueryTypeEntity:      {Semantic: 0.4, Lexical: 0.6},  // Balanced, lexical edge
-	QueryTypeConceptual:  {Semantic: 0.8, Lexical: 0.2},  // Semantic dominant
-	QueryTypeFactual:     {Semantic: 0.5, Lexical: 0.5},  // Equal weight
-	QueryTypeExploratory: {Semantic: 0.7, Lexical: 0.3},  // Semantic preferred
+	QueryTypeExactQuote:  {Semantic: 0.1, Lexical: 0.9}, // Lexical dominant
+	QueryTypeEntity:      {Semantic: 0.4, Lexical: 0.6}, // Balanced, lexical edge
+	QueryTypeConceptual:  {Semantic: 0.8, Lexical: 0.2}, // Semantic dominant
+	QueryTypeFactual:     {Semantic: 0.5, Lexical: 0.5}, // Equal weight
+	QueryTypeExploratory: {Semantic: 0.7, Lexical: 0.3}, // Semantic preferred
 }
 
 // Precompiled regex patterns for query classification
@@ -143,14 +143,14 @@ type HybridSearchOptions struct {
 
 // HybridSearchResult contains combined search results with metadata.
 type HybridSearchResult struct {
-	Results        []SearchHit      `json:"results"`
-	TotalHits      int              `json:"total_hits"`
-	Query          string           `json:"query"`
-	SearchTime     float64          `json:"search_time_ms"`
-	Mode           HybridSearchMode `json:"mode"`
-	FTSHits        int              `json:"fts_hits"`
-	SemanticHits   int              `json:"semantic_hits"`
-	QueryAnalysis  QueryAnalysis    `json:"query_analysis,omitempty"`
+	Results       []SearchHit      `json:"results"`
+	TotalHits     int              `json:"total_hits"`
+	Query         string           `json:"query"`
+	SearchTime    float64          `json:"search_time_ms"`
+	Mode          HybridSearchMode `json:"mode"`
+	FTSHits       int              `json:"fts_hits"`
+	SemanticHits  int              `json:"semantic_hits"`
+	QueryAnalysis QueryAnalysis    `json:"query_analysis,omitempty"`
 
 	// Quality enhancement metrics
 	RejectedByFloor int  `json:"rejected_by_floor,omitempty"` // Count of results below similarity floor
@@ -158,32 +158,29 @@ type HybridSearchResult struct {
 	Reranked        bool `json:"reranked,omitempty"`          // Whether reranking was applied
 
 	// Query-adaptive confidence model (Phase 12)
-	Confidence       string   `json:"confidence,omitempty"`         // Overall confidence: very_high, high, medium, low
-	StrategiesUsed   int      `json:"strategies_used,omitempty"`    // Number of strategies that contributed
-	DegradedMode     bool     `json:"degraded_mode,omitempty"`      // True if semantic search timed out/failed
-	Note             string   `json:"note,omitempty"`               // Human-readable note about results
-	FallbackLevel    int      `json:"fallback_level,omitempty"`     // 0=primary, 1=relaxed, 2=partial
+	Confidence     string `json:"confidence,omitempty"`      // Overall confidence: very_high, high, medium, low
+	StrategiesUsed int    `json:"strategies_used,omitempty"` // Number of strategies that contributed
+	DegradedMode   bool   `json:"degraded_mode,omitempty"`   // True if semantic search timed out/failed
+	Note           string `json:"note,omitempty"`            // Human-readable note about results
+	FallbackLevel  int    `json:"fallback_level,omitempty"`  // 0=primary, 1=relaxed, 2=partial
 }
 
 // QueryAnalysis provides insight into how the query was interpreted.
 type QueryAnalysis struct {
 	HasQuotedPhrase bool      `json:"has_quoted_phrase,omitempty"`
-	ProperNouns     []string  `json:"proper_nouns,omitempty"`     // Multi-word proper nouns (e.g., "Oak Ridge")
-	Entities        []string  `json:"entities,omitempty"`         // All detected entities (single + multi-word)
+	ProperNouns     []string  `json:"proper_nouns,omitempty"` // Multi-word proper nouns (e.g., "Oak Ridge")
+	Entities        []string  `json:"entities,omitempty"`     // All detected entities (single + multi-word)
 	SuggestedMode   string    `json:"suggested_mode,omitempty"`
-	QueryType       QueryType `json:"query_type,omitempty"`       // Classified query type
-	IsConceptual    bool      `json:"is_conceptual,omitempty"`    // True if query seeks understanding
-	IsFactual       bool      `json:"is_factual,omitempty"`       // True if query seeks specific data
+	QueryType       QueryType `json:"query_type,omitempty"`    // Classified query type
+	IsConceptual    bool      `json:"is_conceptual,omitempty"` // True if query seeks understanding
+	IsFactual       bool      `json:"is_factual,omitempty"`    // True if query seeks specific data
 }
 
-// EnhancedSearchHit extends SearchHit with agreement metadata.
-type EnhancedSearchHit struct {
-	SearchHit
-	FoundBy      []SearchStrategy `json:"found_by,omitempty"`      // Which strategies found this result
-	Agreement    float64          `json:"agreement,omitempty"`     // Agreement score (0-1)
-	Confidence   string           `json:"confidence,omitempty"`    // Result-level confidence
-	BestRank     int              `json:"best_rank,omitempty"`     // Best rank across strategies
-}
+// WP-3.2 deleted EnhancedSearchHit (SearchHit plus found_by / agreement /
+// best_rank). Nothing ever constructed or returned one. The agreement data it
+// advertised lives in agreementInfo and is consumed by
+// calculateOverallConfidence, which reports one confidence for the result set
+// rather than one per hit.
 
 // NewHybridSearcher creates a hybrid searcher over the production semantic
 // searcher. A nil semantic searcher yields a lexical-only searcher.
@@ -528,7 +525,7 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	}
 
 	// Phase 12: Apply agreement-based boost
-	fused = hs.applyAgreementBoost(fused, agreementInfo, analysis.QueryType)
+	fused = hs.applyAgreementBoost(fused, agreementInfo)
 
 	result := &HybridSearchResult{
 		FTSHits:      len(ftsHits),
@@ -592,37 +589,30 @@ func (hs *HybridSearcher) getWeightsForQueryType(queryType QueryType) StrategyWe
 }
 
 // agreementInfo tracks which strategies found each result.
+//
+// WP-3.2 dropped the chunkBestRank map: it was written on every fusion and read
+// by nothing but a test asserting it had been written.
 type agreementInfo struct {
 	chunkStrategies map[string][]SearchStrategy // chunkID -> strategies that found it
-	chunkBestRank   map[string]int              // chunkID -> best rank across strategies
 }
 
 // applyRRFWithAgreement implements RRF fusion while tracking strategy agreement.
 func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHit, k int, weights StrategyWeights) ([]SearchHit, agreementInfo) {
 	info := agreementInfo{
 		chunkStrategies: make(map[string][]SearchStrategy),
-		chunkBestRank:   make(map[string]int),
 	}
 
 	// Create maps of chunk_id -> rank for each list
 	ftsRanks := make(map[string]int)
 	for i, hit := range ftsHits {
-		rank := i + 1 // 1-indexed rank
-		ftsRanks[hit.ChunkID] = rank
+		ftsRanks[hit.ChunkID] = i + 1 // 1-indexed rank
 		info.chunkStrategies[hit.ChunkID] = append(info.chunkStrategies[hit.ChunkID], StrategyFTSExact)
-		if existing, ok := info.chunkBestRank[hit.ChunkID]; !ok || rank < existing {
-			info.chunkBestRank[hit.ChunkID] = rank
-		}
 	}
 
 	semRanks := make(map[string]int)
 	for i, hit := range semanticHits {
-		rank := i + 1
-		semRanks[hit.ChunkID] = rank
+		semRanks[hit.ChunkID] = i + 1
 		info.chunkStrategies[hit.ChunkID] = append(info.chunkStrategies[hit.ChunkID], StrategySemantic)
-		if existing, ok := info.chunkBestRank[hit.ChunkID]; !ok || rank < existing {
-			info.chunkBestRank[hit.ChunkID] = rank
-		}
 	}
 
 	// Collect all unique chunks and their data
@@ -680,7 +670,10 @@ func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHi
 }
 
 // applyAgreementBoost boosts results that were found by multiple strategies.
-func (hs *HybridSearcher) applyAgreementBoost(hits []SearchHit, info agreementInfo, queryType QueryType) []SearchHit {
+//
+// It takes no query type: the one branch that consulted it was a no-op (see
+// below), so boosting depends only on how many strategies found a chunk.
+func (hs *HybridSearcher) applyAgreementBoost(hits []SearchHit, info agreementInfo) []SearchHit {
 	for i := range hits {
 		chunkID := hits[i].ChunkID
 		strategies := info.chunkStrategies[chunkID]
@@ -696,21 +689,12 @@ func (hs *HybridSearcher) applyAgreementBoost(hits []SearchHit, info agreementIn
 		// Agreement bonus: up to 20% boost for full agreement
 		agreementBonus := 1.0 + (agreement * 0.2)
 
-		// Query-type-specific adjustments
-		// For conceptual queries, boost semantic-only results
-		if queryType == QueryTypeConceptual {
-			hasSemantic := false
-			for _, s := range strategies {
-				if s == StrategySemantic {
-					hasSemantic = true
-					break
-				}
-			}
-			if hasSemantic && numStrategies == 1 {
-				// Semantic-only result for conceptual query: smaller penalty
-				agreementBonus = 1.1 // 10% boost instead of no boost
-			}
-		}
+		// WP-3.2 removed a "conceptual query" branch here. It claimed to give
+		// semantic-only hits a special 1.1x bonus on conceptual queries, but a
+		// single-strategy hit already scores agreement = 1/2, hence
+		// 1.0 + 0.5*0.2 = 1.1 -- the branch assigned the value the line above
+		// had just computed. It changed nothing for any input, which is why
+		// deleting it leaves every fusion score identical.
 
 		hits[i].Score *= agreementBonus
 	}
@@ -761,74 +745,10 @@ func (hs *HybridSearcher) calculateOverallConfidence(hits []SearchHit, info agre
 	return "low"
 }
 
-// applyRRF implements Reciprocal Rank Fusion to combine ranked lists.
-// Formula: RRF(d) = Σ 1/(k + rank_i(d)) for each ranking list i
-func (hs *HybridSearcher) applyRRF(ftsHits, semanticHits []SearchHit, k int, semanticWeight float64) []SearchHit {
-	// Create maps of chunk_id -> rank for each list
-	ftsRanks := make(map[string]int)
-	for i, hit := range ftsHits {
-		ftsRanks[hit.ChunkID] = i + 1 // 1-indexed rank
-	}
-
-	semRanks := make(map[string]int)
-	for i, hit := range semanticHits {
-		semRanks[hit.ChunkID] = i + 1
-	}
-
-	// Collect all unique chunks and their data
-	allChunks := make(map[string]SearchHit)
-	for _, hit := range ftsHits {
-		allChunks[hit.ChunkID] = hit
-	}
-	for _, hit := range semanticHits {
-		if _, exists := allChunks[hit.ChunkID]; !exists {
-			allChunks[hit.ChunkID] = hit
-		}
-	}
-
-	// Calculate RRF scores
-	type scoredHit struct {
-		hit      SearchHit
-		rrfScore float64
-	}
-
-	var scored []scoredHit
-	ftsWeight := 1.0 - semanticWeight
-
-	for chunkID, hit := range allChunks {
-		var rrfScore float64
-
-		// FTS5 contribution
-		if rank, ok := ftsRanks[chunkID]; ok {
-			rrfScore += ftsWeight * (1.0 / float64(k+rank))
-		}
-
-		// Semantic contribution
-		if rank, ok := semRanks[chunkID]; ok {
-			rrfScore += semanticWeight * (1.0 / float64(k+rank))
-		}
-
-		scored = append(scored, scoredHit{
-			hit:      hit,
-			rrfScore: rrfScore,
-		})
-	}
-
-	// Sort by RRF score descending
-	sort.Slice(scored, func(i, j int) bool {
-		return scored[i].rrfScore > scored[j].rrfScore
-	})
-
-	// Convert back to SearchHit slice with RRF scores
-	result := make([]SearchHit, len(scored))
-	for i, s := range scored {
-		hit := s.hit
-		hit.Score = s.rrfScore
-		result[i] = hit
-	}
-
-	return result
-}
+// WP-3.2 deleted applyRRF, the unweighted-signature twin of
+// applyRRFWithAgreement. It had no callers: every fusion path goes through
+// applyRRFWithAgreement, which computes the same reciprocal-rank formula and
+// additionally records which strategy found each chunk.
 
 // boostExactMatches increases the score of results containing exact entity matches.
 // Multi-word entities (proper nouns) get a stronger boost than single-word entities.

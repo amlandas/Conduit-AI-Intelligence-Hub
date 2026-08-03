@@ -429,8 +429,8 @@ type IndexStats struct {
 	TotalChunks    int   `json:"total_chunks"`
 	TotalBytes     int64 `json:"total_bytes"`
 	// KAG statistics
-	TotalEntities  int `json:"total_entities,omitempty"`
-	TotalRelations int `json:"total_relations,omitempty"`
+	TotalEntities  int  `json:"total_entities,omitempty"`
+	TotalRelations int  `json:"total_relations,omitempty"`
 	KAGEnabled     bool `json:"kag_enabled"`
 }
 

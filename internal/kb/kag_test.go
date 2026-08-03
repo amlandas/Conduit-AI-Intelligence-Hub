@@ -101,8 +101,8 @@ func TestEntityTypes(t *testing.T) {
 		{"person", string(EntityTypePerson)},
 		{"technology", string(EntityTypeTechnology)},
 		{"company", string(EntityTypeOrganization)}, // Alias
-		{"tool", string(EntityTypeTechnology)},       // Alias
-		{"unknown", string(EntityTypeConcept)},       // Default
+		{"tool", string(EntityTypeTechnology)},      // Alias
+		{"unknown", string(EntityTypeConcept)},      // Default
 	}
 
 	for _, tc := range tests {

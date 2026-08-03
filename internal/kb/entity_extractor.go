@@ -567,4 +567,3 @@ func serializeMetadata(metadata map[string]interface{}) (string, error) {
 	}
 	return string(data), nil
 }
-

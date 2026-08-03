@@ -168,25 +168,10 @@ func TestRRFArithmetic(t *testing.T) {
 		}
 	}
 
-	wantBestRank := map[string]int{"a": 1, "b": 2, "c": 1, "d": 2}
-	for id, wantR := range wantBestRank {
-		if got := info.chunkBestRank[id]; got != wantR {
-			t.Errorf("best rank for %s: got %d, want %d", id, got, wantR)
-		}
-	}
-
-	// The legacy applyRRF has no callers today. It computes the same thing,
-	// parameterised by semanticWeight with ftsWeight = 1 - semanticWeight.
-	legacy := hs.applyRRF(fts, sem, k, 0.4)
-	if order := chunkIDs(legacy); !equalStrings(order, []string{"a", "c", "b", "d"}) {
-		t.Errorf("legacy applyRRF order: got %v, want [a c b d]", order)
-	}
-	for id, wantScore := range want {
-		gotScore, _ := scoreOf(legacy, id)
-		if math.Abs(gotScore-wantScore) > 1e-12 {
-			t.Errorf("legacy RRF score for %s: got %.15f, want %.15f", id, gotScore, wantScore)
-		}
-	}
+	// WP-3.2 deleted agreementInfo.chunkBestRank (asserted here) and the legacy
+	// applyRRF (exercised here). Neither had a caller in production code: the
+	// rank map was written and never read, and every fusion path goes through
+	// applyRRFWithAgreement, whose formula is pinned above.
 }
 
 func TestRRFEdgeCases(t *testing.T) {
@@ -235,9 +220,6 @@ func TestRRFEdgeCases(t *testing.T) {
 		}
 		if len(info.chunkStrategies["a"]) != 2 {
 			t.Errorf("strategy list should record both appearances, got %v", info.chunkStrategies["a"])
-		}
-		if info.chunkBestRank["a"] != 1 {
-			t.Errorf("best rank should still be 1, got %d", info.chunkBestRank["a"])
 		}
 	})
 }
@@ -321,30 +303,25 @@ func TestApplyAgreementBoost(t *testing.T) {
 		"sem":  {StrategySemantic},
 	}}
 
+	// WP-3.2 removed applyAgreementBoost's queryType parameter. It only fed a
+	// "conceptual query" branch that set agreementBonus = 1.1 -- exactly what
+	// the general formula 1 + (1/2 * 0.2) already produced for a single-strategy
+	// hit. The table below used to run these same expectations once per query
+	// type to document that; the boost no longer has a query type to ignore.
 	tests := []struct {
-		name      string
-		queryType QueryType
-		want      map[string]float64
-		notes     string
+		name string
+		want map[string]float64
 	}{
 		{
-			name:      "entity query: 20% for agreement, 10% for a single strategy",
-			queryType: QueryTypeEntity,
-			want:      map[string]float64{"both": 1.2, "fts": 1.1, "sem": 1.1},
-		},
-		{
-			name:      "conceptual query: the semantic-only special case is a no-op",
-			queryType: QueryTypeConceptual,
-			want:      map[string]float64{"both": 1.2, "fts": 1.1, "sem": 1.1},
-			notes: "the branch sets agreementBonus = 1.1, which is exactly what the general " +
-				"formula 1 + (1/2 * 0.2) already produces, so conceptual queries get no special treatment",
+			name: "20% for agreement, 10% for a single strategy",
+			want: map[string]float64{"both": 1.2, "fts": 1.1, "sem": 1.1},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			in := []SearchHit{hit("both", "b", 1), hit("fts", "f", 1), hit("sem", "s", 1)}
-			got := hs.applyAgreementBoost(in, info, tt.queryType)
+			got := hs.applyAgreementBoost(in, info)
 			for id, want := range tt.want {
 				gotScore, ok := scoreOf(got, id)
 				if !ok {
@@ -352,7 +329,7 @@ func TestApplyAgreementBoost(t *testing.T) {
 					continue
 				}
 				if math.Abs(gotScore-want) > 1e-9 {
-					t.Errorf("score for %s: got %.9f, want %.9f\n%s", id, gotScore, want, tt.notes)
+					t.Errorf("score for %s: got %.9f, want %.9f", id, gotScore, want)
 				}
 			}
 			// Agreement re-sorts descending.

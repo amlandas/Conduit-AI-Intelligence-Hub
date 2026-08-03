@@ -131,9 +131,9 @@ func configGetCmd() *cobra.Command {
 Keys use dot notation to access nested values.
 
 Examples:
-  conduit config get ai.model
-  conduit config get deps.ollama.path
-  conduit config get runtime.preferred`,
+  conduit config get embed.provider
+  conduit config get kb.rag.default_limit
+  conduit config get kb.kag.enabled`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
@@ -188,9 +188,9 @@ Keys use dot notation to access nested values.
 Values are stored in ~/.conduit/conduit.yaml.
 
 Examples:
-  conduit config set ai.model qwen2.5-coder:7b
-  conduit config set deps.ollama.path /custom/path/ollama
-  conduit config set runtime.preferred podman`,
+  conduit config set embed.provider none
+  conduit config set kb.rag.default_limit 20
+  conduit config set kb.kag.enabled true`,
 		Args: cobra.ExactArgs(2),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]
@@ -249,8 +249,8 @@ Keys use dot notation to access nested values.
 The value will be removed from ~/.conduit/conduit.yaml.
 
 Examples:
-  conduit config unset deps.ollama.path
-  conduit config unset runtime.preferred`,
+  conduit config unset embed.model
+  conduit config unset kb.rag.default_limit`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			key := args[0]

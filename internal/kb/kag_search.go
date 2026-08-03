@@ -577,8 +577,9 @@ func (s *KAGSearcher) GetRelatedEntities(ctx context.Context, entityID string, m
 		maxHops = MaxHops
 	}
 
-	// For now, single-hop relations from SQLite
-	// FalkorDB can be used for multi-hop if connected
+	// Single-hop neighbours from the legacy kb_relations table. Multi-hop
+	// traversal is GraphStore.Traverse over kb_graph_edges; this is the
+	// fallback for a knowledge base indexed before the graph was enabled.
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT e.entity_id, e.name, e.type, e.description, e.confidence, e.source_document_id
 		FROM kb_entities e

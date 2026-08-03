@@ -92,9 +92,9 @@ func TestChunker_EstimateChunkCount(t *testing.T) {
 		overlap    int
 		expected   int
 	}{
-		{100, 1000, 100, 1},   // Content smaller than chunk
-		{1000, 500, 50, 3},    // Multiple chunks
-		{500, 500, 50, 1},     // Exactly one chunk
+		{100, 1000, 100, 1}, // Content smaller than chunk
+		{1000, 500, 50, 3},  // Multiple chunks
+		{500, 500, 50, 1},   // Exactly one chunk
 	}
 
 	for _, tt := range tests {

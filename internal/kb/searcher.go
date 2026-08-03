@@ -164,17 +164,17 @@ func sanitizeFTSQuery(query string) string {
 	// These characters have special meaning in FTS5 and will cause parse errors
 	// if not properly handled
 	specialChars := []string{
-		"'",  // Single quote - causes "syntax error near '"
-		"(",  // Open paren - grouping
-		")",  // Close paren - grouping
-		":",  // Colon - column specifier (causes "no such column" errors)
-		"^",  // Caret - boost operator
-		"{",  // Open brace - NEAR query
-		"}",  // Close brace - NEAR query
-		"[",  // Open bracket
-		"]",  // Close bracket
-		"+",  // Plus - required term
-		"*",  // Asterisk - wildcard (we add our own)
+		"'", // Single quote - causes "syntax error near '"
+		"(", // Open paren - grouping
+		")", // Close paren - grouping
+		":", // Colon - column specifier (causes "no such column" errors)
+		"^", // Caret - boost operator
+		"{", // Open brace - NEAR query
+		"}", // Close brace - NEAR query
+		"[", // Open bracket
+		"]", // Close bracket
+		"+", // Plus - required term
+		"*", // Asterisk - wildcard (we add our own)
 	}
 
 	for _, char := range specialChars {
