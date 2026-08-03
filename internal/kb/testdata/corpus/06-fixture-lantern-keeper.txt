@@ -1,0 +1,11 @@
+Lantern Keeper Notes
+
+The lantern is trimmed at dusk. The lantern is trimmed again at midnight. A
+lantern that is not trimmed will smoke, and a smoking lantern warns no one. The
+keeper records the lantern hours in the ledger every night without exception.
+
+Boilerplate notice: this paragraph is repeated verbatim in another fixture
+document so that duplicate content can be observed end to end.
+
+On calm nights the keeper walks the gallery and counts the ships. On rough
+nights the keeper stays below and listens to the bell.
