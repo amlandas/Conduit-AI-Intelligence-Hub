@@ -203,7 +203,7 @@ Examples:
 			}
 			defer svc.Close()
 
-			source, err := svc.AddSource(cmd.Context(), req)
+			source, warnings, err := svc.AddSourceWithWarnings(cmd.Context(), req)
 			if err != nil {
 				if jsonOutput {
 					fmt.Printf(`{"success":false,"error":"add source: %s"}`, err.Error())
@@ -222,6 +222,13 @@ Examples:
 				}
 				fmt.Println(string(data))
 				return nil
+			}
+
+			for _, w := range warnings {
+				fmt.Printf("! %s\n", w)
+			}
+			if len(warnings) > 0 {
+				fmt.Println()
 			}
 
 			fmt.Printf("✓ Added source: %s\n", source.Name)
