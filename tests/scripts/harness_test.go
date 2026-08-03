@@ -17,6 +17,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -67,13 +68,86 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
-// profile returns the shell rc file the scripts will act on.
+// profile returns the shell rc file install.sh will write its PATH block to.
 //
-// The harness pins SHELL=/bin/bash, so both install.sh and uninstall.sh resolve
-// to .bashrc. Deriving it here rather than hardcoding it in each test keeps the
-// two in step if the harness's shell ever changes.
+// The harness pins SHELL=/bin/bash, so the answer is bash's -- but which bash
+// file depends on the platform, because the two operating systems start a
+// terminal's bash differently:
+//
+//   - macOS terminals start a LOGIN shell, which reads ~/.bash_profile and
+//     never ~/.bashrc.
+//   - Linux terminals start an interactive non-login shell, which reads
+//     ~/.bashrc and not ~/.bash_profile.
+//
+// Writing to the wrong one of those is issue #85: the installer reported
+// success and the PATH entry was never read by any shell the user opened.
+//
+// uninstall.sh scans all four candidate profiles, so it finds whichever this
+// returns; only the install side is platform-dependent.
 func (e *env) profile() string {
+	if runtime.GOOS == "darwin" {
+		return filepath.Join(e.home, ".bash_profile")
+	}
 	return filepath.Join(e.home, ".bashrc")
+}
+
+// startupPATH returns the PATH a freshly opened terminal would have on this
+// machine, given the fake home's profiles.
+//
+// This asks the real bash rather than restating the rule the installer is
+// supposed to follow, which is the only way for the test to be evidence about
+// behaviour instead of a copy of the implementation. -l on macOS and -i on
+// Linux is exactly how each platform's terminal starts bash.
+func (e *env) startupPATH(t *testing.T) string {
+	t.Helper()
+
+	mode := "-i"
+	if runtime.GOOS == "darwin" {
+		mode = "-l"
+	}
+
+	// The value is fenced. A startup file is allowed to print things -- and one
+	// of the fixtures below deliberately does -- so the shell's whole stdout is
+	// not the answer, only the part between the sentinels is.
+	const openTag, closeTag = "<<<CONDUIT_PATH[", "]CONDUIT_PATH>>>"
+	cmd := exec.Command("bash", mode, "-c", `printf '%s' "`+openTag+`$PATH`+closeTag+`"`)
+	cmd.Env = []string{
+		"HOME=" + e.home,
+		"PATH=/usr/bin:/bin",
+		"SHELL=/bin/bash",
+		"TERM=dumb",
+	}
+	cmd.Dir = e.home
+
+	var out strings.Builder
+	cmd.Stdout = &out
+	// An interactive bash with no controlling terminal warns about job control
+	// on stderr. That is noise, not failure, so stderr is discarded and only
+	// the exit status is consulted.
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("could not read the startup PATH from bash %s: %v", mode, err)
+	}
+
+	text := out.String()
+	start := strings.Index(text, openTag)
+	end := strings.Index(text, closeTag)
+	if start < 0 || end < start {
+		t.Fatalf("bash %s produced no PATH marker; output was:\n%s", mode, text)
+	}
+	return text[start+len(openTag) : end]
+}
+
+// pathContains reports whether a PATH string has dir as one of its entries.
+//
+// Substring matching would pass on a prefix of a longer directory name, which
+// is the one way this assertion could be wrong in the installer's favour.
+func pathContains(pathVar, dir string) bool {
+	for _, entry := range strings.Split(pathVar, ":") {
+		if entry == dir {
+			return true
+		}
+	}
+	return false
 }
 
 // writeFile creates a file under the fake machine.

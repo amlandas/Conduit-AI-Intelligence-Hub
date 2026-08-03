@@ -88,9 +88,15 @@ OPTIONS
 
 WHAT IT CHANGES
     - installs the conduit binary to --prefix
-    - appends a PATH block to ~/.zshrc or ~/.bashrc, marked with a "# Conduit"
-      comment, if the prefix is not already on PATH. That marker is what lets
-      uninstall.sh remove the block later without guessing at your own edits.
+    - appends a PATH block, marked with a "# Conduit" comment, to the file your
+      shell reads at startup, if the prefix is not already on PATH:
+        zsh            ~/.zshrc
+        bash on macOS  ~/.bash_profile (or ~/.bash_login / ~/.profile if you
+                       already have one -- macOS terminals start a login shell,
+                       which never reads ~/.bashrc)
+        bash on Linux  ~/.bashrc
+      That marker is what lets uninstall.sh remove the block later without
+      guessing at your own edits.
     - registers the MCP server with an AI client (unless --no-setup)
 
     It writes nothing else, installs no services, and pulls no containers.
@@ -384,18 +390,72 @@ install_binary() {
 # CONDUIT_PATH_MARKER introduces the PATH line this script writes.
 #
 # It is the ONLY thing the uninstaller matches on, so the two must stay in
-# step -- and it must stay identical to CONDUIT_PATH_MARKER in uninstall.sh and
+# step -- and it must stay identical to the marker in uninstall.sh and
 # conduitPathMarker in internal/setup/setup.go.
 readonly CONDUIT_PATH_MARKER="# Conduit"
 
-# profile_for_shell returns the rc file this user's shell reads.
+# CONDUIT_MARKER_RE is how the marker is DETECTED, as opposed to written.
+#
+# Detection has to use the same rule as removal, and removal has always been
+# anchored: uninstall.sh matches '^[[:space:]]*# Conduit' and
+# isConduitPathMarker in internal/setup/setup.go trims and checks a prefix.
+# This script used to grep for the bare string anywhere in the file, so a line
+# like
+#
+#     alias k=kubectl # Conduit helper
+#
+# convinced it that its own block was already present. It then wrote nothing,
+# announced "PATH entry already present", and left the user with an installed
+# binary that no shell could find. Anchoring makes the installer and the
+# uninstaller agree on what a marker is.
+readonly CONDUIT_MARKER_RE='^[[:space:]]*# Conduit'
+
+# bash_login_profile returns the file a LOGIN bash reads on this machine.
+#
+# Login bash reads the first of ~/.bash_profile, ~/.bash_login and ~/.profile
+# that exists, and stops there -- it does not read the rest. That "stops there"
+# is why this cannot simply return ~/.bash_profile: on a machine whose user
+# keeps their setup in ~/.profile, creating ~/.bash_profile would shadow the
+# whole of it, and we would have broken their shell in order to add a
+# directory to PATH.
+#
+# So the file is chosen by exactly bash's own rule, and a new ~/.bash_profile
+# is only created when there is nothing there to shadow.
+bash_login_profile() {
+    local candidate
+    for candidate in "${HOME}/.bash_profile" "${HOME}/.bash_login" "${HOME}/.profile"; do
+        if [[ -f "$candidate" ]]; then
+            printf '%s' "$candidate"
+            return 0
+        fi
+    done
+    printf '%s' "${HOME}/.bash_profile"
+}
+
+# profile_for_shell returns the rc file this user's shell reads at startup.
+#
+# For bash the answer is platform-dependent, and getting it wrong is silent.
+# macOS terminals (Terminal.app, iTerm) start bash as a LOGIN shell, which
+# reads ~/.bash_profile and NEVER ~/.bashrc. Linux terminals start it
+# interactive-but-not-login, which reads ~/.bashrc and not ~/.bash_profile.
+#
+# Writing to ~/.bashrc on macOS -- which is what this did -- produced a
+# successful-looking install whose PATH entry no shell the user opened ever
+# read. They followed the instruction to open a new terminal, `conduit` was
+# still not found, and nothing in the output pointed at the cause.
 #
 # fish is excluded deliberately: its syntax is not POSIX, so the block written
 # below would be a syntax error rather than a PATH entry.
 profile_for_shell() {
     case "$(basename "${SHELL:-sh}")" in
         zsh)  printf '%s' "${HOME}/.zshrc" ;;
-        bash) printf '%s' "${HOME}/.bashrc" ;;
+        bash)
+            if [[ "$OS" == "darwin" ]]; then
+                bash_login_profile
+            else
+                printf '%s' "${HOME}/.bashrc"
+            fi
+            ;;
         *)    printf '' ;;
     esac
 }
@@ -427,7 +487,10 @@ add_to_path() {
 
     # Already ours? Adding a second copy would put two identical entries on
     # PATH and leave the uninstaller two blocks to remove.
-    if [[ -f "$profile" ]] && grep -qF "$CONDUIT_PATH_MARKER" "$profile" 2>/dev/null; then
+    #
+    # Matched with the anchored expression, not a substring search: see
+    # CONDUIT_MARKER_RE.
+    if [[ -f "$profile" ]] && grep -qE "$CONDUIT_MARKER_RE" "$profile" 2>/dev/null; then
         info "PATH entry already present in ${profile}"
         return 0
     fi
