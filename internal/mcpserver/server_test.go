@@ -304,10 +304,17 @@ func TestToolDescriptionsCarriedOverVerbatim(t *testing.T) {
 		byName[tool.Name] = tool.Description
 	}
 
+	// Two of these were changed deliberately for #91, and only these two. The
+	// original kb_search wording is preserved verbatim with one sentence
+	// appended; kb_get_document was rewritten because the old text ("by its ID.
+	// Use document IDs from search results") described a flow that did not
+	// exist -- search results carried no ID.
 	want := map[string]string{
-		ToolSearch:            "Search the knowledge base for relevant documents using hybrid search (FTS5 keyword matching + semantic similarity when available). Use short keyword phrases for best results.",
-		ToolListSources:       "List all knowledge base sources with their IDs, paths, document counts, and sync status. Use this to discover available sources before searching or filtering.",
-		ToolGetDocument:       "Retrieve the full content of a specific document by its ID. Use document IDs from search results.",
+		ToolSearch: "Search the knowledge base for relevant documents using hybrid search (FTS5 keyword matching + semantic similarity when available). Use short keyword phrases for best results. " +
+			"Every hit prints a 'document_id:' line -- pass that value to kb_get_document to read the whole document.",
+		ToolListSources: "List all knowledge base sources with their IDs, paths, document counts, and sync status. Use this to discover available sources before searching or filtering.",
+		ToolGetDocument: "Retrieve the full content of a specific document. Supply exactly one of document_id or path. " +
+			"Flow: run kb_search (or kb_lexical_search / kb_search_with_context), copy the 'document_id:' value printed under the hit you want, then pass it here.",
 		ToolStats:             "Get knowledge base statistics including source counts, document counts, chunk counts, and search capability status.",
 		ToolSearchWithContext: "Search with processed, prompt-ready results. Returns merged chunks from same documents, filters boilerplate, and provides citation-ready source information. Best for RAG use cases.",
 		ToolKAGQuery:          "Query the knowledge graph for entities and their relationships. Use for multi-hop reasoning, aggregation queries, or finding connections between concepts. Complements RAG search with structured entity lookups.",
@@ -470,7 +477,11 @@ func TestCallToolInvalidArgs(t *testing.T) {
 		{"missing required query", ToolSearch, map[string]any{}},
 		{"wrong type for limit", ToolSearch, map[string]any{"query": "auth", "limit": "ten"}},
 		{"value outside enum", ToolSearch, map[string]any{"query": "auth", "mode": "telepathy"}},
-		{"missing required document_id", ToolGetDocument, map[string]any{}},
+		// #91 moved this one from schema validation to the handler: with two
+		// alternative keys neither is individually required, so an empty call is
+		// now a handler-level isError. TestGetDocumentRequiresExactlyOneKey
+		// pins the message.
+		{"no lookup key at all", ToolGetDocument, map[string]any{}},
 		{"missing required query on lexical", ToolLexicalSearch, map[string]any{}},
 	}
 
@@ -646,9 +657,14 @@ func TestToolSchemasAreFrozen(t *testing.T) {
 		ToolLexicalSearch:     {"query", "limit", "source_id"},
 		ToolSearchWithContext: {"query", "source_id", "limit", "mode", "recall_mode"},
 		ToolListSources:       {},
-		ToolGetDocument:       {"document_id"},
-		ToolStats:             {"source_id"},
-		ToolKAGQuery:          {"query", "entities", "include_relations", "max_hops", "limit", "source_id"},
+		// #91: `path` is a deliberate addition -- kb_get_document accepts either
+		// key, exactly one of them, and the one-of constraint is enforced by the
+		// handler rather than by the schema. `document_id` is consequently no
+		// longer schema-required; TestGetDocumentRequiresExactlyOneKey covers
+		// the constraint that replaced it.
+		ToolGetDocument: {"document_id", "path"},
+		ToolStats:       {"source_id"},
+		ToolKAGQuery:    {"query", "entities", "include_relations", "max_hops", "limit", "source_id"},
 	}
 
 	for _, tool := range res.Tools {
