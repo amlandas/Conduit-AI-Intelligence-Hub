@@ -71,11 +71,16 @@ func expandHome(path string) string {
 }
 
 // protectedDirs returns the canonical paths that must never be a data directory.
+//
+// The mount points are here because an external disk, a network share or a
+// container bind mount is somebody's whole filesystem, and `--data-dir
+// /Volumes` differs from a real one by a single missing path component.
 func protectedDirs() []string {
 	dirs := []string{
 		"/", "/usr", "/etc", "/var", "/opt", "/tmp", "/bin", "/sbin",
 		"/home", "/Users", "/root", "/System", "/Library", "/Applications",
 		"/private", "/dev", "/proc", "/boot",
+		"/Volumes", "/mnt", "/media", "/net", "/srv",
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		clean := filepath.Clean(home)
@@ -88,6 +93,29 @@ func protectedDirs() []string {
 		}
 	}
 	return dirs
+}
+
+// sameDir reports whether two paths name the same directory on disk.
+//
+// String comparison is not enough, and on macOS it is not even close. APFS is
+// case-insensitive by default, so "/USERS/amlan" opens exactly the same
+// directory as "/Users/amlan" while comparing unequal to every entry in the
+// deny list. The same hole swallows Unicode: a home directory containing an
+// accented character can be spelled in NFC or NFD, both of which the filesystem
+// accepts and neither of which matches the other byte for byte.
+//
+// os.SameFile compares device and inode, which is what the kernel itself uses
+// to decide whether two names are one file. It cannot be spelled around.
+func sameDir(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
 }
 
 // AssertSafeDataDir rejects a path that must never be handed to a recursive
@@ -104,9 +132,18 @@ func AssertSafeDataDir(dir string) (string, error) {
 	}
 
 	for _, protected := range protectedDirs() {
+		// Lexical first: it is the only check available for a protected path
+		// that does not exist on this machine (/mnt on a Mac, /Volumes on
+		// Linux), and it costs nothing.
 		if canonical == protected {
 			return "", fmt.Errorf("%w: refusing to treat %s (resolved from %q) as a Conduit data directory",
 				ErrUnsafeDataDir, canonical, dir)
+		}
+		// Then by identity, which catches every spelling the filesystem
+		// accepts and the string comparison does not.
+		if sameDir(canonical, protected) {
+			return "", fmt.Errorf("%w: refusing to treat %s as a Conduit data directory (it is %s under a different spelling)",
+				ErrUnsafeDataDir, canonical, protected)
 		}
 	}
 
@@ -151,6 +188,9 @@ func AssertRemovableDataDir(dir string) (string, error) {
 	return canonical, nil
 }
 
+// ErrNotConduitDataDir means a deletion target holds none of Conduit's files.
+var ErrNotConduitDataDir = errors.New("setup: not a Conduit data directory")
+
 // looksLikeConduitDataDir reports whether a directory holds the files a real
 // Conduit installation would have put there.
 //
@@ -165,6 +205,31 @@ func looksLikeConduitDataDir(dir string) bool {
 		}
 	}
 	return false
+}
+
+// assertConduitDataDir refuses to delete a directory that is not Conduit's.
+//
+// Force is the deliberate override, because there are legitimate reasons to
+// remove a data directory whose contents are already gone. Everything else --
+// a typo in --data-dir, a stale path in a config file, a script that built the
+// wrong string -- lands here and stops.
+//
+// This lives in the library rather than only in the CLI so that the desktop
+// GUI, a shell wrapper and anything else linking the package are all covered.
+func assertConduitDataDir(dir string, force bool) error {
+	if force {
+		return nil
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		// Nothing there. Removal is a no-op, so there is nothing to protect.
+		return nil
+	}
+	if looksLikeConduitDataDir(dir) {
+		return nil
+	}
+	return fmt.Errorf("%w: %s contains no conduit.db or conduit.yaml.\nRefusing to delete it recursively. Check the path, or pass Force if you are certain",
+		ErrNotConduitDataDir, dir)
 }
 
 // DataDirSummary describes a data directory for a confirmation prompt.

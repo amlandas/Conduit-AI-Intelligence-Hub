@@ -67,6 +67,15 @@ func newEnv(t *testing.T) *env {
 	return e
 }
 
+// profile returns the shell rc file the scripts will act on.
+//
+// The harness pins SHELL=/bin/bash, so both install.sh and uninstall.sh resolve
+// to .bashrc. Deriving it here rather than hardcoding it in each test keeps the
+// two in step if the harness's shell ever changes.
+func (e *env) profile() string {
+	return filepath.Join(e.home, ".bashrc")
+}
+
 // writeFile creates a file under the fake machine.
 func (e *env) writeFile(t *testing.T, path, content string) {
 	t.Helper()
@@ -264,6 +273,127 @@ func asExitError(err error, target **exec.ExitError) bool {
 		return true
 	}
 	return false
+}
+
+// runWithRealHome runs a script with the developer's actual HOME.
+//
+// Used only by the case-folding guard test, where the property under test is
+// how the real filesystem treats the real home directory's name. It is
+// restricted to --dry-run invocations for that reason: the whole point is that
+// the script must refuse before doing anything.
+func (e *env) runWithRealHome(t *testing.T, script string, args ...string) result {
+	t.Helper()
+
+	dryRun := false
+	for _, a := range args {
+		if a == "--dry-run" {
+			dryRun = true
+		}
+	}
+	if !dryRun {
+		t.Fatalf("runWithRealHome is only safe for --dry-run invocations; got %v", args)
+	}
+
+	realHome, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("no home directory: %v", err)
+	}
+
+	cmd := exec.Command("bash", append([]string{scriptPath(t, script)}, args...)...)
+	cmd.Env = []string{
+		"HOME=" + realHome,
+		"PATH=" + e.binDir + ":/usr/bin:/bin",
+		"SHELL=/bin/bash",
+		"TERM=dumb",
+	}
+	cmd.Dir = e.home
+
+	var out, errOut strings.Builder
+	cmd.Stdout = &out
+	cmd.Stderr = &errOut
+
+	runErr := cmd.Run()
+
+	code := 0
+	if runErr != nil {
+		var ee *exec.ExitError
+		if asExitError(runErr, &ee) {
+			code = ee.ExitCode()
+		} else {
+			t.Fatalf("run %s: %v", script, runErr)
+		}
+	}
+
+	return result{
+		stdout:   out.String(),
+		stderr:   errOut.String(),
+		combined: out.String() + errOut.String(),
+		code:     code,
+	}
+}
+
+// installToolStubs puts a fake Go toolchain on the fake machine's PATH.
+//
+// install.sh --from-source is otherwise the only way to reach the
+// profile-writing code, and compiling the real binary for a test about a
+// two-line shell function is both slow and a dependency on the developer's
+// toolchain. The stub `go build` honours -o and writes a file there, which is
+// all the script needs from it, and every other step -- staging, the atomic
+// rename, PATH detection, the profile append -- is the real thing.
+func (e *env) installToolStubs(t *testing.T) {
+	t.Helper()
+
+	// `go build ... -o <path> ...` writes an executable at <path>.
+	goStub := `#!/usr/bin/env bash
+if [[ "$1" == "build" ]]; then
+    out=""
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "-o" ]]; then out="$2"; shift 2; continue; fi
+        shift
+    done
+    if [[ -n "$out" ]]; then
+        mkdir -p "$(dirname "$out")"
+        printf '#!/bin/sh\necho conduit stub\n' > "$out"
+        chmod 755 "$out"
+    fi
+    exit 0
+fi
+exit 0
+`
+	if err := os.WriteFile(filepath.Join(e.binDir, "go"), []byte(goStub), 0o755); err != nil {
+		t.Fatalf("write go stub: %v", err)
+	}
+
+	// The script refuses to build without a C compiler, since cgo is required
+	// for FTS5. Its presence is all that is checked.
+	ccStub := "#!/usr/bin/env bash\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(e.binDir, "cc"), []byte(ccStub), 0o755); err != nil {
+		t.Fatalf("write cc stub: %v", err)
+	}
+}
+
+// runInstall runs install.sh against the fake machine.
+func (e *env) runInstall(t *testing.T, prefix string, args ...string) result {
+	t.Helper()
+	e.installToolStubs(t)
+	full := append([]string{"--prefix", prefix}, args...)
+	return e.run(t, "install.sh", full...)
+}
+
+// sameDirOnDisk reports whether two names refer to one directory.
+//
+// The test-side counterpart of the guard's identity check: it decides whether a
+// case-folding test is meaningful on this filesystem.
+func sameDirOnDisk(a, b string) bool {
+	ai, err := os.Stat(a)
+	if err != nil {
+		return false
+	}
+	bi, err := os.Stat(b)
+	if err != nil {
+		return false
+	}
+	return os.SameFile(ai, bi)
 }
 
 // invocations returns the argv lines the stub recorded.

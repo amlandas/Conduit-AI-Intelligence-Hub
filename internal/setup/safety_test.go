@@ -36,6 +36,16 @@ func TestAssertSafeDataDir_RejectsCatastrophicPaths(t *testing.T) {
 		{"tmp", "/tmp"},
 		{"empty", ""},
 		{"whitespace", "   "},
+
+		// N3: mount points. An external disk, a network share or a container
+		// bind mount is somebody's whole filesystem, and "/Volumes" differs
+		// from a real data directory by one missing path component.
+		{"volumes", "/Volumes"},
+		{"volumes trailing separator", "/Volumes/"},
+		{"mnt", "/mnt"},
+		{"media", "/media"},
+		{"net", "/net"},
+		{"srv", "/srv"},
 	}
 
 	for _, c := range cases {

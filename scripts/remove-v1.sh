@@ -36,6 +36,10 @@ DRY_RUN=true
 PURGE_DATA=false
 
 DATA_DIR="${CONDUIT_DATA_DIR:-${HOME}/.conduit}"
+# Tracks whether the user named a data directory or we defaulted to one. Only a
+# user-supplied path is held to the absolute-path rule; the default is already
+# absolute, and rejecting it would break the ordinary invocation.
+DATA_DIR_EXPLICIT=false
 
 # Containers the v1 installer created.
 readonly V1_CONTAINERS=(conduit-qdrant conduit-falkordb)
@@ -130,7 +134,7 @@ while [[ $# -gt 0 ]]; do
         --purge-data) PURGE_DATA=true; shift ;;
         --data-dir)
             [[ $# -ge 2 ]] || die "--data-dir requires a directory"
-            DATA_DIR="$2"; shift 2 ;;
+            DATA_DIR="$2"; DATA_DIR_EXPLICIT=true; shift 2 ;;
         -h|--help)    usage; exit 0 ;;
         *)            die "unknown option: $1 (try --help)" ;;
     esac
@@ -162,23 +166,62 @@ canonicalize_path() {
 
     [[ "$p" == /* ]] || p="$(pwd)/$p"
 
-    local out=() part
-    local oldifs="$IFS"
-    IFS='/'
-    for part in $p; do
+    # read -ra, not `for part in $p`. Unquoted word splitting also performs
+    # pathname expansion, so a directory legitimately containing * or ? was
+    # rewritten into whatever happened to match it in the current working
+    # directory -- turning the guard's input into something that depends on
+    # where the script was run from.
+    local parts=() out=() part
+    IFS='/' read -ra parts <<< "$p"
+
+    for part in ${parts[@]+"${parts[@]}"}; do
         case "$part" in
             ''|.) ;;
             ..) [[ ${#out[@]} -gt 0 ]] && unset "out[$(( ${#out[@]} - 1 ))]" ;;
             *)  out+=("$part") ;;
         esac
     done
-    IFS="$oldifs"
 
     local result=""
     for part in ${out[@]+"${out[@]}"}; do
         result="${result}/${part}"
     done
     printf '%s' "${result:-/}"
+}
+
+# path_identity prints a path's device:inode, or nothing if it does not exist.
+#
+# This is what makes the deny list mean anything on a case-insensitive
+# filesystem. APFS is case-insensitive by default, so "/USERS/amlan" opens
+# exactly the same directory as "/Users/amlan" while comparing unequal to every
+# entry in the list. Unicode does the same trick: an accented home directory can
+# be spelled NFC or NFD, both accepted by the filesystem, neither matching the
+# other byte for byte. Device and inode are what the kernel itself uses to
+# decide whether two names are one directory, and they cannot be spelled around.
+path_identity() {
+    stat -f '%d:%i' "$1" 2>/dev/null || stat -c '%d:%i' "$1" 2>/dev/null || printf ''
+}
+
+# protected_dirs lists every path that must never be a Conduit data directory.
+#
+# The mount points are here because an external disk, a network share or a
+# container bind mount is somebody's entire filesystem, and "--data-dir
+# /Volumes" differs from a real one by a single missing component.
+protected_dirs() {
+    printf '%s\n' / /usr /etc /var /opt /tmp /bin /sbin /home /Users /root \
+                  /System /Library /Applications /private /dev /proc /boot \
+                  /Volumes /mnt /media /net /srv
+
+    local home_canonical
+    home_canonical="$(canonicalize_path "$HOME")"
+    printf '%s\n' "$home_canonical"
+
+    # A non-standard home such as /export/people/amlan has a parent worth
+    # protecting that /Users and /home do not cover.
+    local parent="${home_canonical%/*}"
+    if [[ -n "$parent" && "$parent" != "$home_canonical" ]]; then
+        printf '%s\n' "$parent"
+    fi
 }
 
 # assert_safe_data_dir refuses a --data-dir that would make the purge paths
@@ -192,17 +235,39 @@ assert_safe_data_dir() {
     local dir="$1"
     [[ -n "${dir// /}" ]] || die "--data-dir cannot be empty"
 
+    # A relative path resolves against whatever directory the script happened to
+    # be run from, which is not something to guess at when the next step is a
+    # recursive delete. Canonicalisation would silently make one absolute, so
+    # the refusal has to come first.
+    if [[ "$DATA_DIR_EXPLICIT" == true && "$dir" != /* && "$dir" != "~"* ]]; then
+        die "--data-dir must be an absolute path (got: '$dir')"
+    fi
+
     local canonical
     canonical="$(canonicalize_path "$dir")"
 
-    local protected
-    for protected in / /usr /etc /var /opt /tmp /bin /sbin /home /Users /root \
-                     /System /Library /Applications /private /dev /proc /boot \
-                     "$(canonicalize_path "$HOME")"; do
+    local canonical_id
+    canonical_id="$(path_identity "$canonical")"
+
+    local protected protected_id
+    while IFS= read -r protected; do
+        [[ -n "$protected" ]] || continue
+
+        # Lexical first: the only check available for a protected path that does
+        # not exist on this machine (/mnt on a Mac, /Volumes on Linux).
         if [[ "$canonical" == "$protected" ]]; then
             die "refusing to treat $canonical (resolved from '$dir') as a Conduit data directory"
         fi
-    done
+
+        # Then by identity, which catches every spelling the filesystem accepts
+        # and the string comparison does not.
+        if [[ -n "$canonical_id" ]]; then
+            protected_id="$(path_identity "$protected")"
+            if [[ -n "$protected_id" && "$canonical_id" == "$protected_id" ]]; then
+                die "refusing to treat $canonical as a Conduit data directory (it is $protected under a different spelling)"
+            fi
+        fi
+    done < <(protected_dirs)
 
     # Refused rather than followed: on macOS `rm -rf dir/` empties a symlink's
     # TARGET while the binary's os.RemoveAll removes only the link, so the two

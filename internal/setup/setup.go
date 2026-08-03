@@ -540,6 +540,18 @@ func Uninstall(ctx context.Context, dataDir string, opts UninstallOptions) (*Uni
 			return result, err
 		}
 
+		// A directory holding none of Conduit's files is far more likely to be
+		// a mistyped path than a real request. Checked here rather than only in
+		// the CLI so that the desktop GUI and any other caller are covered by
+		// the same backstop.
+		if opts.RemoveDataDir {
+			if cerr := assertConduitDataDir(safe, opts.Force); cerr != nil {
+				result.Success = false
+				result.Errors = append(result.Errors, cerr.Error())
+				return result, cerr
+			}
+		}
+
 		switch {
 		case opts.RemoveDataDir:
 			remove("data directory", safe, true)

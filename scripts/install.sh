@@ -86,6 +86,15 @@ OPTIONS
                         and do not create the data directory.
     -h, --help          Show this help.
 
+WHAT IT CHANGES
+    - installs the conduit binary to --prefix
+    - appends a PATH block to ~/.zshrc or ~/.bashrc, marked with a "# Conduit"
+      comment, if the prefix is not already on PATH. That marker is what lets
+      uninstall.sh remove the block later without guessing at your own edits.
+    - registers the MCP server with an AI client (unless --no-setup)
+
+    It writes nothing else, installs no services, and pulls no containers.
+
 SUPPORTED PLATFORMS
     macOS arm64 (Apple Silicon), Linux x86_64.
 
@@ -372,19 +381,77 @@ install_binary() {
 # PATH
 # ---------------------------------------------------------------------------
 
+# CONDUIT_PATH_MARKER introduces the PATH line this script writes.
+#
+# It is the ONLY thing the uninstaller matches on, so the two must stay in
+# step -- and it must stay identical to CONDUIT_PATH_MARKER in uninstall.sh and
+# conduitPathMarker in internal/setup/setup.go.
+readonly CONDUIT_PATH_MARKER="# Conduit"
+
+# profile_for_shell returns the rc file this user's shell reads.
+#
+# fish is excluded deliberately: its syntax is not POSIX, so the block written
+# below would be a syntax error rather than a PATH entry.
+profile_for_shell() {
+    case "$(basename "${SHELL:-sh}")" in
+        zsh)  printf '%s' "${HOME}/.zshrc" ;;
+        bash) printf '%s' "${HOME}/.bashrc" ;;
+        *)    printf '' ;;
+    esac
+}
+
+# add_to_path appends Conduit's PATH block to the user's shell profile.
+#
+# Previously this only printed the line and told the user to add it themselves.
+# The result was that nothing on any machine ever carried the marker comment,
+# which made the uninstaller's profile cleanup dead code: it searched for a
+# signature that by construction did not exist, while the help promised to
+# remove PATH entries. Either the installer writes the marker or the
+# uninstaller should stop claiming to remove it; writing it is the half that
+# also saves the user a manual step.
+#
+# The block is appended, never edited in place, and the marker is what makes it
+# removable later without guessing.
+add_to_path() {
+    local profile
+    profile="$(profile_for_shell)"
+
+    if [[ -z "$profile" ]]; then
+        warn "${PREFIX} is not on your PATH."
+        case "$(basename "${SHELL:-sh}")" in
+            fish) warn "  Add it with: fish_add_path ${PREFIX}" ;;
+            *)    warn "  Add it with: export PATH=\"${PREFIX}:\$PATH\"" ;;
+        esac
+        return 0
+    fi
+
+    # Already ours? Adding a second copy would put two identical entries on
+    # PATH and leave the uninstaller two blocks to remove.
+    if [[ -f "$profile" ]] && grep -qF "$CONDUIT_PATH_MARKER" "$profile" 2>/dev/null; then
+        info "PATH entry already present in ${profile}"
+        return 0
+    fi
+
+    info "Adding ${PREFIX} to PATH in ${profile}"
+
+    {
+        printf '\n%s\n' "$CONDUIT_PATH_MARKER"
+        printf 'export PATH="%s:$PATH"\n' "$PREFIX"
+    } >> "$profile" || {
+        warn "could not write to ${profile}. Add this yourself:"
+        warn "    export PATH=\"${PREFIX}:\$PATH\""
+        return 0
+    }
+
+    success "PATH updated in ${profile}"
+    warn "Open a new shell, or run: export PATH=\"${PREFIX}:\$PATH\""
+}
+
 check_path() {
     case ":${PATH}:" in
         *":${PREFIX}:"*) return 0 ;;
     esac
-
-    warn "${PREFIX} is not on your PATH."
-    warn "  Add it to your shell profile:"
-    case "$(basename "${SHELL:-sh}")" in
-        zsh)  warn "    echo 'export PATH=\"${PREFIX}:\$PATH\"' >> ~/.zshrc && exec zsh" ;;
-        bash) warn "    echo 'export PATH=\"${PREFIX}:\$PATH\"' >> ~/.bashrc && exec bash" ;;
-        fish) warn "    fish_add_path ${PREFIX}" ;;
-        *)    warn "    export PATH=\"${PREFIX}:\$PATH\"" ;;
-    esac
+    add_to_path
 }
 
 # ---------------------------------------------------------------------------
