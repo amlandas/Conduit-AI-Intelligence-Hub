@@ -1257,8 +1257,28 @@ func (hs *HybridSearcher) SearchWithFallback(ctx context.Context, query string, 
 		return partialResult, nil
 	}
 
-	// Phase 4: No results found - return empty with suggestions
+	// Phase 4: No results found - return empty with suggestions.
+	//
+	// Issue #75: the ladder used to build this from scratch, throwing away the
+	// primary search's DegradedMode. A query that found nothing because the
+	// lexical engine had FAILED came back looking exactly like a query that
+	// found nothing because nothing matched.
 	hs.logger.Info().Str("query", query).Msg("no results found after all fallback attempts")
+
+	if result.DegradedMode {
+		return &HybridSearchResult{
+			Results:       []SearchHit{},
+			TotalHits:     0,
+			Query:         query,
+			SearchTime:    float64(time.Since(start).Milliseconds()),
+			Mode:          result.Mode,
+			FallbackLevel: 3,
+			Confidence:    "none",
+			DegradedMode:  true,
+			Note: result.Note + " No matching documents found, but a retrieval strategy failed, " +
+				"so this is not evidence that the knowledge base lacks the content.",
+		}, nil
+	}
 
 	return &HybridSearchResult{
 		Results:       []SearchHit{},

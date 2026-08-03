@@ -54,6 +54,31 @@ func formatHit(hit kb.SearchHit) string {
 		hit.Title, hit.Score, hit.Path, hit.Snippet)
 }
 
+// degradedBanner renders the degraded-mode note for a hybrid result, or "" when
+// nothing failed.
+//
+// The previous server computed a "<mode> (degraded - semantic unavailable)"
+// string here and then threw it away -- the value was assigned and never used,
+// so the only degraded signal that ever reached a client was result.Note on the
+// EMPTY-result path. A client receiving five hits from a half-working engine
+// was told nothing at all.
+//
+// It follows the same convention as graphDisabledNote below: a labelled line
+// plus an explanation, prepended to the content the client is already getting,
+// rather than a protocol-level error. An AI client can detect it by matching
+// "retrieval: degraded".
+func degradedBanner(res *kb.HybridSearchResult) string {
+	if res == nil || !res.DegradedMode {
+		return ""
+	}
+	reason := res.Note
+	if reason == "" {
+		reason = "A retrieval strategy was unavailable for this query."
+	}
+	return "retrieval: degraded\n\n" + reason + "\n\n" +
+		"The results below come from the remaining strategies and may be less complete than usual."
+}
+
 // toolSearch performs a search using the hybrid searcher.
 func (s *Server) toolSearch(ctx context.Context, _ *mcp.CallToolRequest, args searchArgs) (*mcp.CallToolResult, any, error) {
 	limit := args.Limit
@@ -84,21 +109,17 @@ func (s *Server) toolSearch(ctx context.Context, _ *mcp.CallToolRequest, args se
 		return nil, nil, fmt.Errorf("search: %w", err)
 	}
 
-	// Format results as content blocks -- one block per hit, as before.
-	//
-	// Degraded-mode note: the previous implementation computed a
-	// "<mode> (degraded - semantic unavailable)" string here but never emitted
-	// it (the value was discarded), so the only degraded-mode signal that ever
-	// reached a client was result.Note on the empty-result path below. That
-	// behavior is preserved verbatim; surfacing the degraded banner on
-	// non-empty results would change output for every search and is out of
-	// scope for this port.
+	// Format results as content blocks -- one block per hit -- behind a
+	// degraded-mode banner when a retrieval strategy failed outright.
 	var texts []string
+	if banner := degradedBanner(result); banner != "" {
+		texts = append(texts, banner)
+	}
 	for _, hit := range result.Results {
 		texts = append(texts, formatHit(hit))
 	}
 
-	if len(texts) == 0 {
+	if len(result.Results) == 0 {
 		noteText := "No results found for: " + args.Query
 		if result.Note != "" {
 			noteText += "\n\n" + result.Note
@@ -183,12 +204,22 @@ func (s *Server) toolSearchWithContext(ctx context.Context, _ *mcp.CallToolReque
 		processed = processed[:limit]
 	}
 
+	banner := degradedBanner(result)
+
 	if len(processed) == 0 {
-		return textResult("No relevant documents found for: " + args.Query), nil, nil
+		text := "No relevant documents found for: " + args.Query
+		if banner != "" {
+			text = banner + "\n\n" + text
+		}
+		return textResult(text), nil, nil
 	}
 
 	// Build a nicely formatted response
 	var sb strings.Builder
+	if banner != "" {
+		sb.WriteString(banner)
+		sb.WriteString("\n\n")
+	}
 	sb.WriteString("## Relevant Context\n\n")
 	sb.WriteString(fmt.Sprintf("*Found %d documents for: \"%s\"*\n\n", len(processed), args.Query))
 
@@ -433,6 +464,9 @@ func (s *Server) kagFallback(ctx context.Context, args kagQueryArgs, note string
 	texts := []string{note}
 
 	result, err := s.hybrid.SearchWithFallback(ctx, query, opts)
+	if banner := degradedBanner(result); banner != "" {
+		texts = append(texts, banner)
+	}
 	if err != nil {
 		// Retrieval failing too is worth saying plainly, but it is still not a
 		// protocol error: the client asked a question and gets an answer about

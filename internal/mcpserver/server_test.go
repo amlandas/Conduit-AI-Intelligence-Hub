@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -584,6 +585,103 @@ func TestPromptsListAndGet(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Unit coverage for chunk reassembly, ported alongside the handler.
 // ---------------------------------------------------------------------------
+
+// TestDegradedBannerIsSurfaced covers the banner the previous server computed
+// and discarded (WP-3.4).
+//
+// The old code built a "<mode> (degraded - semantic unavailable)" string in
+// toolSearch and never emitted it, so a client receiving hits from a
+// half-working engine was told nothing. The only degraded signal that reached
+// anyone was result.Note on the empty-result path.
+func TestDegradedBannerIsSurfaced(t *testing.T) {
+	t.Run("healthy searches carry no banner", func(t *testing.T) {
+		cs := connect(t, testServer(t))
+		text := resultText(t, callText(t, cs, ToolSearch, map[string]any{"query": "authentication token"}))
+		if strings.Contains(text, "retrieval: degraded") {
+			t.Errorf("a healthy search emitted a degraded banner:\n%s", text)
+		}
+	})
+
+	t.Run("a failed strategy is announced", func(t *testing.T) {
+		db, _ := testDB(t)
+		// Dropping the FTS table makes the lexical half fail outright, which is
+		// a failure rather than a miss and must be reported as such.
+		if _, err := db.ExecContext(context.Background(), `DROP TABLE kb_fts`); err != nil {
+			t.Fatalf("drop kb_fts: %v", err)
+		}
+		cs := connect(t, New(db, kb.NewHybridSearcher(kb.NewSearcher(db), nil)))
+
+		text := resultText(t, callText(t, cs, ToolSearch, map[string]any{"query": "authentication token"}))
+		if !strings.Contains(text, "retrieval: degraded") {
+			t.Errorf("kb_search did not announce degraded mode:\n%s", text)
+		}
+		if !strings.Contains(text, "Lexical search failed") {
+			t.Errorf("the banner does not name the failure:\n%s", text)
+		}
+
+		ctxText := resultText(t, callText(t, cs, ToolSearchWithContext, map[string]any{"query": "authentication token"}))
+		if !strings.Contains(ctxText, "retrieval: degraded") {
+			t.Errorf("kb_search_with_context did not announce degraded mode:\n%s", ctxText)
+		}
+	})
+}
+
+// TestToolSchemasAreFrozen pins the wire contract for every tool: argument
+// names, types and required-ness. Descriptions are pinned separately by
+// TestToolDescriptionsCarriedOverVerbatim.
+//
+// AI clients are prompt-tuned against these. WP-3.4 reshaped
+// kb.HybridSearchOptions underneath the handlers; this test is what makes that
+// safe, by proving none of it reached the wire.
+func TestToolSchemasAreFrozen(t *testing.T) {
+	cs := connect(t, testServer(t))
+
+	res, err := cs.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+
+	want := map[string][]string{
+		ToolSearch:            {"query", "limit", "source_id", "mode", "recall_mode"},
+		ToolLexicalSearch:     {"query", "limit", "source_id"},
+		ToolSearchWithContext: {"query", "source_id", "limit", "mode", "recall_mode"},
+		ToolListSources:       {},
+		ToolGetDocument:       {"document_id"},
+		ToolStats:             {"source_id"},
+		ToolKAGQuery:          {"query", "entities", "include_relations", "max_hops", "limit", "source_id"},
+	}
+
+	for _, tool := range res.Tools {
+		wantProps, ok := want[tool.Name]
+		if !ok {
+			t.Errorf("unexpected tool %q on the wire", tool.Name)
+			continue
+		}
+		schema, ok := tool.InputSchema.(map[string]any)
+		if !ok {
+			t.Errorf("tool %q input schema is %T, want a JSON object", tool.Name, tool.InputSchema)
+			continue
+		}
+		props, _ := schema["properties"].(map[string]any)
+		var got []string
+		for name := range props {
+			got = append(got, name)
+		}
+		sort.Strings(got)
+		wantSorted := append([]string(nil), wantProps...)
+		sort.Strings(wantSorted)
+		if len(got) != len(wantSorted) {
+			t.Errorf("tool %q properties: got %v, want %v", tool.Name, got, wantSorted)
+			continue
+		}
+		for i := range got {
+			if got[i] != wantSorted[i] {
+				t.Errorf("tool %q properties: got %v, want %v", tool.Name, got, wantSorted)
+				break
+			}
+		}
+	}
+}
 
 func TestRemoveOverlaps(t *testing.T) {
 	tests := []struct {
