@@ -1,16 +1,33 @@
 version: 2
+
+# Conduit dependency update policy.
+#
+# The npm ecosystem for apps/conduit-desktop is DELIBERATELY OMITTED.
+#
+# Desktop (Electron) development was halted in July 2026 and the app is frozen:
+# it is pinned to end-of-life Electron 28 and will never be updated. See
+# apps/conduit-desktop/README.md and docs/KNOWN_ISSUES.md (SEC-002).
+#
+# That frozen npm tree accounts for the overwhelming majority of the
+# repository's Dependabot alerts, which buries the small number of real,
+# actionable Go module alerts. Since no npm dependency there will ever be
+# upgraded, update pull requests for it are pure noise.
+#
+# Omitting the ecosystem here stops Dependabot from raising update PRs against
+# the frozen tree. Do NOT add an npm entry for apps/conduit-desktop unless the
+# desktop app is un-frozen, which is not planned: Conduit v2 is CLI/MCP only.
+
 updates:
+  # Go modules for the CLI, daemon, and MCP server (the supported product).
   - package-ecosystem: gomod
     directory: /
     schedule:
       interval: weekly
     open-pull-requests-limit: 5
-  - package-ecosystem: npm
-    directory: /apps/conduit-desktop
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
+
+  # GitHub Actions used by the release and CI workflows.
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    open-pull-requests-limit: 5
