@@ -252,20 +252,19 @@ type KAGOllamaConfig struct {
 // RAGConfig holds retrieval tuning parameters.
 // Lower thresholds = more results (better recall), higher = fewer (better precision).
 type RAGConfig struct {
-	// MinScore is the minimum similarity score threshold (0.0-1.0).
+	// MinScore is the minimum similarity score threshold (0.0-1.0) for
+	// semantic search. Hybrid search's threshold is part of RecallMode.
 	MinScore float64 `mapstructure:"min_score"`
 
-	// SemanticWeight balances semantic against lexical retrieval (0.0-1.0).
-	SemanticWeight float64 `mapstructure:"semantic_weight"`
-
-	// EnableMMR turns on Maximal Marginal Relevance result diversification.
-	EnableMMR bool `mapstructure:"enable_mmr"`
-
-	// MMRLambda trades relevance against diversity (0.0-1.0).
-	MMRLambda float64 `mapstructure:"mmr_lambda"`
-
-	// EnableRerank turns on semantic reranking of top candidates.
-	EnableRerank bool `mapstructure:"enable_rerank"`
+	// RecallMode is the precision/recall preset for hybrid search:
+	// "high", "balanced" (default) or "precise".
+	//
+	// WP-3.4 replaced semantic_weight, enable_mmr, mmr_lambda and
+	// enable_rerank with this single key. Those four fed
+	// kb.HybridSearchOptions fields that the search engine either never read
+	// (issue #69) or overwrote from the preset before use, so setting them
+	// changed nothing a user could observe.
+	RecallMode string `mapstructure:"recall_mode"`
 
 	// DefaultLimit is the default number of results to return.
 	DefaultLimit int `mapstructure:"default_limit"`
@@ -330,12 +329,9 @@ func DefaultConfig() *Config {
 			ChunkOverlap:  100,
 			WatchDebounce: 500 * time.Millisecond,
 			RAG: RAGConfig{
-				MinScore:       0.0,  // No filtering - return all results, let the client decide
-				SemanticWeight: 0.5,  // Balanced hybrid search
-				EnableMMR:      true, // Diversity enabled
-				MMRLambda:      0.7,  // 70% relevance, 30% diversity
-				EnableRerank:   true, // Reranking enabled
-				DefaultLimit:   10,
+				MinScore:     0.0, // No filtering - return all results, let the client decide
+				RecallMode:   "balanced",
+				DefaultLimit: 10,
 			},
 			KAG: KAGConfig{
 				Enabled:      false,     // Opt-in: no graph tables exist until this is true

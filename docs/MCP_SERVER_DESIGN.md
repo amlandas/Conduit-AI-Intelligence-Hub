@@ -445,9 +445,7 @@ mcp:
 kb:
   rag:
     min_score: 0.0              # No filtering - return all results
-    semantic_weight: 0.5        # Balance between semantic and keyword
-    enable_mmr: true            # Diversity filtering
-    mmr_lambda: 0.7             # Relevance vs diversity
+    recall_mode: balanced       # Precision/recall preset: high|balanced|precise
 ```
 
 ### Environment Variables

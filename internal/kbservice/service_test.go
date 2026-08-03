@@ -338,80 +338,94 @@ func TestSearch_RawSkipsProcessing(t *testing.T) {
 // Search option resolution
 // ---------------------------------------------------------------------------
 
-// TestHybridOpts_UnsetTuningKeepsConfigDefaults guards the sentinel semantics.
-// A min-score of 0 is meaningful (no filtering), so "unset" cannot be the zero
-// value -- it is Unset (-1), matching the CLI's flag defaults.
-func TestHybridOpts_UnsetTuningKeepsConfigDefaults(t *testing.T) {
+// TestHybridOpts_ConfigDefaults covers the config -> options mapping.
+//
+// WP-3.4 (#69) removed SemanticWeight, MMRLambda, DisableMMR and DisableRerank
+// from SearchRequest and the RAG config. They fed kb.HybridSearchOptions fields
+// the engine either never read or overwrote from the RecallMode preset, so
+// setting them changed nothing observable. RecallMode replaces all four.
+func TestHybridOpts_ConfigDefaults(t *testing.T) {
 	cfg := testConfig(t)
-	cfg.KB.RAG.SemanticWeight = 0.42
-	cfg.KB.RAG.MMRLambda = 0.33
-	cfg.KB.RAG.MinScore = 0.11
+	cfg.KB.RAG.RecallMode = "precise"
 	cfg.KB.RAG.DefaultLimit = 7
 
 	svc := openTestService(t, cfg)
 
 	opts := svc.hybridOpts(NewSearchRequest("q"))
 
-	if opts.SemanticWeight != 0.42 {
-		t.Errorf("SemanticWeight = %v, want the configured 0.42", opts.SemanticWeight)
-	}
-	if opts.MMRLambda != 0.33 {
-		t.Errorf("MMRLambda = %v, want the configured 0.33", opts.MMRLambda)
-	}
-	if opts.SimilarityFloor != 0.11 {
-		t.Errorf("SimilarityFloor = %v, want the configured 0.11", opts.SimilarityFloor)
+	if opts.RecallMode != kb.RecallModePrecise {
+		t.Errorf("RecallMode = %v, want the configured precise", opts.RecallMode)
 	}
 	if opts.Limit != 7 {
 		t.Errorf("Limit = %d, want the configured 7", opts.Limit)
 	}
+	if opts.Mode != kb.HybridModeAuto {
+		t.Errorf("Mode = %v, want auto", opts.Mode)
+	}
 }
 
-func TestHybridOpts_ExplicitZeroMinScoreOverrides(t *testing.T) {
+func TestHybridOpts_RequestOverridesConfig(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.KB.RAG.RecallMode = "balanced"
+	svc := openTestService(t, cfg)
+
+	req := NewSearchRequest("q")
+	req.RecallMode = "high"
+	req.Limit = 3
+	req.SourceID = "src_one"
+
+	opts := svc.hybridOpts(req)
+	if opts.RecallMode != kb.RecallModeHigh {
+		t.Errorf("RecallMode = %v, want high", opts.RecallMode)
+	}
+	if opts.Limit != 3 {
+		t.Errorf("Limit = %d, want 3", opts.Limit)
+	}
+	// The source filter used to be dropped on the hybrid path: --source was
+	// honoured by semantic and fts5 mode only, and silently ignored by the
+	// default mode.
+	if len(opts.Filter.SourceIDs) != 1 || opts.Filter.SourceIDs[0] != "src_one" {
+		t.Errorf("Filter.SourceIDs = %v, want [src_one]", opts.Filter.SourceIDs)
+	}
+}
+
+func TestHybridOpts_UnknownRecallModeFallsBackToBalanced(t *testing.T) {
+	cfg := testConfig(t)
+	cfg.KB.RAG.RecallMode = "nonsense"
+	svc := openTestService(t, cfg)
+
+	if got := svc.hybridOpts(NewSearchRequest("q")).RecallMode; got != kb.RecallModeBalanced {
+		t.Errorf("RecallMode = %v, want balanced for an unrecognised config value", got)
+	}
+
+	req := NewSearchRequest("q")
+	req.RecallMode = "also nonsense"
+	if got := svc.hybridOpts(req).RecallMode; got != kb.RecallModeBalanced {
+		t.Errorf("RecallMode = %v, want balanced for an unrecognised request value", got)
+	}
+}
+
+// TestSemanticOpts_MinScoreSentinel guards the sentinel semantics on the one
+// tuning value that survived: a min-score of 0 is meaningful (no filtering), so
+// "unset" cannot be the zero value -- it is Unset (-1).
+func TestSemanticOpts_MinScoreSentinel(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.KB.RAG.MinScore = 0.5
 	svc := openTestService(t, cfg)
 
+	if got := svc.semanticOpts(NewSearchRequest("q")).MinScore; got != 0.5 {
+		t.Errorf("MinScore = %v, want the configured 0.5 when the request leaves it unset", got)
+	}
+
 	req := NewSearchRequest("q")
 	req.MinScore = 0 // an explicit "do not filter"
-
-	opts := svc.hybridOpts(req)
-	if opts.SimilarityFloor != 0 {
-		t.Errorf("SimilarityFloor = %v, want 0: an explicit zero must override the config",
-			opts.SimilarityFloor)
+	if got := svc.semanticOpts(req).MinScore; got != 0 {
+		t.Errorf("MinScore = %v, want 0: an explicit zero must override the config", got)
 	}
-}
 
-func TestHybridOpts_OutOfRangeTuningIsIgnored(t *testing.T) {
-	cfg := testConfig(t)
-	cfg.KB.RAG.SemanticWeight = 0.5
-	svc := openTestService(t, cfg)
-
-	req := NewSearchRequest("q")
-	req.SemanticWeight = 4.2 // nonsense; the HTTP layer ignored it, so do we
-
-	opts := svc.hybridOpts(req)
-	if opts.SemanticWeight != 0.5 {
-		t.Errorf("SemanticWeight = %v, want the config value: out-of-range input is ignored",
-			opts.SemanticWeight)
-	}
-}
-
-func TestHybridOpts_DisableFlags(t *testing.T) {
-	cfg := testConfig(t)
-	cfg.KB.RAG.EnableMMR = true
-	cfg.KB.RAG.EnableRerank = true
-	svc := openTestService(t, cfg)
-
-	req := NewSearchRequest("q")
-	req.DisableMMR = true
-	req.DisableRerank = true
-
-	opts := svc.hybridOpts(req)
-	if opts.EnableMMR {
-		t.Error("DisableMMR did not turn MMR off")
-	}
-	if opts.EnableRerank {
-		t.Error("DisableRerank did not turn reranking off")
+	req.MinScore = 4.2 // nonsense; out of range input is ignored
+	if got := svc.semanticOpts(req).MinScore; got != 0.5 {
+		t.Errorf("MinScore = %v, want the config value: out-of-range input is ignored", got)
 	}
 }
 

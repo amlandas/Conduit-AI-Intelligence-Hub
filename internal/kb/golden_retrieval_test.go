@@ -226,7 +226,7 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 			query:          "created equal",
 			wantMode:       HybridModeFusion,
 			wantDocs:       []string{"01-gettysburg-address", "02-declaration-preamble"}, // #76 moved this ranking
-			wantTopScore:   0.009016393442622951,                                         // 0.5 (lexical weight) * 1/(60+1) * 1.1 (agreement)
+			wantTopScore:   0.018032786885245903,                                         // #69: 1/(60+1) * 1.1 (agreement), unweighted
 			wantConfidence: "medium",
 			wantStrategies: 1,
 		},
@@ -235,7 +235,7 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 			query:          "Wonderland",
 			wantMode:       HybridModeFusion,
 			wantDocs:       []string{"04-alice-down-the-rabbit-hole", "04-alice-down-the-rabbit-hole"}, // #76: two chunks, not three
-			wantTopScore:   0.010819672131147543,                                                      // ... * 1.2 for the single-word entity hit
+			wantTopScore:   0.021639344262295086,                                                      // ... * 1.2 for the single-word entity hit
 			wantConfidence: "medium",
 			wantStrategies: 1,
 		},
@@ -247,7 +247,7 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 			query:          "summer's day",
 			wantMode:       HybridModeFusion,
 			wantDocs:       []string{"05-sonnet-18"},
-			wantTopScore:   0.009016393442622951,
+			wantTopScore:   0.018032786885245903,
 			wantConfidence: "medium",
 			wantStrategies: 1,
 		},

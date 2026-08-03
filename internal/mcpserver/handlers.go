@@ -70,7 +70,7 @@ func (s *Server) toolSearch(ctx context.Context, _ *mcp.CallToolRequest, args se
 		RecallMode: recallMode(args.RecallMode),
 	}
 	if args.SourceID != "" {
-		opts.SourceIDs = []string{args.SourceID}
+		opts.Filter.SourceIDs = []string{args.SourceID}
 	}
 
 	// Query-shape instrumentation: features only, never the query text.
@@ -165,7 +165,7 @@ func (s *Server) toolSearchWithContext(ctx context.Context, _ *mcp.CallToolReque
 		RecallMode: recallMode(args.RecallMode),
 	}
 	if args.SourceID != "" {
-		opts.SourceIDs = []string{args.SourceID}
+		opts.Filter.SourceIDs = []string{args.SourceID}
 	}
 
 	// Use hybrid searcher with fallback
@@ -420,7 +420,7 @@ func (s *Server) kagFallback(ctx context.Context, args kagQueryArgs, note string
 		RecallMode: kb.RecallModeBalanced,
 	}
 	if args.SourceID != "" {
-		opts.SourceIDs = []string{args.SourceID}
+		opts.Filter.SourceIDs = []string{args.SourceID}
 	}
 
 	// Entity hints are query terms too; folding them in keeps the fallback

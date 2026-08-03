@@ -6,6 +6,7 @@ package kb
 
 import (
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -30,37 +31,12 @@ func scoreOf(hits []SearchHit, chunkID string) (float64, bool) {
 	return 0, false
 }
 
-func TestQueryTypeWeightMatrix(t *testing.T) {
-	hs := NewHybridSearcher(nil, nil)
-
-	tests := []struct {
-		qt          QueryType
-		wantSem     float64
-		wantLexical float64
-	}{
-		{QueryTypeExactQuote, 0.1, 0.9},
-		{QueryTypeEntity, 0.4, 0.6},
-		{QueryTypeConceptual, 0.8, 0.2},
-		{QueryTypeFactual, 0.5, 0.5},
-		{QueryTypeExploratory, 0.7, 0.3},
-		{QueryType("unrecognised"), 0.5, 0.5},
-	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.qt), func(t *testing.T) {
-			got := hs.getWeightsForQueryType(tt.qt)
-			if got.Semantic != tt.wantSem || got.Lexical != tt.wantLexical {
-				t.Errorf("weights for %s: got {sem %.2f, lex %.2f}, want {sem %.2f, lex %.2f}",
-					tt.qt, got.Semantic, got.Lexical, tt.wantSem, tt.wantLexical)
-			}
-			if math.Abs(got.Semantic+got.Lexical-1.0) > 1e-9 {
-				t.Errorf("weights for %s do not sum to 1", tt.qt)
-			}
-		})
-	}
-	// The matrix is real and differentiated. Whether it is ever USED is a
-	// separate question -- see TestKnownBug_Issue69.
-}
+// WP-3.4 deleted TestQueryTypeWeightMatrix along with the matrix it covered.
+// The matrix mapped query types to semantic/lexical fusion weights that
+// searchFusion overrode before reading (issue #69), so the test proved only
+// that a table of unused constants was internally consistent. Fusion is now
+// unweighted RRF; TestIssue69_FusionIsUnweightedRRF in known_bugs_test.go
+// covers what replaced it.
 
 func TestQueryClassification(t *testing.T) {
 	hs := NewHybridSearcher(nil, nil)
@@ -111,28 +87,27 @@ func TestQueryClassification(t *testing.T) {
 
 // TestRRFArithmetic pins the exact reciprocal-rank-fusion formula:
 //
-//	score(d) = lexicalWeight/(k + ftsRank) + semanticWeight/(k + semanticRank)
+//	score(d) = 1/(k + ftsRank) + 1/(k + semanticRank)
 //
-// with 1-indexed ranks. Both the live implementation
-// (applyRRFWithAgreement) and the unreferenced legacy one (applyRRF) are
-// covered, because the legacy formula is the one the v2 rebuild is most likely
-// to lift.
+// with 1-indexed ranks, summed over the strategies that found d. The
+// per-strategy weights this used to carry went with the adaptive-weighting
+// machinery in #69; they were always 0.5/0.5 in practice, so they scaled every
+// score identically and changed no ordering.
 func TestRRFArithmetic(t *testing.T) {
 	hs := NewHybridSearcher(nil, nil)
 
 	fts := []SearchHit{hit("a", "aaa", 0), hit("b", "bbb", 0), hit("c", "ccc", 0)}
 	sem := []SearchHit{hit("c", "ccc", 0), hit("d", "ddd", 0), hit("a", "aaa", 0)}
 	const k = 60
-	weights := StrategyWeights{Semantic: 0.4, Lexical: 0.6}
 
 	want := map[string]float64{
-		"a": 0.6/61 + 0.4/63, // fts rank 1, semantic rank 3
-		"c": 0.6/63 + 0.4/61, // fts rank 3, semantic rank 1
-		"b": 0.6 / 62,        // fts only, rank 2
-		"d": 0.4 / 62,        // semantic only, rank 2
+		"a": 1.0/61 + 1.0/63, // fts rank 1, semantic rank 3
+		"c": 1.0/63 + 1.0/61, // fts rank 3, semantic rank 1
+		"b": 1.0 / 62,        // fts only, rank 2
+		"d": 1.0 / 62,        // semantic only, rank 2
 	}
 
-	got, info := hs.applyRRFWithAgreement(fts, sem, k, weights)
+	got, info := hs.applyRRFWithAgreement(fts, sem, k)
 
 	if order := chunkIDs(got); !equalStrings(order, []string{"a", "c", "b", "d"}) {
 		t.Errorf("fusion order: got %v, want [a c b d]", order)
@@ -176,22 +151,21 @@ func TestRRFArithmetic(t *testing.T) {
 
 func TestRRFEdgeCases(t *testing.T) {
 	hs := NewHybridSearcher(nil, nil)
-	weights := StrategyWeights{Semantic: 0.5, Lexical: 0.5}
 
 	t.Run("both lists empty", func(t *testing.T) {
-		got, _ := hs.applyRRFWithAgreement(nil, nil, 60, weights)
+		got, _ := hs.applyRRFWithAgreement(nil, nil, 60)
 		if len(got) != 0 {
 			t.Errorf("got %d hits, want 0", len(got))
 		}
 	})
 
 	t.Run("lexical only", func(t *testing.T) {
-		got, _ := hs.applyRRFWithAgreement([]SearchHit{hit("a", "aaa", -3)}, nil, 60, weights)
+		got, _ := hs.applyRRFWithAgreement([]SearchHit{hit("a", "aaa", -3)}, nil, 60)
 		if len(got) != 1 {
 			t.Fatalf("got %d hits, want 1", len(got))
 		}
-		if math.Abs(got[0].Score-0.5/61) > 1e-12 {
-			t.Errorf("score = %.15f, want %.15f", got[0].Score, 0.5/61)
+		if math.Abs(got[0].Score-1.0/61) > 1e-12 {
+			t.Errorf("score = %.15f, want %.15f", got[0].Score, 1.0/61)
 		}
 		// RRF overwrites the incoming bm25 score. This is why the fusion path
 		// returns positive scores and the lexical-only path returns negative
@@ -202,21 +176,21 @@ func TestRRFEdgeCases(t *testing.T) {
 	})
 
 	t.Run("k of zero makes rank 1 dominate", func(t *testing.T) {
-		got, _ := hs.applyRRFWithAgreement([]SearchHit{hit("a", "aaa", 0), hit("b", "bbb", 0)}, nil, 0, weights)
-		if math.Abs(got[0].Score-0.5/1) > 1e-12 {
-			t.Errorf("score = %.15f, want 0.5", got[0].Score)
+		got, _ := hs.applyRRFWithAgreement([]SearchHit{hit("a", "aaa", 0), hit("b", "bbb", 0)}, nil, 0)
+		if math.Abs(got[0].Score-1.0/1) > 1e-12 {
+			t.Errorf("score = %.15f, want 1.0", got[0].Score)
 		}
 	})
 
 	t.Run("duplicate chunk ids in one list keep the worst rank", func(t *testing.T) {
 		// The rank map is written in order, so a repeated chunk id ends up
 		// holding its LAST (worst) rank while the hit payload is also the last.
-		got, info := hs.applyRRFWithAgreement([]SearchHit{hit("a", "first", 0), hit("a", "second", 0)}, nil, 60, weights)
+		got, info := hs.applyRRFWithAgreement([]SearchHit{hit("a", "first", 0), hit("a", "second", 0)}, nil, 60)
 		if len(got) != 1 {
 			t.Fatalf("got %d hits, want 1 (deduplicated by chunk id)", len(got))
 		}
-		if math.Abs(got[0].Score-0.5/62) > 1e-12 {
-			t.Errorf("score = %.15f, want %.15f (rank 2 won)", got[0].Score, 0.5/62)
+		if math.Abs(got[0].Score-1.0/62) > 1e-12 {
+			t.Errorf("score = %.15f, want %.15f (rank 2 won)", got[0].Score, 1.0/62)
 		}
 		if len(info.chunkStrategies["a"]) != 2 {
 			t.Errorf("strategy list should record both appearances, got %v", info.chunkStrategies["a"])
@@ -538,94 +512,72 @@ func TestCalculateOverallConfidence(t *testing.T) {
 	}
 }
 
-// TestRecallModePresets pins the option defaults that Search applies before any
-// searching happens. The v2 rebuild must keep these, or every score in the
-// golden files moves.
+// TestRecallModePresets covers resolveRecallMode, the single place the
+// precision/recall knobs are decided.
+//
+// WP-3.4 note: this test used to carry a hand-copied duplicate of the preset
+// switch, because the real one was inlined in Search with no seam. Extracting
+// resolveRecallMode removed the duplicate -- and with it the risk of the test
+// agreeing with itself while disagreeing with the engine.
 func TestRecallModePresets(t *testing.T) {
 	tests := []struct {
-		mode          RecallMode
-		wantMMR       bool
-		wantRerank    bool
-		wantFloor     float64
-		wantLambda    float64
-		wantRerankTop int
+		mode RecallMode
+		want recallSettings
 	}{
-		{mode: RecallModeHigh, wantMMR: false, wantRerank: true, wantFloor: 0.0, wantLambda: 1.0, wantRerankTop: 50},
-		{mode: RecallModePrecise, wantMMR: true, wantRerank: true, wantFloor: 0.01, wantLambda: 0.5, wantRerankTop: 30},
-		{mode: RecallModeBalanced, wantMMR: true, wantRerank: true, wantFloor: DefaultSimilarityFloor, wantLambda: DefaultMMRLambda, wantRerankTop: DefaultRerankTopN},
-		{mode: "", wantMMR: true, wantRerank: true, wantFloor: DefaultSimilarityFloor, wantLambda: DefaultMMRLambda, wantRerankTop: DefaultRerankTopN},
+		{
+			mode: RecallModeHigh,
+			want: recallSettings{enableMMR: false, mmrLambda: 1.0, similarityFloor: 0.0, enableRerank: true, rerankTopN: 50},
+		},
+		{
+			mode: RecallModePrecise,
+			want: recallSettings{enableMMR: true, mmrLambda: 0.5, similarityFloor: 0.01, enableRerank: true, rerankTopN: 30},
+		},
+		{
+			mode: RecallModeBalanced,
+			want: recallSettings{enableMMR: true, mmrLambda: DefaultMMRLambda, similarityFloor: DefaultSimilarityFloor, enableRerank: true, rerankTopN: DefaultRerankTopN},
+		},
+		{
+			mode: "", // unset falls back to balanced
+			want: recallSettings{enableMMR: true, mmrLambda: DefaultMMRLambda, similarityFloor: DefaultSimilarityFloor, enableRerank: true, rerankTopN: DefaultRerankTopN},
+		},
+		{
+			mode: "nonsense", // as does anything unrecognised
+			want: recallSettings{enableMMR: true, mmrLambda: DefaultMMRLambda, similarityFloor: DefaultSimilarityFloor, enableRerank: true, rerankTopN: DefaultRerankTopN},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(string(tt.mode), func(t *testing.T) {
-			opts := applyRecallModeForTest(HybridSearchOptions{RecallMode: tt.mode})
-			if opts.EnableMMR != tt.wantMMR {
-				t.Errorf("EnableMMR = %v, want %v", opts.EnableMMR, tt.wantMMR)
-			}
-			if opts.EnableRerank != tt.wantRerank {
-				t.Errorf("EnableRerank = %v, want %v", opts.EnableRerank, tt.wantRerank)
-			}
-			if opts.SimilarityFloor != tt.wantFloor {
-				t.Errorf("SimilarityFloor = %v, want %v", opts.SimilarityFloor, tt.wantFloor)
-			}
-			if opts.MMRLambda != tt.wantLambda {
-				t.Errorf("MMRLambda = %v, want %v", opts.MMRLambda, tt.wantLambda)
-			}
-			if opts.RerankTopN != tt.wantRerankTop {
-				t.Errorf("RerankTopN = %v, want %v", opts.RerankTopN, tt.wantRerankTop)
+			if got := resolveRecallMode(tt.mode); got != tt.want {
+				t.Errorf("resolveRecallMode(%q) = %+v, want %+v", tt.mode, got, tt.want)
 			}
 		})
 	}
 }
 
-// applyRecallModeForTest mirrors the preset block at the top of
-// HybridSearcher.Search. It is duplicated here because that block is inlined in
-// Search and there is no seam to call it directly. If the two ever disagree,
-// TestRecallModePresets is lying -- keep them in sync, and prefer extracting
-// the real function during WP-3.4.
-func applyRecallModeForTest(opts HybridSearchOptions) HybridSearchOptions {
-	if opts.Limit <= 0 {
-		opts.Limit = 10
+// TestHybridSearchOptionsSurface guards the shrink from #69: the option struct
+// is the public control surface for search, and every field on it must be one
+// the engine actually reads.
+func TestHybridSearchOptionsSurface(t *testing.T) {
+	const wantFields = 4
+	if got := reflect.TypeOf(HybridSearchOptions{}).NumField(); got != wantFields {
+		t.Errorf("HybridSearchOptions has %d fields, want %d. Adding a knob here means adding a way "+
+			"for a caller to be silently ignored -- which is what issue #69 was. Prefer RecallMode.",
+			got, wantFields)
 	}
-	if opts.RRFConstant <= 0 {
-		opts.RRFConstant = 60
+}
+
+// TestWithRRFConstant covers the searcher-level k that replaced the per-call
+// RRFConstant option.
+func TestWithRRFConstant(t *testing.T) {
+	if got := NewHybridSearcher(nil, nil).rrfConstant; got != DefaultRRFConstant {
+		t.Errorf("default k = %d, want %d", got, DefaultRRFConstant)
 	}
-	if opts.SemanticWeight <= 0 {
-		opts.SemanticWeight = 0.5
+	if got := NewHybridSearcher(nil, nil, WithRRFConstant(10)).rrfConstant; got != 10 {
+		t.Errorf("k = %d, want 10", got)
 	}
-	opts.BoostExactMatch = true
-	if opts.RecallMode == "" {
-		opts.RecallMode = RecallModeBalanced
+	// A non-positive k would divide by the rank alone and is rejected.
+	if got := NewHybridSearcher(nil, nil, WithRRFConstant(0)).rrfConstant; got != DefaultRRFConstant {
+		t.Errorf("k = %d, want the default %d for a non-positive override", got, DefaultRRFConstant)
 	}
-	switch opts.RecallMode {
-	case RecallModeHigh:
-		opts.EnableMMR = false
-		opts.EnableRerank = true
-		opts.SimilarityFloor = 0.0
-		opts.MMRLambda = 1.0
-		if opts.RerankTopN <= 0 {
-			opts.RerankTopN = 50
-		}
-	case RecallModePrecise:
-		opts.EnableMMR = true
-		opts.EnableRerank = true
-		opts.SimilarityFloor = 0.01
-		opts.MMRLambda = 0.5
-		if opts.RerankTopN <= 0 {
-			opts.RerankTopN = 30
-		}
-	default:
-		opts.EnableMMR = true
-		opts.EnableRerank = true
-		if opts.SimilarityFloor <= 0 {
-			opts.SimilarityFloor = DefaultSimilarityFloor
-		}
-		if opts.MMRLambda <= 0 {
-			opts.MMRLambda = DefaultMMRLambda
-		}
-		if opts.RerankTopN <= 0 {
-			opts.RerankTopN = DefaultRerankTopN
-		}
-	}
-	return opts
 }

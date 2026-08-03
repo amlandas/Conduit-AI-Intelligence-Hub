@@ -490,23 +490,13 @@ Conduit supports three search modes:
 For power users and AI integrations, Conduit provides fine-grained control over retrieval:
 
 ```bash
-# Lower similarity threshold (default: 0.1)
-# Use lower values to get more results when dealing with domain-specific terminology
-./bin/conduit kb search "ASL-3 safeguards" --min-score 0.05
+# Widen recall: keep everything potentially relevant, no diversity filtering
+./bin/conduit kb search "ASL-3 safeguards" --recall high
 
-# Adjust semantic vs keyword weight (0.0=keyword only, 1.0=semantic only)
-./bin/conduit kb search "authentication" --semantic-weight 0.8
+# Narrow to fewer, more distinct results
+./bin/conduit kb search "API design" --recall precise
 
-# Control diversity vs relevance (0.0=max diversity, 1.0=max relevance)
-./bin/conduit kb search "API design" --mmr-lambda 0.9
-
-# Disable diversity filtering for maximum relevance
-./bin/conduit kb search "specific function" --no-mmr
-
-# Disable reranking for raw vector scores
-./bin/conduit kb search "query" --no-rerank
-
-# Combine options for specialized use cases
+# Lower the similarity threshold for pure semantic search
 ./bin/conduit kb search "AI safety deployment" --semantic --min-score 0.0 --limit 20
 ```
 
@@ -514,12 +504,14 @@ For power users and AI integrations, Conduit provides fine-grained control over 
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--min-score` | 0.0 | Minimum similarity threshold (0.0-1.0) |
-| `--semantic-weight` | 0.5 | Semantic vs keyword balance (0.0-1.0) |
-| `--mmr-lambda` | 0.7 | Relevance vs diversity (0.0-1.0) |
+| `--recall` | balanced | Precision/recall preset: `high`, `balanced`, `precise` |
+| `--min-score` | 0.0 | Minimum similarity threshold for `--semantic` (0.0-1.0) |
 | `--limit` | 10 | Maximum results to return |
-| `--no-mmr` | false | Disable MMR diversity filtering |
-| `--no-rerank` | false | Disable semantic reranking |
+
+The `--semantic-weight`, `--mmr-lambda`, `--no-mmr` and `--no-rerank` flags were
+removed in v2. They fed engine settings that were either never read or
+overwritten by the recall preset before use, so setting them changed nothing.
+`--recall` is the single control that replaces them.
 
 **When to use lower thresholds**: If you're searching for domain-specific terminology (e.g., "ASL-3", "CBRN") that the embedding model wasn't trained on, use `--min-score 0.0` or `--min-score 0.05` to ensure results aren't filtered out. The consuming AI (Claude, GPT) has world knowledge and can determine true relevance from the returned chunks.
 

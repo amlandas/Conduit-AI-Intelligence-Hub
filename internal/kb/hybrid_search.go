@@ -43,20 +43,20 @@ const (
 	StrategySemantic   SearchStrategy = "semantic"    // Vector similarity search
 )
 
-// StrategyWeights defines the RRF weights for each query type.
-type StrategyWeights struct {
-	Semantic float64
-	Lexical  float64
-}
-
-// strategyWeightMatrix maps query types to optimal strategy weights.
-var strategyWeightMatrix = map[QueryType]StrategyWeights{
-	QueryTypeExactQuote:  {Semantic: 0.1, Lexical: 0.9}, // Lexical dominant
-	QueryTypeEntity:      {Semantic: 0.4, Lexical: 0.6}, // Balanced, lexical edge
-	QueryTypeConceptual:  {Semantic: 0.8, Lexical: 0.2}, // Semantic dominant
-	QueryTypeFactual:     {Semantic: 0.5, Lexical: 0.5}, // Equal weight
-	QueryTypeExploratory: {Semantic: 0.7, Lexical: 0.3}, // Semantic preferred
-}
+// WP-3.4 deleted StrategyWeights, strategyWeightMatrix and
+// getWeightsForQueryType -- issue #69.
+//
+// The matrix claimed to tune the semantic/lexical balance per query type. It
+// never did: Search defaulted opts.SemanticWeight to 0.5 when unset, and
+// searchFusion then read the matrix and UNCONDITIONALLY overrode it from
+// opts.SemanticWeight, which was now always > 0. Every query fused 50/50
+// whatever the classifier said. Two years of tuning values that nothing read.
+//
+// Rather than wire it up -- which would silently change every ranking in the
+// product on the strength of five hand-picked constants nobody has measured --
+// fusion is now plain unweighted RRF with a configurable k. Query
+// classification survives because selectMode still uses it to pick lexical
+// versus fusion, which is a decision the code actually acts on.
 
 // Precompiled regex patterns for query classification
 var (
@@ -80,11 +80,34 @@ type SemanticProvider interface {
 	Search(ctx context.Context, query string, opts SemanticSearchOptions) (*SemanticSearchResult, error)
 }
 
+// DefaultRRFConstant is the k in the reciprocal-rank formula 1/(k + rank).
+// 60 is the value from the original RRF paper and the one every stored score in
+// the golden corpus was computed with.
+const DefaultRRFConstant = 60
+
 // HybridSearcher combines FTS5 (lexical) and vector (semantic) search using RRF.
 type HybridSearcher struct {
-	fts      *Searcher
-	semantic SemanticProvider
-	logger   zerolog.Logger
+	fts         *Searcher
+	semantic    SemanticProvider
+	rrfConstant int
+	logger      zerolog.Logger
+}
+
+// HybridOption configures a HybridSearcher at construction.
+type HybridOption func(*HybridSearcher)
+
+// WithRRFConstant sets the k in RRF's 1/(k + rank).
+//
+// It is an engine tuning constant rather than a per-query knob, which is why it
+// lives on the searcher and not in HybridSearchOptions: changing it per call
+// makes scores from two calls incomparable, and nothing ever varied it.
+// Non-positive values are ignored.
+func WithRRFConstant(k int) HybridOption {
+	return func(hs *HybridSearcher) {
+		if k > 0 {
+			hs.rrfConstant = k
+		}
+	}
 }
 
 // HybridSearchMode determines how searches are combined.
@@ -123,23 +146,83 @@ const (
 	RecallModePrecise RecallMode = "precise"
 )
 
-// HybridSearchOptions configures hybrid search behavior.
-type HybridSearchOptions struct {
-	Limit           int              // Max results (default 10)
-	Mode            HybridSearchMode // Search mode (default auto)
-	RecallMode      RecallMode       // Recall/precision tradeoff preset (default balanced)
-	SemanticWeight  float64          // Weight for semantic results in fusion (0-1, default 0.5)
-	RRFConstant     int              // RRF k constant (default 60)
-	BoostExactMatch bool             // Boost results with exact query match (default true)
-	SourceIDs       []string         // Filter by source IDs
-	MimeTypes       []string         // Filter by MIME types
+// SearchFilter restricts which documents a search may return.
+type SearchFilter struct {
+	SourceIDs []string // Only these sources, when non-empty
+	MimeTypes []string // Only these MIME types, when non-empty
+}
 
-	// Quality enhancement options (configurable via RecallMode presets)
-	EnableMMR       bool    // Enable Maximal Marginal Relevance for diversity
-	MMRLambda       float64 // MMR lambda: 0=max diversity, 1=max relevance (default 0.7)
-	SimilarityFloor float64 // Minimum score threshold, reject below this
-	EnableRerank    bool    // Enable reranking of top candidates
-	RerankTopN      int     // Number of candidates to consider for reranking (default 30)
+// HybridSearchOptions configures one hybrid search.
+//
+// WP-3.4 cut this from thirteen fields to four. The audit behind that (#69):
+//
+//	Limit            live
+//	Mode             live
+//	RecallMode       live -- and the ONLY thing that set the quality knobs
+//	SourceIDs        live -> Filter.SourceIDs
+//	MimeTypes        live -> Filter.MimeTypes
+//	RRFConstant      live, but never varied -> WithRRFConstant on the searcher
+//	SemanticWeight   deleted with the adaptive-weighting machinery (#69)
+//	BoostExactMatch  DEAD: Search set it to true unconditionally, ignoring the caller
+//	EnableMMR        DEAD: every RecallMode branch overwrote it
+//	EnableRerank     DEAD: every RecallMode branch set it to true
+//	MMRLambda        overwritten by the high and precise presets; honoured only in balanced
+//	SimilarityFloor  overwritten by the high and precise presets; honoured only in balanced
+//	RerankTopN       honoured when > 0, otherwise preset
+//
+// The last three were the dangerous ones: a caller could set them, watch two of
+// the three presets silently discard the value, and have no way to tell. They
+// are now internal to the preset (see recallSettings), so the precision/recall
+// tradeoff has exactly one control surface.
+type HybridSearchOptions struct {
+	Limit      int              // Max results (default 10)
+	Mode       HybridSearchMode // Search mode (default auto)
+	RecallMode RecallMode       // Precision/recall preset (default balanced)
+	Filter     SearchFilter     // Source and MIME-type restrictions
+}
+
+// recallSettings are the quality-stage knobs a RecallMode preset resolves to.
+type recallSettings struct {
+	enableMMR       bool
+	mmrLambda       float64 // 0 = max diversity, 1 = max relevance
+	similarityFloor float64 // reject fused scores below this
+	enableRerank    bool
+	rerankTopN      int
+}
+
+// resolveRecallMode expands a preset into the stage settings it implies.
+//
+// This was an inline switch in Search with no seam, which is why
+// TestRecallModePresets used to carry a hand-copied duplicate of it.
+func resolveRecallMode(mode RecallMode) recallSettings {
+	switch mode {
+	case RecallModeHigh:
+		// Everything potentially relevant: no diversity filtering, no floor,
+		// and a wider rerank window.
+		return recallSettings{
+			enableMMR:       false,
+			mmrLambda:       1.0,
+			similarityFloor: 0.0,
+			enableRerank:    true,
+			rerankTopN:      50,
+		}
+	case RecallModePrecise:
+		return recallSettings{
+			enableMMR:       true,
+			mmrLambda:       0.5,
+			similarityFloor: 0.01,
+			enableRerank:    true,
+			rerankTopN:      30,
+		}
+	default: // RecallModeBalanced, and anything unrecognised
+		return recallSettings{
+			enableMMR:       true,
+			mmrLambda:       DefaultMMRLambda,
+			similarityFloor: DefaultSimilarityFloor,
+			enableRerank:    true,
+			rerankTopN:      DefaultRerankTopN,
+		}
+	}
 }
 
 // HybridSearchResult contains combined search results with metadata.
@@ -190,21 +273,26 @@ type QueryAnalysis struct {
 // into the SemanticProvider field would produce an interface that is non-nil
 // but panics on call, and every "is semantic available?" test in this file is a
 // nil comparison.
-func NewHybridSearcher(fts *Searcher, semantic *SemanticSearcher) *HybridSearcher {
+func NewHybridSearcher(fts *Searcher, semantic *SemanticSearcher, opts ...HybridOption) *HybridSearcher {
 	if semantic == nil {
-		return NewHybridSearcherWith(fts, nil)
+		return NewHybridSearcherWith(fts, nil, opts...)
 	}
-	return NewHybridSearcherWith(fts, semantic)
+	return NewHybridSearcherWith(fts, semantic, opts...)
 }
 
 // NewHybridSearcherWith creates a hybrid searcher over any semantic provider.
 // This is the injection seam used by tests.
-func NewHybridSearcherWith(fts *Searcher, semantic SemanticProvider) *HybridSearcher {
-	return &HybridSearcher{
-		fts:      fts,
-		semantic: semantic,
-		logger:   observability.Logger("kb.hybrid"),
+func NewHybridSearcherWith(fts *Searcher, semantic SemanticProvider, opts ...HybridOption) *HybridSearcher {
+	hs := &HybridSearcher{
+		fts:         fts,
+		semantic:    semantic,
+		rrfConstant: DefaultRRFConstant,
+		logger:      observability.Logger("kb.hybrid"),
 	}
+	for _, opt := range opts {
+		opt(hs)
+	}
+	return hs
 }
 
 // Search performs hybrid search using the configured mode.
@@ -215,54 +303,10 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, opts HybridS
 	if opts.Limit <= 0 {
 		opts.Limit = 10
 	}
-	if opts.RRFConstant <= 0 {
-		opts.RRFConstant = 60 // Standard RRF constant
-	}
-	if opts.SemanticWeight <= 0 {
-		opts.SemanticWeight = 0.5 // Equal weight by default
-	}
-	opts.BoostExactMatch = true // Always boost exact matches
-
-	// Apply RecallMode presets - these configure MMR, similarity floor, and candidates
-	// If RecallMode is not set, default to "balanced"
 	if opts.RecallMode == "" {
 		opts.RecallMode = RecallModeBalanced
 	}
-
-	// Apply preset configurations based on RecallMode
-	switch opts.RecallMode {
-	case RecallModeHigh:
-		// High recall: disable MMR, no floor, more candidates
-		opts.EnableMMR = false
-		opts.EnableRerank = true
-		opts.SimilarityFloor = 0.0
-		opts.MMRLambda = 1.0 // Not used when MMR disabled, but set for consistency
-		if opts.RerankTopN <= 0 {
-			opts.RerankTopN = 50 // More candidates for high recall
-		}
-	case RecallModePrecise:
-		// High precision: aggressive MMR, higher floor
-		opts.EnableMMR = true
-		opts.EnableRerank = true
-		opts.SimilarityFloor = 0.01
-		opts.MMRLambda = 0.5 // 50% relevance, 50% diversity
-		if opts.RerankTopN <= 0 {
-			opts.RerankTopN = 30
-		}
-	default: // RecallModeBalanced
-		// Balanced: moderate MMR, standard floor
-		opts.EnableMMR = true
-		opts.EnableRerank = true
-		if opts.SimilarityFloor <= 0 {
-			opts.SimilarityFloor = DefaultSimilarityFloor
-		}
-		if opts.MMRLambda <= 0 {
-			opts.MMRLambda = DefaultMMRLambda
-		}
-		if opts.RerankTopN <= 0 {
-			opts.RerankTopN = DefaultRerankTopN
-		}
-	}
+	recall := resolveRecallMode(opts.RecallMode)
 
 	// Analyze query
 	analysis := hs.analyzeQuery(query)
@@ -289,7 +333,7 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, opts HybridS
 	case HybridModeSemantic:
 		result = hs.searchSemanticOnly(ctx, query, opts)
 	default:
-		result = hs.searchFusion(ctx, query, opts, analysis)
+		result = hs.searchFusion(ctx, query, opts, recall, analysis)
 	}
 
 	result.Query = query
@@ -450,9 +494,9 @@ func (hs *HybridSearcher) selectMode(analysis QueryAnalysis) HybridSearchMode {
 	return HybridModeFusion
 }
 
-// searchFusion performs parallel FTS5 and semantic search, then combines with RRF.
-// Phase 12: Enhanced with agreement analysis and query-adaptive weighting.
-func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts HybridSearchOptions, analysis QueryAnalysis) *HybridSearchResult {
+// searchFusion performs parallel FTS5 and semantic search, then combines them
+// with unweighted RRF.
+func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts HybridSearchOptions, recall recallSettings, analysis QueryAnalysis) *HybridSearchResult {
 	// Fetch more candidates than needed for better fusion
 	candidateLimit := opts.Limit * 3
 	if candidateLimit < 30 {
@@ -471,8 +515,8 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 		defer wg.Done()
 		ftsOpts := SearchOptions{
 			Limit:     candidateLimit,
-			SourceIDs: opts.SourceIDs,
-			MimeTypes: opts.MimeTypes,
+			SourceIDs: opts.Filter.SourceIDs,
+			MimeTypes: opts.Filter.MimeTypes,
 			Highlight: true,
 		}
 		result, err := hs.fts.Search(ctx, query, ftsOpts)
@@ -490,8 +534,8 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 			defer wg.Done()
 			semOpts := SemanticSearchOptions{
 				Limit:     candidateLimit,
-				SourceIDs: opts.SourceIDs,
-				MimeTypes: opts.MimeTypes,
+				SourceIDs: opts.Filter.SourceIDs,
+				MimeTypes: opts.Filter.MimeTypes,
 			}
 			result, err := hs.semantic.Search(ctx, query, semOpts)
 			if err != nil {
@@ -534,19 +578,11 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 		degradedNotes = append(degradedNotes, "Semantic search unavailable, using lexical search only")
 	}
 
-	// Phase 12: Get query-type-specific weights
-	weights := hs.getWeightsForQueryType(analysis.QueryType)
-	if opts.SemanticWeight > 0 {
-		// Allow override from options
-		weights.Semantic = opts.SemanticWeight
-		weights.Lexical = 1.0 - opts.SemanticWeight
-	}
-
-	// Phase 12: Apply RRF fusion with agreement tracking
-	fused, agreementInfo := hs.applyRRFWithAgreement(ftsHits, semanticHits, opts.RRFConstant, weights)
+	// Apply RRF fusion with agreement tracking.
+	fused, agreementInfo := hs.applyRRFWithAgreement(ftsHits, semanticHits, hs.rrfConstant)
 
 	// Boost exact matches for entities (both single-word and multi-word)
-	if opts.BoostExactMatch && len(analysis.Entities) > 0 {
+	if len(analysis.Entities) > 0 {
 		fused = hs.boostExactMatches(fused, analysis.Entities)
 	}
 
@@ -569,20 +605,20 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	}
 	result.StrategiesUsed = strategiesUsed
 
-	// Phase 11: Apply similarity floor (reject low-confidence results)
+	// Apply similarity floor (reject low-confidence results)
 	beforeFloor := len(fused)
-	fused = hs.applySimilarityFloor(fused, opts.SimilarityFloor)
+	fused = hs.applySimilarityFloor(fused, recall.similarityFloor)
 	result.RejectedByFloor = beforeFloor - len(fused)
 
-	// Phase 11: Apply reranking on top candidates
-	if opts.EnableRerank && len(fused) > 0 {
-		fused = hs.applyReranking(fused, query, opts.RerankTopN, semanticHits)
+	// Apply reranking on top candidates
+	if recall.enableRerank && len(fused) > 0 {
+		fused = hs.applyReranking(fused, query, recall.rerankTopN, semanticHits)
 		result.Reranked = true
 	}
 
-	// Phase 11: Apply MMR for diversity (after reranking)
-	if opts.EnableMMR && len(fused) > 1 {
-		fused = hs.applyMMR(fused, opts.MMRLambda, opts.Limit)
+	// Apply MMR for diversity (after reranking)
+	if recall.enableMMR && len(fused) > 1 {
+		fused = hs.applyMMR(fused, recall.mmrLambda, opts.Limit)
 		result.MMRApplied = true
 	}
 
@@ -604,15 +640,6 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	return result
 }
 
-// getWeightsForQueryType returns the optimal weights for the given query type.
-func (hs *HybridSearcher) getWeightsForQueryType(queryType QueryType) StrategyWeights {
-	if weights, ok := strategyWeightMatrix[queryType]; ok {
-		return weights
-	}
-	// Default: equal weights
-	return StrategyWeights{Semantic: 0.5, Lexical: 0.5}
-}
-
 // agreementInfo tracks which strategies found each result.
 //
 // WP-3.2 dropped the chunkBestRank map: it was written on every fusion and read
@@ -621,8 +648,15 @@ type agreementInfo struct {
 	chunkStrategies map[string][]SearchStrategy // chunkID -> strategies that found it
 }
 
-// applyRRFWithAgreement implements RRF fusion while tracking strategy agreement.
-func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHit, k int, weights StrategyWeights) ([]SearchHit, agreementInfo) {
+// applyRRFWithAgreement implements RRF fusion while tracking strategy
+// agreement.
+//
+//	score(d) = sum over the strategies that found d of 1/(k + rank)
+//
+// with 1-indexed ranks. Unweighted since #69: the per-strategy weights this
+// used to take were always 0.5/0.5 in practice, so they scaled every score by
+// the same constant and changed no ordering.
+func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHit, k int) ([]SearchHit, agreementInfo) {
 	info := agreementInfo{
 		chunkStrategies: make(map[string][]SearchStrategy),
 	}
@@ -651,7 +685,7 @@ func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHi
 		}
 	}
 
-	// Calculate RRF scores with query-type-specific weights
+	// Calculate RRF scores
 	type scoredHit struct {
 		hit      SearchHit
 		rrfScore float64
@@ -664,12 +698,12 @@ func (hs *HybridSearcher) applyRRFWithAgreement(ftsHits, semanticHits []SearchHi
 
 		// FTS5 contribution
 		if rank, ok := ftsRanks[chunkID]; ok {
-			rrfScore += weights.Lexical * (1.0 / float64(k+rank))
+			rrfScore += 1.0 / float64(k+rank)
 		}
 
 		// Semantic contribution
 		if rank, ok := semRanks[chunkID]; ok {
-			rrfScore += weights.Semantic * (1.0 / float64(k+rank))
+			rrfScore += 1.0 / float64(k+rank)
 		}
 
 		scored = append(scored, scoredHit{
@@ -1010,8 +1044,8 @@ func (hs *HybridSearcher) tokenize(text string) []string {
 func (hs *HybridSearcher) searchFTSOnly(ctx context.Context, query string, opts HybridSearchOptions) *HybridSearchResult {
 	ftsOpts := SearchOptions{
 		Limit:     opts.Limit,
-		SourceIDs: opts.SourceIDs,
-		MimeTypes: opts.MimeTypes,
+		SourceIDs: opts.Filter.SourceIDs,
+		MimeTypes: opts.Filter.MimeTypes,
 		Highlight: true,
 	}
 
@@ -1043,8 +1077,8 @@ func (hs *HybridSearcher) searchSemanticOnly(ctx context.Context, query string, 
 
 	semOpts := SemanticSearchOptions{
 		Limit:     opts.Limit,
-		SourceIDs: opts.SourceIDs,
-		MimeTypes: opts.MimeTypes,
+		SourceIDs: opts.Filter.SourceIDs,
+		MimeTypes: opts.Filter.MimeTypes,
 	}
 
 	result, err := hs.semantic.Search(ctx, query, semOpts)
@@ -1102,11 +1136,14 @@ func (hs *HybridSearcher) SearchWithFallback(ctx context.Context, query string, 
 
 	hs.logger.Debug().Str("query", query).Msg("primary search returned no results, trying relaxed search")
 
-	// Phase 2: Relaxed search (lower thresholds, broader matching)
+	// Phase 2: Relaxed search (broader matching, more candidates).
+	//
+	// The similarity floor and MMR settings this used to override are no longer
+	// reachable here and never were: searchRelaxed is a straight FTS5 query that
+	// never enters the fusion pipeline, so neither stage runs on this rung.
 	relaxedOpts := opts
-	relaxedOpts.SimilarityFloor = 0.0001 // Very low floor
-	relaxedOpts.EnableMMR = false        // Don't filter for diversity
-	relaxedOpts.Limit = opts.Limit * 2   // Get more candidates
+	relaxedOpts.RecallMode = RecallModeHigh
+	relaxedOpts.Limit = opts.Limit * 2 // Get more candidates
 
 	relaxedResult := hs.searchRelaxed(ctx, query, relaxedOpts)
 	if len(relaxedResult.Results) > 0 {
@@ -1183,8 +1220,8 @@ func (hs *HybridSearcher) searchRelaxed(ctx context.Context, query string, opts 
 
 	ftsOpts := SearchOptions{
 		Limit:     opts.Limit,
-		SourceIDs: opts.SourceIDs,
-		MimeTypes: opts.MimeTypes,
+		SourceIDs: opts.Filter.SourceIDs,
+		MimeTypes: opts.Filter.MimeTypes,
 		Highlight: true,
 	}
 
@@ -1228,8 +1265,8 @@ func (hs *HybridSearcher) searchPartial(ctx context.Context, query string, opts 
 
 		ftsOpts := SearchOptions{
 			Limit:     5, // Small limit per word
-			SourceIDs: opts.SourceIDs,
-			MimeTypes: opts.MimeTypes,
+			SourceIDs: opts.Filter.SourceIDs,
+			MimeTypes: opts.Filter.MimeTypes,
 			Highlight: true,
 		}
 

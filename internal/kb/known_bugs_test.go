@@ -26,92 +26,73 @@ import (
 
 // Flip one of these to true in WP-3.4 when the corresponding fix lands.
 const (
-	bug69Fixed = false // #69 adaptive query-type weighting is dead code
 	bug71Fixed = false // #71 embedding client has no timeout
 )
 
-// KNOWN BUG #69 -- this test documents current broken behavior. WP-3.4 flips these assertions.
-// Correct behavior: when the caller does not set SemanticWeight, searchFusion must use the
-// query-type weights from strategyWeightMatrix instead of a hard 50/50 split.
+// ISSUE #69 -- FIXED in WP-3.4 by deletion. Regression test.
 //
-// Mechanism (verified against internal/kb/hybrid_search.go on branch v2):
+// Was: strategyWeightMatrix mapped each query type to a semantic/lexical
+// weighting, and searchFusion read it -- then unconditionally overrode it from
+// opts.SemanticWeight, which Search had already defaulted to 0.5. The override
+// branch could never be skipped, so every query fused 50/50 whatever the
+// classifier decided. The matrix was dead code that looked live.
 //
-//	:201-203  Search() applies `if opts.SemanticWeight <= 0 { opts.SemanticWeight = 0.5 }`
-//	:493      searchFusion() reads the adaptive weights from strategyWeightMatrix
-//	:494-498  ... then unconditionally overrides them, because SemanticWeight is now
-//	          always > 0 thanks to the defaulting above. The "allow override from
-//	          options" branch can never be skipped, so the matrix is dead code.
+// Now: fusion is unweighted RRF with a configurable k. The test reads the
+// weighting back off the score arithmetically. For an entity query matching one
+// document through the lexical side only,
 //
-// The test proves it arithmetically. For an entity query with a single matching
-// entity, a lexical-only fusion produces
+//	score(rank 1) = 1/(k+1) * entityBoost * agreementBoost
+//	              = 1/61     * 1.2         * 1.1
 //
-//	score(rank 1) = lexicalWeight * 1/(k+1) * entityBoost * agreementBoost
-//	              = lexicalWeight * 1/61     * 1.2         * 1.1
-//
-// so the lexical weight actually used can be read back off the score. The
-// matrix says 0.6 for an entity query; the observed value is 0.5.
-func TestKnownBug_Issue69(t *testing.T) {
+// with no weight factor anywhere in it.
+func TestIssue69_FusionIsUnweightedRRF(t *testing.T) {
 	gi := ingestGoldenCorpus(t)
 	ctx := context.Background()
 
-	const query = "Wonderland" // classified as QueryTypeEntity, matches one document
-
-	analysis := gi.Hybrid.analyzeQuery(query)
-	if analysis.QueryType != QueryTypeEntity {
-		t.Fatalf("fixture drifted: %q is classified as %s, expected %s", query, analysis.QueryType, QueryTypeEntity)
-	}
-
-	adaptive := gi.Hybrid.getWeightsForQueryType(QueryTypeEntity)
-	if adaptive.Lexical != 0.6 {
-		t.Fatalf("fixture drifted: the matrix no longer says 0.6 lexical for entity queries (got %.2f)", adaptive.Lexical)
-	}
-
-	res, err := gi.Hybrid.Search(ctx, query, HybridSearchOptions{Limit: 5})
-	if err != nil {
-		t.Fatalf("Search: %v", err)
-	}
-	if len(res.Results) == 0 {
-		t.Fatal("expected results")
-	}
-
 	const (
-		rrfRank1       = 1.0 / 61.0 // RRFConstant 60, rank 1
+		rrfRank1       = 1.0 / 61.0 // DefaultRRFConstant 60, rank 1
 		entityBoost    = 1.2        // single-word entity present in the hit
 		agreementBoost = 1.1        // one of two possible strategies contributed
 	)
-	observedLexicalWeight := res.Results[0].Score / (rrfRank1 * entityBoost * agreementBoost)
 
-	if bug69Fixed {
-		// Correct behaviour: the adaptive matrix is honoured.
-		if math.Abs(observedLexicalWeight-0.6) > 1e-9 {
-			t.Errorf("adaptive weighting is not being applied: observed lexical weight %.6f, want 0.6", observedLexicalWeight)
-		}
-	} else {
-		// Current behaviour: always 50/50, whatever the query type.
-		if math.Abs(observedLexicalWeight-0.5) > 1e-9 {
-			t.Errorf("expected the hard-coded 50/50 split; observed lexical weight %.6f, want 0.5", observedLexicalWeight)
-		}
+	// Every query type produces the same unweighted contribution, because there
+	// is no longer a weight to differ.
+	for _, q := range []string{
+		"Wonderland", // entity
+		"Ishmael",    // entity
+		"Gettysburg", // entity
+		"Liberty",    // entity
+	} {
+		t.Run(q, func(t *testing.T) {
+			r, err := gi.Hybrid.Search(ctx, q, HybridSearchOptions{Limit: 1})
+			if err != nil || len(r.Results) == 0 {
+				t.Fatalf("Search(%q): %v (%d results)", q, err, len(r.Results))
+			}
+			got := r.Results[0].Score / (rrfRank1 * entityBoost * agreementBoost)
+			if math.Abs(got-1.0) > 1e-9 {
+				t.Errorf("query %q: observed a fusion weight of %.6f, want 1.0 (unweighted)", q, got)
+			}
+		})
 	}
 
-	// The same 50/50 result appears for every query type, which is the point:
-	// classification happens, and then nothing downstream uses it.
-	for _, q := range []string{
-		"Ishmael",    // entity      -> matrix says lexical 0.6
-		"Gettysburg", // entity      -> matrix says lexical 0.6
-		"Liberty",    // entity      -> matrix says lexical 0.6
-	} {
-		r, err := gi.Hybrid.Search(ctx, q, HybridSearchOptions{Limit: 1})
-		if err != nil || len(r.Results) == 0 {
-			t.Fatalf("Search(%q): %v (%d results)", q, err, len(r.Results))
-		}
-		got := r.Results[0].Score / (rrfRank1 * entityBoost * agreementBoost)
-		want := 0.5
-		if bug69Fixed {
-			want = gi.Hybrid.getWeightsForQueryType(gi.Hybrid.analyzeQuery(q).QueryType).Lexical
-		}
-		if math.Abs(got-want) > 1e-9 {
-			t.Errorf("query %q: observed lexical weight %.6f, want %.6f", q, got, want)
-		}
+	// The classifier still runs and still drives mode selection, which is the
+	// one decision the engine acts on. Deleting the weights did not delete that.
+	if got := gi.Hybrid.analyzeQuery("Wonderland").QueryType; got != QueryTypeEntity {
+		t.Errorf("query classification stopped working: got %s", got)
+	}
+	if got := gi.Hybrid.selectMode(gi.Hybrid.analyzeQuery(`"big science"`)); got != HybridModeLexical {
+		t.Errorf("classification no longer drives mode selection: got %s", got)
+	}
+
+	// k is configurable, at the searcher rather than per call.
+	tuned := NewHybridSearcher(gi.Searcher, nil, WithRRFConstant(10))
+	r, err := tuned.Search(ctx, "Wonderland", HybridSearchOptions{Limit: 1})
+	if err != nil || len(r.Results) == 0 {
+		t.Fatalf("Search with k=10: %v (%d results)", err, len(r.Results))
+	}
+	wantScore := (1.0 / 11.0) * entityBoost * agreementBoost
+	if math.Abs(r.Results[0].Score-wantScore) > 1e-9 {
+		t.Errorf("k=10 score = %.9f, want %.9f", r.Results[0].Score, wantScore)
 	}
 }
 
