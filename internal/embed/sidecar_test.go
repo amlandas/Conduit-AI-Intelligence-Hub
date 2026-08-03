@@ -589,7 +589,7 @@ func TestManager_MissingModelHasActionableError(t *testing.T) {
 	if !strings.Contains(err.Error(), "absent.gguf") {
 		t.Errorf("error does not name the expected path: %v", err)
 	}
-	if !strings.Contains(err.Error(), "conduit embed download") {
+	if !strings.Contains(err.Error(), "conduit model download") {
 		t.Errorf("error does not point at the download command: %v", err)
 	}
 }
