@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"github.com/simpleflo/conduit/internal/observability"
@@ -303,10 +304,15 @@ func (hs *HybridSearcher) Search(ctx context.Context, query string, opts HybridS
 func (hs *HybridSearcher) analyzeQuery(query string) QueryAnalysis {
 	analysis := QueryAnalysis{}
 
-	// Check for quoted phrases (exact match intent)
-	if strings.Contains(query, `"`) || strings.Contains(query, `'`) {
-		analysis.HasQuotedPhrase = true
-	}
+	// Check for quoted phrases (exact match intent).
+	//
+	// Issue #70: this used to be `contains(query, '"') || contains(query, '\'')`,
+	// so every contraction and possessive -- "don't", "Alice's", "O'Brien" --
+	// was classified as an exact quote and silently forced the whole search into
+	// lexical-only mode, disabling the vector half. Only a balanced pair of
+	// DOUBLE quotes signals phrase intent; an apostrophe is just a character in
+	// a word. FTS5 agrees: its phrase delimiter is '"', never '\''.
+	analysis.HasQuotedPhrase = hasQuotedPhrase(query)
 
 	// Detect entities: both single-word and multi-word proper nouns
 	// This helps identify named entities that need exact matching
@@ -381,6 +387,17 @@ func (hs *HybridSearcher) analyzeQuery(query string) QueryAnalysis {
 	analysis.IsFactual = analysis.QueryType == QueryTypeFactual
 
 	return analysis
+}
+
+// hasQuotedPhrase reports whether the query contains a balanced double-quoted
+// phrase, i.e. whether the user asked for a literal match.
+func hasQuotedPhrase(query string) bool {
+	for _, tk := range splitFTSQuery(query) {
+		if tk.phrase {
+			return true
+		}
+	}
+	return false
 }
 
 // classifyQueryType determines the intent category of the query.
@@ -499,13 +516,22 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 
 	wg.Wait()
 
-	// Log any errors but continue with available results
+	// A failed strategy is NOT the same as a strategy that matched nothing, and
+	// the caller has to be able to tell the difference (issue #75). Both cases
+	// set DegradedMode and contribute a reason to Note.
+	var degradedNotes []string
+	lexicalDegraded := false
 	if ftsErr != nil {
-		hs.logger.Warn().Err(ftsErr).Msg("FTS5 search failed, using semantic only")
+		hs.logger.Warn().Err(ftsErr).Msg("FTS5 search failed")
+		lexicalDegraded = true
+		degradedNotes = append(degradedNotes, "Lexical search failed: "+ftsErr.Error())
 	}
 	if semErr != nil {
 		hs.logger.Warn().Err(semErr).Msg("semantic search failed, using FTS5 only")
 		semanticDegraded = true
+	}
+	if semanticDegraded {
+		degradedNotes = append(degradedNotes, "Semantic search unavailable, using lexical search only")
 	}
 
 	// Phase 12: Get query-type-specific weights
@@ -530,7 +556,7 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	result := &HybridSearchResult{
 		FTSHits:      len(ftsHits),
 		SemanticHits: len(semanticHits),
-		DegradedMode: semanticDegraded,
+		DegradedMode: semanticDegraded || lexicalDegraded,
 	}
 
 	// Calculate strategies used
@@ -569,11 +595,10 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	result.TotalHits = len(fused)
 
 	// Phase 12: Calculate overall confidence
-	result.Confidence = hs.calculateOverallConfidence(fused, agreementInfo, strategiesUsed, semanticDegraded)
+	result.Confidence = hs.calculateOverallConfidence(fused, agreementInfo, strategiesUsed, result.DegradedMode)
 
-	// Add note if degraded
-	if semanticDegraded {
-		result.Note = "Semantic search unavailable, using lexical search only"
+	if len(degradedNotes) > 0 {
+		result.Note = strings.Join(degradedNotes, " ")
 	}
 
 	return result
@@ -992,8 +1017,14 @@ func (hs *HybridSearcher) searchFTSOnly(ctx context.Context, query string, opts 
 
 	result, err := hs.fts.Search(ctx, query, ftsOpts)
 	if err != nil {
+		// Issue #75: this used to return a bare zero value, which a caller
+		// could not distinguish from "nothing matched".
 		hs.logger.Error().Err(err).Msg("FTS5 search failed")
-		return &HybridSearchResult{}
+		return &HybridSearchResult{
+			DegradedMode: true,
+			Confidence:   "none",
+			Note:         "Lexical search failed: " + err.Error(),
+		}
 	}
 
 	return &HybridSearchResult{
@@ -1019,7 +1050,11 @@ func (hs *HybridSearcher) searchSemanticOnly(ctx context.Context, query string, 
 	result, err := hs.semantic.Search(ctx, query, semOpts)
 	if err != nil {
 		hs.logger.Error().Err(err).Msg("semantic search failed")
-		return &HybridSearchResult{}
+		return &HybridSearchResult{
+			DegradedMode: true,
+			Confidence:   "none",
+			Note:         "Semantic search failed: " + err.Error(),
+		}
 	}
 
 	// Convert SemanticSearchHit to SearchHit
@@ -1114,18 +1149,30 @@ func (hs *HybridSearcher) SearchWithFallback(ctx context.Context, query string, 
 	}, nil
 }
 
-// searchRelaxed performs a relaxed FTS5 search with wildcards and stemming.
+// searchRelaxed performs a relaxed FTS5 search: every term prefix-matched, all
+// of them OR'd, so any one word is enough to produce a hit.
+//
+// Issue #73(b): this used to build the FTS5 string `a* OR b* OR c*` and hand it
+// to Searcher.Search -- whose sanitizer deleted every '*' as a dangerous
+// character and then re-added exactly one, to the last term. A three-word
+// relaxed query therefore reached FTS5 as `a OR b OR c*`: two exact terms and
+// one prefix. The "relaxed" rung was stricter than the partial rung below it,
+// which got its wildcard back by searching one word at a time.
+//
+// The expression is now built explicitly and passed through SearchExpr, which
+// does not sanitize. Nothing here comes from raw user text without being
+// quoted first, so the operators are ours and the terms are theirs.
 func (hs *HybridSearcher) searchRelaxed(ctx context.Context, query string, opts HybridSearchOptions) *HybridSearchResult {
-	// Modify query for relaxed matching
-	// Add wildcards to each word for prefix matching
-	words := strings.Fields(query)
 	var relaxedTerms []string
-	for _, word := range words {
-		clean := strings.Trim(word, `"'.,;:!?()[]{}`)
-		if len(clean) >= 2 {
-			// Use OR for broader matching
-			relaxedTerms = append(relaxedTerms, clean+"*")
+	for _, tk := range splitFTSQuery(query) {
+		if utf8.RuneCountInString(tk.text) < 2 {
+			continue
 		}
+		term := quoteFTSToken(tk.text)
+		if !tk.phrase && ftsPrefixable(tk.text) {
+			term += "*"
+		}
+		relaxedTerms = append(relaxedTerms, term)
 	}
 
 	if len(relaxedTerms) == 0 {
@@ -1141,10 +1188,15 @@ func (hs *HybridSearcher) searchRelaxed(ctx context.Context, query string, opts 
 		Highlight: true,
 	}
 
-	result, err := hs.fts.Search(ctx, relaxedQuery, ftsOpts)
+	result, err := hs.fts.SearchExpr(ctx, relaxedQuery, query, ftsOpts)
 	if err != nil {
 		hs.logger.Warn().Err(err).Str("query", relaxedQuery).Msg("relaxed FTS5 search failed")
-		return &HybridSearchResult{}
+		return &HybridSearchResult{
+			DegradedMode: true,
+			Confidence:   "none",
+			Note:         "Relaxed lexical search failed: " + err.Error(),
+			Mode:         HybridModeLexical,
+		}
 	}
 
 	return &HybridSearchResult{
@@ -1155,17 +1207,22 @@ func (hs *HybridSearcher) searchRelaxed(ctx context.Context, query string, opts 
 	}
 }
 
-// searchPartial searches for each word in the query individually and merges results.
+// searchPartial searches for each word in the query individually and merges
+// results.
+//
+// Since #73(b) made the relaxed rung above actually relax, this rung is a
+// safety net rather than the workhorse it used to be: an OR of prefix terms
+// subsumes a union of single-term searches, so level 2 is now reached only when
+// the relaxed rung fails outright. It is kept because "never zero results" is
+// the contract, and a rung that costs one query per word is cheap insurance.
 func (hs *HybridSearcher) searchPartial(ctx context.Context, query string, opts HybridSearchOptions) *HybridSearchResult {
-	words := strings.Fields(query)
-
 	// Collect unique results from searching each significant word
 	seen := make(map[string]bool)
 	var allHits []SearchHit
 
-	for _, word := range words {
-		clean := strings.Trim(word, `"'.,;:!?()[]{}`)
-		if len(clean) < 3 {
+	for _, tk := range splitFTSQuery(query) {
+		clean := tk.text
+		if utf8.RuneCountInString(clean) < 3 {
 			continue // Skip short words
 		}
 
@@ -1189,9 +1246,14 @@ func (hs *HybridSearcher) searchPartial(ctx context.Context, query string, opts 
 		}
 	}
 
-	// Sort by score and limit
+	// Sort by score and limit.
+	//
+	// Issue #73(a): this sorted DESCENDING. These are raw SQLite bm25() scores,
+	// where more negative is a better match -- searcher.go orders by `score ASC`
+	// for exactly that reason -- so a descending sort put the worst match at
+	// rank 1 on every query that reached this rung.
 	sort.Slice(allHits, func(i, j int) bool {
-		return allHits[i].Score > allHits[j].Score
+		return allHits[i].Score < allHits[j].Score
 	})
 
 	if len(allHits) > opts.Limit {

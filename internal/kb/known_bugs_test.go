@@ -27,9 +27,7 @@ import (
 // Flip one of these to true in WP-3.4 when the corresponding fix lands.
 const (
 	bug69Fixed = false // #69 adaptive query-type weighting is dead code
-	bug70Fixed = false // #70 any apostrophe forces lexical-only search
 	bug71Fixed = false // #71 embedding client has no timeout
-	bug73Fixed = false // #73 fallback ladder: inverted sort and stripped wildcards
 )
 
 // KNOWN BUG #69 -- this test documents current broken behavior. WP-3.4 flips these assertions.
@@ -117,19 +115,17 @@ func TestKnownBug_Issue69(t *testing.T) {
 	}
 }
 
-// KNOWN BUG #70 -- this test documents current broken behavior. WP-3.4 flips these assertions.
-// Correct behavior: only a balanced double-quoted phrase should mark a query as an exact quote;
-// a bare apostrophe inside a word must not disable semantic search.
+// ISSUE #70 -- FIXED in WP-3.4. Regression test.
 //
-// Mechanism (verified against internal/kb/hybrid_search.go on branch v2):
+// Was: analyzeQuery set HasQuotedPhrase when the query contained EITHER a
+// double quote or a single quote. classifyQueryType then returned
+// QueryTypeExactQuote and selectMode returned HybridModeLexical, so "don't",
+// "Alice's", "O'Brien" and every possessive silently disabled the vector half
+// of hybrid search.
 //
-//	:288      analyzeQuery sets HasQuotedPhrase when the query contains " OR '
-//	:370      classifyQueryType returns QueryTypeExactQuote for HasQuotedPhrase
-//	:403-405  selectMode returns HybridModeLexical for HasQuotedPhrase
-//
-// So "don't", "Alice's", "O'Brien", "it's" and every possessive silently
-// disable the vector half of hybrid search.
-func TestKnownBug_Issue70(t *testing.T) {
+// Now: only a balanced pair of double quotes marks a phrase. FTS5 agrees --
+// its phrase delimiter is '"', never '\''.
+func TestIssue70_ApostropheIsNotAQuotedPhrase(t *testing.T) {
 	gi := ingestGoldenCorpus(t)
 	ctx := context.Background()
 
@@ -138,45 +134,39 @@ func TestKnownBug_Issue70(t *testing.T) {
 		"don't index this",
 		"O'Brien",
 		"the keeper's ledger",
+		`unbalanced " quote`,
 	}
 
 	for _, q := range apostropheQueries {
 		t.Run(q, func(t *testing.T) {
 			a := gi.Hybrid.analyzeQuery(q)
-
-			if bug70Fixed {
-				// Correct behaviour: an apostrophe is just a character.
-				if a.HasQuotedPhrase {
-					t.Errorf("query %q should not be treated as a quoted phrase", q)
-				}
-				if got := gi.Hybrid.selectMode(a); got == HybridModeLexical {
-					t.Errorf("query %q should not be forced into lexical-only mode", q)
-				}
-			} else {
-				// Current behaviour: apostrophe == quoted phrase == lexical only.
-				if !a.HasQuotedPhrase {
-					t.Errorf("expected HasQuotedPhrase for %q", q)
-				}
-				if a.QueryType != QueryTypeExactQuote {
-					t.Errorf("expected QueryTypeExactQuote for %q, got %s", q, a.QueryType)
-				}
-				if got := gi.Hybrid.selectMode(a); got != HybridModeLexical {
-					t.Errorf("expected lexical mode for %q, got %s", q, got)
-				}
+			if a.HasQuotedPhrase {
+				t.Errorf("query %q should not be treated as a quoted phrase", q)
+			}
+			if a.QueryType == QueryTypeExactQuote {
+				t.Errorf("query %q should not be classified as an exact quote", q)
+			}
+			if got := gi.Hybrid.selectMode(a); got == HybridModeLexical {
+				t.Errorf("query %q should not be forced into lexical-only mode", q)
 			}
 		})
 	}
 
-	// A double quote genuinely does signal an exact-phrase intent, and stays
-	// lexical under both worlds. This half of the check is the control.
-	a := gi.Hybrid.analyzeQuery(`"big science"`)
-	if !a.HasQuotedPhrase || gi.Hybrid.selectMode(a) != HybridModeLexical {
-		t.Errorf("a double-quoted query must still select lexical mode")
+	// The control: a real double-quoted phrase still means exact-match intent.
+	for _, q := range []string{`"big science"`, `find "big science" now`} {
+		a := gi.Hybrid.analyzeQuery(q)
+		if !a.HasQuotedPhrase {
+			t.Errorf("query %q must be recognised as a quoted phrase", q)
+		}
+		if a.QueryType != QueryTypeExactQuote {
+			t.Errorf("query %q should classify as an exact quote, got %s", q, a.QueryType)
+		}
+		if gi.Hybrid.selectMode(a) != HybridModeLexical {
+			t.Errorf("a double-quoted query must still select lexical mode")
+		}
 	}
 
-	// End to end: the apostrophe changes the shape of the response, not just an
-	// internal flag. Lexical mode skips fusion, so the score is raw bm25 and
-	// neither Confidence nor StrategiesUsed is populated.
+	// End to end: the apostrophe no longer changes the shape of the response.
 	withApostrophe, err := gi.Hybrid.Search(ctx, "summer's day", HybridSearchOptions{Limit: 5})
 	if err != nil {
 		t.Fatalf("Search: %v", err)
@@ -186,23 +176,16 @@ func TestKnownBug_Issue70(t *testing.T) {
 		t.Fatalf("Search: %v", err)
 	}
 
-	if bug70Fixed {
-		if withApostrophe.Mode != withoutApostrophe.Mode {
-			t.Errorf("apostrophe still changes the search mode: %s vs %s", withApostrophe.Mode, withoutApostrophe.Mode)
-		}
-	} else {
-		if withApostrophe.Mode != HybridModeLexical {
-			t.Errorf("expected lexical mode, got %s", withApostrophe.Mode)
-		}
-		if withoutApostrophe.Mode != HybridModeFusion {
-			t.Errorf("expected fusion mode for the apostrophe-free query, got %s", withoutApostrophe.Mode)
-		}
-		if withApostrophe.Confidence != "" {
-			t.Errorf("lexical mode currently leaves Confidence empty; got %q", withApostrophe.Confidence)
-		}
-		if len(withApostrophe.Results) > 0 && withApostrophe.Results[0].Score >= 0 {
-			t.Errorf("lexical mode currently returns a raw negative bm25 score; got %.6f", withApostrophe.Results[0].Score)
-		}
+	if withApostrophe.Mode != withoutApostrophe.Mode {
+		t.Errorf("apostrophe still changes the search mode: %s vs %s", withApostrophe.Mode, withoutApostrophe.Mode)
+	}
+	if withApostrophe.Mode != HybridModeFusion {
+		t.Errorf("expected fusion mode for %q, got %s", "summer's day", withApostrophe.Mode)
+	}
+	// And the apostrophe query still finds the sonnet: quoting keeps "summer's"
+	// one term instead of splitting it into `summer` AND `s`.
+	if len(withApostrophe.Results) == 0 || withApostrophe.Results[0].DocumentID != "05-sonnet-18" {
+		t.Errorf("summer's day: got %v, want 05-sonnet-18 at rank 1", docIDs(withApostrophe.Results))
 	}
 }
 
@@ -363,92 +346,73 @@ func TestIssue72_ChunkIDsIncludeDocumentAndIndex(t *testing.T) {
 	}
 }
 
-// KNOWN BUG #73 -- this test documents current broken behavior. WP-3.4 flips these assertions.
-// Correct behavior: the level-2 fallback must sort SQLite bm25 scores ASCENDING (most negative
-// first), and the level-1 relaxed query's prefix wildcards must survive sanitization.
+// ISSUE #73 -- FIXED in WP-3.4. Regression test.
 //
-// Two mechanisms, both verified against branch v2:
+// Two mechanisms:
 //
-//	(a) hybrid_search.go:1251-1253
-//	        sort.Slice(allHits, func(i, j int) bool { return allHits[i].Score > allHits[j].Score })
-//	    Descending. SQLite's bm25() is negative-is-better -- searcher.go:253 orders
-//	    by `score ASC` for exactly that reason -- so this puts the WORST match first.
+//	(a) searchPartial sorted `Score > Score`, i.e. DESCENDING. These are raw
+//	    SQLite bm25 scores, where more negative is better -- searcher.go orders
+//	    by `score ASC` for exactly that reason -- so the level-2 rung returned
+//	    its worst match at rank 1.
 //
-//	(b) hybrid_search.go:1185 builds `clean + "*"` for every word, then
-//	    searcher.go:177 lists "*" among the characters sanitizeFTSQuery deletes.
-//	    prepareFTSQuery re-adds a wildcard only to the LAST term, so a relaxed
-//	    query of three words gets one working prefix instead of three.
-func TestKnownBug_Issue73(t *testing.T) {
+//	(b) searchRelaxed built the FTS5 string `a* OR b* OR c*` and passed it
+//	    through Searcher.Search, whose sanitizer deleted every '*' and then
+//	    re-added exactly one, to the last term. A three-word relaxed query
+//	    reached FTS5 as `a OR b OR c*`, so the "relaxed" rung was stricter than
+//	    the partial rung beneath it.
+func TestIssue73_FallbackLadder(t *testing.T) {
 	gi := ingestGoldenCorpus(t)
 	ctx := context.Background()
 
-	t.Run("a_partial_results_are_sorted_worst_first", func(t *testing.T) {
-		// Two documents contain "lantern": the keeper fixture four times
-		// (bm25 -2.999, the better match) and the harbour ledger once
-		// (bm25 -1.411, the worse match).
+	t.Run("a_partial_results_are_sorted_best_first", func(t *testing.T) {
+		// Two documents contain "lantern": the keeper fixture four times (the
+		// better, more negative bm25) and the harbour ledger once.
 		res := gi.Hybrid.searchPartial(ctx, "lantern", HybridSearchOptions{Limit: 10})
 		if len(res.Results) != 2 {
 			t.Fatalf("fixture drifted: got %d results, want 2", len(res.Results))
 		}
-
-		if bug73Fixed {
-			// Correct behaviour: most negative bm25 first.
-			if res.Results[0].DocumentID != "06-fixture-lantern-keeper" {
-				t.Errorf("rank 1 should be the better bm25 match; got %s", res.Results[0].DocumentID)
-			}
-			if res.Results[0].Score > res.Results[1].Score {
-				t.Errorf("results must be in ascending bm25 order; got %.6f then %.6f",
-					res.Results[0].Score, res.Results[1].Score)
-			}
-		} else {
-			// Current behaviour: descending sort over negative scores puts the
-			// weakest match at rank 1.
-			if res.Results[0].DocumentID != "07-fixture-harbour-ledger" {
-				t.Errorf("expected the weaker match at rank 1; got %s", res.Results[0].DocumentID)
-			}
-			if !(res.Results[0].Score > res.Results[1].Score) {
-				t.Errorf("expected descending scores (worst first); got %.6f then %.6f",
-					res.Results[0].Score, res.Results[1].Score)
+		if res.Results[0].DocumentID != "06-fixture-lantern-keeper" {
+			t.Errorf("rank 1 should be the better bm25 match; got %s", res.Results[0].DocumentID)
+		}
+		for i := 1; i < len(res.Results); i++ {
+			if res.Results[i].Score < res.Results[i-1].Score {
+				t.Errorf("results must be in ascending bm25 order; rank %d (%.6f) beats rank %d (%.6f)",
+					i, res.Results[i].Score, i-1, res.Results[i-1].Score)
 			}
 		}
 	})
 
-	t.Run("b_relaxed_wildcards_are_stripped_before_reaching_fts5", func(t *testing.T) {
-		s := NewSearcher(gi.DB)
+	t.Run("b_relaxed_prefixes_all_survive", func(t *testing.T) {
+		// Every term is prefix-matched, not just the last one, so a query whose
+		// first two words are prefixes of real corpus words matches.
+		res := gi.Hybrid.searchRelaxed(ctx, "lanter harbou zzzz", HybridSearchOptions{Limit: 10})
+		if len(res.Results) == 0 {
+			t.Fatalf("the relaxed rung must match via prefix search on every term")
+		}
+		got := sortedCopy(uniqueDocIDs(res.Results))
+		want := []string{"06-fixture-lantern-keeper", "07-fixture-harbour-ledger"}
+		if !equalStrings(got, want) {
+			t.Errorf("relaxed results: got %v, want %v", got, want)
+		}
+		// Relaxed is now genuinely broader than partial, which is the whole
+		// point of putting it higher on the ladder.
+		partial := gi.Hybrid.searchPartial(ctx, "lanter harbou zzzz", HybridSearchOptions{Limit: 10})
+		if len(res.Results) < len(partial.Results) {
+			t.Errorf("the relaxed rung returned %d results, fewer than the partial rung below it (%d)",
+				len(res.Results), len(partial.Results))
+		}
+	})
 
-		// This is the exact string searchRelaxed builds for "lanter harbou zzzz".
-		const relaxedQuery = "lanter* OR harbou* OR zzzz*"
-
-		if bug73Fixed {
-			if got := s.prepareFTSQuery(relaxedQuery); got != "lanter* OR harbou* OR zzzz*" {
-				t.Errorf("relaxed wildcards are still being stripped: %q", got)
-			}
-			if res := gi.Hybrid.searchRelaxed(ctx, "lanter harbou zzzz", HybridSearchOptions{Limit: 10}); len(res.Results) == 0 {
-				t.Errorf("the relaxed rung should now match via prefix search")
-			}
-		} else {
-			if got := sanitizeFTSQuery(relaxedQuery); got != "lanter OR harbou OR zzzz" {
-				t.Errorf("expected every wildcard to be stripped; got %q", got)
-			}
-			if got := s.prepareFTSQuery(relaxedQuery); got != "lanter OR harbou OR zzzz*" {
-				t.Errorf("expected only the last term to be re-wildcarded; got %q", got)
-			}
-			// Consequence: the relaxed rung finds nothing even though two of
-			// the three prefixes match real words in the corpus.
-			if res := gi.Hybrid.searchRelaxed(ctx, "lanter harbou zzzz", HybridSearchOptions{Limit: 10}); len(res.Results) != 0 {
-				t.Errorf("expected the relaxed rung to return nothing; got %d results", len(res.Results))
-			}
-			// And the level-2 rung, which searches each word alone and so gets
-			// its wildcard back, succeeds where level 1 failed.
-			if res := gi.Hybrid.searchPartial(ctx, "lanter harbou zzzz", HybridSearchOptions{Limit: 10}); len(res.Results) == 0 {
-				t.Errorf("expected the partial rung to rescue the query")
+	t.Run("c_relaxed_rung_orders_bm25_ascending", func(t *testing.T) {
+		res := gi.Hybrid.searchRelaxed(ctx, "lantern ledger", HybridSearchOptions{Limit: 10})
+		for i := 1; i < len(res.Results); i++ {
+			if res.Results[i].Score < res.Results[i-1].Score {
+				t.Errorf("relaxed rung is not in ascending bm25 order at rank %d", i)
 			}
 		}
 	})
 
 	t.Run("control: the FTS5 layer itself orders bm25 correctly", func(t *testing.T) {
-		// searcher.go:253 does the right thing. The defect is only in the
-		// fallback ladder's re-sort.
 		res, err := gi.Searcher.Search(ctx, "lantern", SearchOptions{Limit: 10})
 		if err != nil {
 			t.Fatalf("Search: %v", err)

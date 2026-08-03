@@ -5,14 +5,15 @@ package kb
 // The ladder has four rungs:
 //
 //	level 0 -- ordinary hybrid search succeeded
-//	level 1 -- searchRelaxed: every word joined with OR, each word suffixed
-//	           with '*' (but see #73: the sanitizer removes all but the last
-//	           wildcard before the query reaches FTS5)
+//	level 1 -- searchRelaxed: every term quoted, prefix-matched and joined with
+//	           OR, so any one word is enough
 //	level 2 -- searchPartial: each word searched on its own, results merged
 //	level 3 -- nothing found; empty result with an advisory note
 //
-// Reaching a specific rung takes carefully chosen queries; the comments on each
-// case explain why that query lands where it does.
+// Since #73 made level 1 genuinely relax, an OR of prefix terms subsumes a
+// union of single-term searches, so level 2 is now a safety net reached only
+// when the relaxed rung fails outright rather than merely matching nothing. It
+// is exercised directly by TestFallback_PartialRungInIsolation.
 
 import (
 	"context"
@@ -60,17 +61,16 @@ func TestFallbackLadder(t *testing.T) {
 			why:            "primary ANDs the terms and finds nothing; relaxed ORs them and 'lantern' still matches",
 		},
 		{
-			name:      "level 2: partial word matching rescues a query relaxed matching cannot",
+			name:      "level 1: every prefix is honoured, so relaxed rescues a multi-prefix query",
 			query:     "lanter harbou zzzz",
-			wantLevel: 2,
-			// KNOWN BUG #73: this ordering is backwards. -1.41 is a WORSE bm25
-			// score than -2.99, yet it is returned first.
+			wantLevel: 1,
+			// #73(b): this used to fall through to level 2, because the
+			// sanitizer stripped every wildcard except the last.
 			wantDocs:       []string{"07-fixture-harbour-ledger", "06-fixture-lantern-keeper"},
-			wantConfidence: "speculative",
-			wantNote:       "Partial word matching - results may not fully match query",
-			why: "relaxed builds 'lanter* OR harbou* OR zzzz*', the sanitizer strips every wildcard except " +
-				"the last, so it becomes 'lanter OR harbou OR zzzz*' and matches nothing; partial then searches " +
-				"each word alone, where the single-term path re-adds the wildcard and 'lanter*' matches",
+			wantConfidence: "low",
+			wantNote:       "Using relaxed matching - verify relevance",
+			why: `relaxed now builds "lanter"* OR "harbou"* OR "zzzz"* and passes it to SearchExpr, ` +
+				"so all three prefixes reach FTS5 and the first two match",
 		},
 		{
 			name:           "level 3: nothing matches at any rung",
@@ -130,16 +130,16 @@ func TestFallback_RelaxedRungInIsolation(t *testing.T) {
 		notes    string
 	}{
 		{
-			name:     "the last word keeps its wildcard, so prefix matching works for it alone",
+			name:     "every word keeps its wildcard",
 			query:    "lanter ledg",
 			wantDocs: []string{"07-fixture-harbour-ledger", "06-fixture-lantern-keeper"},
-			notes:    "'ledg*' matches 'ledger' in both documents; 'lanter' matches nothing because its wildcard was stripped",
+			notes:    "#73: 'lanter*' now matches too, not just the final 'ledg*'",
 		},
 		{
-			name:     "a prefix that is not the last word matches nothing",
+			name:     "a prefix that is not the last word still matches",
 			query:    "lanter harbou zzzz",
-			wantDocs: nil,
-			notes:    "KNOWN BUG #73: every wildcard except the last is removed by sanitizeFTSQuery",
+			wantDocs: []string{"07-fixture-harbour-ledger", "06-fixture-lantern-keeper"},
+			notes:    "#73: this used to return nothing because only the last wildcard survived",
 		},
 		{
 			name:     "relaxed results keep raw bm25 ordering (most negative first) -- this rung is correct",
@@ -190,14 +190,19 @@ func TestFallback_PartialRungInIsolation(t *testing.T) {
 		}
 	})
 
-	t.Run("KNOWN BUG #73: results are ordered worst-first", func(t *testing.T) {
+	t.Run("#73: results are ordered best-first (ascending bm25)", func(t *testing.T) {
 		res := gi.Hybrid.searchPartial(ctx, "lantern ledger", HybridSearchOptions{Limit: 10})
 		if len(res.Results) < 2 {
 			t.Fatalf("expected at least two results, got %d", len(res.Results))
 		}
-		if !(res.Results[0].Score > res.Results[1].Score) {
-			t.Errorf("expected the descending sort over negative bm25 scores to put the worse match first; "+
-				"got %.6f then %.6f", res.Results[0].Score, res.Results[1].Score)
+		for i := 1; i < len(res.Results); i++ {
+			if res.Results[i].Score < res.Results[i-1].Score {
+				t.Errorf("partial rung is not in ascending bm25 order: rank %d (%.6f) beats rank %d (%.6f)",
+					i, res.Results[i].Score, i-1, res.Results[i-1].Score)
+			}
+		}
+		if res.Results[0].DocumentID != "06-fixture-lantern-keeper" {
+			t.Errorf("rank 1 = %s, want the better bm25 match 06-fixture-lantern-keeper", res.Results[0].DocumentID)
 		}
 	})
 

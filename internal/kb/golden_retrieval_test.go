@@ -162,8 +162,9 @@ func TestGolden_FTSKeywordSearch(t *testing.T) {
 			name:         "apostrophe in query still finds the sonnet",
 			query:        "summer's day",
 			wantDocs:     []string{"05-sonnet-18"},
-			wantTopScore: -3.0132256677448224,
-			note:         "the apostrophe is stripped to a space, so this becomes summer AND s AND day*",
+			wantTopScore: -2.5609151512518666,
+			note: `#70/#75: the query is now "summer's" "day"* -- one term for the possessive rather ` +
+				`than summer AND s AND day*, which is why the score moved`,
 		},
 	}
 
@@ -239,12 +240,26 @@ func TestGolden_HybridFusionOrdering(t *testing.T) {
 			wantStrategies: 1,
 		},
 		{
-			name:           "apostrophe forces lexical mode and raw bm25 scores",
+			// #70: an apostrophe no longer forces lexical mode, so this query
+			// goes through fusion like any other and carries fusion's score
+			// scale, confidence and strategy count.
+			name:           "apostrophe goes through fusion like any other query",
 			query:          "summer's day",
+			wantMode:       HybridModeFusion,
+			wantDocs:       []string{"05-sonnet-18"},
+			wantTopScore:   0.009016393442622951,
+			wantConfidence: "medium",
+			wantStrategies: 1,
+		},
+		{
+			// The control: a genuine double-quoted phrase still selects lexical
+			// mode.
+			name:           "a double-quoted phrase still selects lexical mode",
+			query:          `"summer's day"`,
 			wantMode:       HybridModeLexical,
 			wantDocs:       []string{"05-sonnet-18"},
-			wantTopScore:   -3.0132256677448224,
-			wantConfidence: "", // KNOWN GAP: searchFTSOnly never sets Confidence or StrategiesUsed.
+			wantTopScore:   -1.2461497559769139,
+			wantConfidence: "", // KNOWN GAP: searchFTSOnly never sets Confidence or StrategiesUsed. Fixed by #77.
 			wantStrategies: 0,
 		},
 		{

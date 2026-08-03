@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/rs/zerolog"
 	"github.com/simpleflo/conduit/internal/observability"
@@ -37,8 +39,25 @@ type SearchOptions struct {
 	ContextLen int      // Characters of context around matches
 }
 
-// Search performs a full-text search.
+// Search performs a full-text search over user-supplied text.
+//
+// The query is sanitized into a safe FTS5 expression first; see
+// sanitizeFTSQuery. Callers that build FTS5 syntax themselves must use
+// SearchExpr instead, or the sanitizer will quote their operators into
+// literals.
 func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions) (*SearchResult, error) {
+	return s.SearchExpr(ctx, s.prepareFTSQuery(query), query, opts)
+}
+
+// SearchExpr runs an FTS5 MATCH expression the caller has already built.
+//
+// displayQuery is the human-readable query used for snippet highlighting and
+// echoed back in the result; it may differ from ftsQuery.
+//
+// An empty expression matches nothing. It is reported as zero results rather
+// than an error: `MATCH ''` is an FTS5 syntax error, and a query that sanitizes
+// away to nothing is a user typing punctuation, not a fault.
+func (s *Searcher) SearchExpr(ctx context.Context, ftsQuery, displayQuery string, opts SearchOptions) (*SearchResult, error) {
 	start := time.Now()
 
 	if opts.Limit <= 0 {
@@ -48,8 +67,14 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 		opts.ContextLen = 150
 	}
 
-	// Prepare query for FTS5
-	ftsQuery := s.prepareFTSQuery(query)
+	if strings.TrimSpace(ftsQuery) == "" {
+		return &SearchResult{
+			Results:    nil,
+			TotalHits:  0,
+			Query:      displayQuery,
+			SearchTime: float64(time.Since(start).Milliseconds()),
+		}, nil
+	}
 
 	// Build the search SQL
 	sql, args := s.buildSearchSQL(ftsQuery, opts)
@@ -79,7 +104,7 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 
 		// Generate snippet if highlighting is enabled
 		if opts.Highlight {
-			hit.Snippet = s.highlightSnippet(hit.Snippet, query, opts.ContextLen)
+			hit.Snippet = s.highlightSnippet(hit.Snippet, displayQuery, opts.ContextLen)
 		}
 
 		hits = append(hits, hit)
@@ -95,12 +120,12 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 	result := &SearchResult{
 		Results:    hits,
 		TotalHits:  totalHits,
-		Query:      query,
+		Query:      displayQuery,
 		SearchTime: float64(time.Since(start).Milliseconds()),
 	}
 
 	s.logger.Debug().
-		Str("query", query).
+		Str("query", displayQuery).
 		Int("hits", len(hits)).
 		Int("total", totalHits).
 		Float64("time_ms", result.SearchTime).
@@ -109,98 +134,136 @@ func (s *Searcher) Search(ctx context.Context, query string, opts SearchOptions)
 	return result, nil
 }
 
-// prepareFTSQuery prepares a query string for FTS5.
-// This sanitizes the query to prevent FTS5 syntax errors from special characters.
-func (s *Searcher) prepareFTSQuery(query string) string {
-	// Sanitize the query to remove/escape FTS5 special characters
-	query = sanitizeFTSQuery(query)
+// ---------------------------------------------------------------------------
+// FTS5 query construction
+//
+// Issues #70 and #75. The old approach was to DELETE every character FTS5 might
+// treat as syntax and hope the remainder parsed. It did not:
+//
+//   - '.' was documented as dangerous and never actually stripped, so any query
+//     containing a filename ("main.go"), a version ("v1.2.3") or a decimal
+//     ("3.14") reached FTS5 as a bareword and failed with a syntax error. The
+//     hybrid layer then swallowed the error and reported "no results".
+//   - AND / OR / NOT / NEAR survived untouched, so a user searching for
+//     "people NOT nation" silently got a boolean query instead of three words,
+//     and a query of exactly "AND" was a syntax error.
+//   - Apostrophes were replaced with spaces, splitting "summer's" into two
+//     terms, one of which was the single letter "s".
+//   - Hyphens were replaced with spaces, so "ASL-3" stopped being one thing.
+//
+// The fix is to quote instead of delete. Every token becomes an FTS5 string
+// literal, which is exactly as expressive as a bareword for ordinary words (the
+// unicode61 tokenizer splits the contents identically) but cannot be
+// reinterpreted as syntax. Terms the user explicitly double-quoted stay
+// phrases; everything else is just text.
+// ---------------------------------------------------------------------------
 
-	// Split into terms
-	terms := strings.Fields(query)
-	if len(terms) == 0 {
-		return ""
-	}
+// ftsToken is one unit of a user query.
+type ftsToken struct {
+	text string
+	// phrase records that the user delimited this with double quotes and so
+	// asked for a literal phrase match. Such a token never gets a wildcard.
+	phrase bool
+}
 
-	// Build phrase or term query
-	if len(terms) == 1 {
-		// Single term - use prefix matching
-		term := terms[0]
-		// Skip prefix for very short terms or terms ending with periods
-		// (hyphens are now removed by sanitization)
-		if len(term) >= 2 && !strings.ContainsAny(term, ".") {
-			return fmt.Sprintf("%s*", term)
+// splitFTSQuery splits raw user text into tokens.
+//
+// Text inside a balanced pair of double quotes becomes one phrase token.
+// Everything else splits on whitespace. An unbalanced quote is not a phrase
+// delimiter and is treated as an ordinary character -- which is the other half
+// of issue #70: only a real, closed pair signals exact-phrase intent.
+func splitFTSQuery(query string) []ftsToken {
+	var toks []ftsToken
+	rest := query
+
+	for {
+		open := strings.IndexByte(rest, '"')
+		if open < 0 {
+			return append(toks, bareFTSTokens(rest)...)
 		}
-		return term
-	}
-
-	// Multiple terms - use AND logic with prefix on last term
-	var parts []string
-	for i, term := range terms {
-		if i == len(terms)-1 && len(term) >= 2 && !strings.ContainsAny(term, ".") {
-			parts = append(parts, fmt.Sprintf("%s*", term))
-		} else {
-			parts = append(parts, term)
+		closeAt := strings.IndexByte(rest[open+1:], '"')
+		if closeAt < 0 {
+			// Unbalanced: no phrase here, just a stray character.
+			return append(toks, bareFTSTokens(strings.ReplaceAll(rest, `"`, " "))...)
 		}
+
+		toks = append(toks, bareFTSTokens(rest[:open])...)
+		if inner := strings.TrimSpace(rest[open+1 : open+1+closeAt]); inner != "" {
+			toks = append(toks, ftsToken{text: inner, phrase: true})
+		}
+		rest = rest[open+1+closeAt+1:]
+	}
+}
+
+// bareFTSTokens splits unquoted text on whitespace.
+func bareFTSTokens(s string) []ftsToken {
+	fields := strings.Fields(s)
+	out := make([]ftsToken, 0, len(fields))
+	for _, f := range fields {
+		out = append(out, ftsToken{text: f})
+	}
+	return out
+}
+
+// quoteFTSToken renders one token as an FTS5 string literal.
+//
+// Every token is quoted, not just the ones containing obvious metacharacters.
+// Quoting unconditionally is what makes the result total: there is no input for
+// which this produces a syntax error, and no input for which a search term is
+// reinterpreted as an operator. FTS5 escapes an embedded double quote by
+// doubling it.
+func quoteFTSToken(text string) string {
+	return `"` + strings.ReplaceAll(text, `"`, `""`) + `"`
+}
+
+// sanitizeFTSQuery turns user text into a safe FTS5 MATCH expression.
+//
+// Tokens are joined with a space, which FTS5 reads as an implicit AND -- the
+// same semantics the old sanitizer produced. The result is either a valid
+// expression or the empty string, never something FTS5 will reject.
+func sanitizeFTSQuery(query string) string {
+	toks := splitFTSQuery(query)
+	parts := make([]string, 0, len(toks))
+	for _, tk := range toks {
+		parts = append(parts, quoteFTSToken(tk.text))
 	}
 	return strings.Join(parts, " ")
 }
 
-// sanitizeFTSQuery removes or escapes FTS5 special characters to prevent syntax errors.
-// FTS5 has several special characters that can cause syntax errors:
-// - Double quotes (") - phrase delimiters
-// - Single quotes (') - can cause issues in some contexts
-// - Asterisk (*) - wildcard suffix
-// - Caret (^) - boost operator
-// - Parentheses () - grouping
-// - Colon (:) - column specifier (e.g., "title:search")
-// - Plus/Minus (+/-) - required/excluded terms
-// - Curly braces {} - NEAR queries
-// - Period (.) - special in column names
-func sanitizeFTSQuery(query string) string {
-	// First, handle double quotes - escape them by doubling
-	query = strings.ReplaceAll(query, "\"", "")
-
-	// Remove characters that cause syntax errors
-	// These characters have special meaning in FTS5 and will cause parse errors
-	// if not properly handled
-	specialChars := []string{
-		"'", // Single quote - causes "syntax error near '"
-		"(", // Open paren - grouping
-		")", // Close paren - grouping
-		":", // Colon - column specifier (causes "no such column" errors)
-		"^", // Caret - boost operator
-		"{", // Open brace - NEAR query
-		"}", // Close brace - NEAR query
-		"[", // Open bracket
-		"]", // Close bracket
-		"+", // Plus - required term
-		"*", // Asterisk - wildcard (we add our own)
+// prepareFTSQuery sanitizes user text and adds a prefix wildcard to the final
+// token, so that a partially typed last word still matches.
+//
+// A token the user quoted is left exact: they asked for that literal text.
+func (s *Searcher) prepareFTSQuery(query string) string {
+	toks := splitFTSQuery(query)
+	if len(toks) == 0 {
+		return ""
 	}
 
-	for _, char := range specialChars {
-		query = strings.ReplaceAll(query, char, " ")
+	parts := make([]string, 0, len(toks))
+	for i, tk := range toks {
+		q := quoteFTSToken(tk.text)
+		if i == len(toks)-1 && !tk.phrase && ftsPrefixable(tk.text) {
+			q += "*"
+		}
+		parts = append(parts, q)
 	}
+	return strings.Join(parts, " ")
+}
 
-	// Handle hyphens: Replace all hyphens with spaces to avoid FTS5 NOT operator issues.
-	// In FTS5, "-" is the NOT operator, so "ASL-3" would be parsed as "ASL NOT 3"
-	// which causes "no such column: 3" errors. Instead, we split on hyphens.
-	// "ASL-3" -> "ASL 3"
-	// "self-objectification" -> "self objectification"
-	query = strings.ReplaceAll(query, "-", " ")
-
-	words := strings.Fields(query)
-	var cleanedWords []string
-	for _, word := range words {
-		if word != "" {
-			cleanedWords = append(cleanedWords, word)
+// ftsPrefixable reports whether a trailing wildcard is worth adding. A
+// single-character term would match almost everything, and a term with no
+// alphanumeric content has nothing to prefix.
+func ftsPrefixable(term string) bool {
+	if utf8.RuneCountInString(term) < 2 {
+		return false
+	}
+	for _, r := range term {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return true
 		}
 	}
-
-	// Rejoin and clean up multiple spaces
-	result := strings.Join(cleanedWords, " ")
-	result = strings.TrimSpace(result)
-
-	return result
+	return false
 }
 
 // buildSearchSQL constructs the search query with filters.
@@ -416,8 +479,17 @@ func (s *Searcher) Suggest(ctx context.Context, prefix string, limit int) ([]str
 		limit = 5
 	}
 
-	// Use FTS5 prefix query
-	ftsQuery := prefix + "*"
+	// Quote the prefix before appending the wildcard. This path used to
+	// concatenate raw user input with '*' and hand it straight to FTS5, so
+	// "lant(ern" was a syntax error rather than a miss (issue #75).
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil, nil
+	}
+	ftsQuery := quoteFTSToken(prefix)
+	if ftsPrefixable(prefix) {
+		ftsQuery += "*"
+	}
 
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT DISTINCT title
