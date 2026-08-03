@@ -338,6 +338,24 @@ verifiable artifacts without downloading them. (A parallel research pass
 concluded these hashes were unavailable from the API; that is incorrect, and the
 `/api/models/{repo}/tree/main` endpoint returns them under `lfs.oid`.)
 
+Two of the three pins were then **independently confirmed** against Ollama's
+content-addressed blob store, which had pulled the same upstream artifacts
+during this eval:
+
+| Model | Registry pin | Ollama blob |
+|---|---|---|
+| `qwen3-embedding-0.6b` | `06507c7b4268…c3e439` | `sha256-06507c7b4268…c3e439` ✅ |
+| `mxbai-embed-large-v1` | `819c2adf5ce6…e39c3d` | `sha256-819c2adf5ce6…e39c3d` ✅ |
+| `nomic-embed-text-v1.5` | `f7af6f66802f…c2fdb` | `sha256-970aa74c0a90…ef0e6` (Ollama ships its own conversion — no match expected) |
+
+**Incidental confirmation of the `-ub` analysis:** Ollama's own internal
+invocation is
+`llama-server --embedding --host 127.0.0.1 -c 32768 -b 2048 -ub 2048 …` for
+Qwen3 — i.e. it runs with `-ub` well below `-c` and chunks inputs itself rather
+than relying on llama-server to split them. Conduit's sidecar instead sets
+`-b = -ub = -c`, which is the safer configuration for a server we do not
+pre-chunk for.
+
 ---
 
 ## Sources
