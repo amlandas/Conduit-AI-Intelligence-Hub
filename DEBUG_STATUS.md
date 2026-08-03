@@ -1,5 +1,9 @@
 # Conduit KB Sync - Debug Status
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](CONTEXT.md) for v2.**
+>
+> A resolved debugging log from January 2026, covering a v1 `kb sync` indexing failure. Kept only as a record of those root causes; it describes code paths that have since been rewritten. **Deletion candidate.**
+
 **Date:** January 1, 2026
 **Status:** RESOLVED
 

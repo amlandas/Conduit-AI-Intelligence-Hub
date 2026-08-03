@@ -1,5 +1,9 @@
 # Original Vision Document
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> The original product vision. Retained as a record of intent. Much of the architecture it assumes was removed in Conduit 2.0.
+
 > **Note**: This document captures the original product vision from December 2025. The actual V1 implementation pivoted to focus on **Private Knowledge Base** functionality, deferring the connector marketplace features to future versions. See [PRD.md](PRD.md) for the current product requirements.
 
 ---

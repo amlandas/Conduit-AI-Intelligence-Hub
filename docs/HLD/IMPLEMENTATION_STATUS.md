@@ -1,5 +1,9 @@
 # Conduit Implementation Status vs HLD
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> A v1 implementation status snapshot. For what Conduit 2.0 actually ships, see [CHANGELOG.md](../../CHANGELOG.md).
+
 **Version**: 1.0.42
 **Last Updated**: January 2026
 

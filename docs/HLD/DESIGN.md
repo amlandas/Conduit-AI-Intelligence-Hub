@@ -1,5 +1,9 @@
 # Conduit Design Document
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> This is the v1 system design: a background daemon, a container runtime, Qdrant for vectors and FalkorDB for the graph. None of those exist in Conduit 2.0, which is a single binary storing everything in one SQLite file. Retained for design lineage only.
+
 **Version**: 1.0.42
 **Status**: Production
 **Last Updated**: January 2026

@@ -1,5 +1,9 @@
 # Query-Adaptive Confidence Model - Technical Design
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../CONTEXT.md) for v2.**
+>
+> A v1 design note on query-adaptive retrieval. Conduit 2.0 collapsed retrieval tuning to a single `recall_mode` preset; see [ADMIN_GUIDE.md](ADMIN_GUIDE.md#retrieval).
+
 **Version**: 1.0
 **Date**: January 2026
 **Status**: Design Phase

@@ -1,5 +1,9 @@
 # High-Level Design V0.5 — Secure Link & Trust Signals
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> Describes the v0.5 secure-link design over the daemon's Unix socket. There is no daemon and no socket in Conduit 2.0; the MCP server communicates over stdio.
+
 **Version**: 1.0.42 (Updated)
 **Status**: PARTIALLY IMPLEMENTED / DEFERRED
 **Last Updated**: January 2026

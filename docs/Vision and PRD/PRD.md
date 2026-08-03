@@ -1,5 +1,9 @@
 # Product Requirements Document (PRD) — Simpleflo Conduit
 
+> **HISTORICAL — describes Conduit v1 (retired 2026-08). See [CONTEXT.md](../../CONTEXT.md) for v2.**
+>
+> The v1 product requirements document. Retained for lineage; it describes connectors, a daemon and a desktop GUI that Conduit 2.0 does not have.
+
 **Product**: Simpleflo Conduit
 **Expanded Title**: Private Knowledge Base for AI Coding Tools
 **Version**: 1.0.42
