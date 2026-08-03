@@ -275,6 +275,45 @@ func asExitError(err error, target **exec.ExitError) bool {
 	return false
 }
 
+// withGNUStat puts a `stat` on the fake machine's PATH that forwards to GNU
+// coreutils stat, and reports whether it managed to.
+//
+// The BSD/GNU divergence in stat has now broken this suite twice, and only on
+// Linux, because macOS developers and macOS CI never execute the GNU branch.
+// Where GNU stat is installed alongside BSD stat -- `brew install coreutils`
+// provides it as gstat -- this lets a Mac exercise the branch that only Linux
+// would otherwise reach.
+//
+// The shim must invoke gstat by ABSOLUTE path. Scripts run here under a
+// scrubbed PATH, so a bare `exec gstat` is unresolvable, the shim exits 127,
+// every stat fails, and the test silently proves nothing.
+func (e *env) withGNUStat(t *testing.T) bool {
+	t.Helper()
+
+	gnu, err := exec.LookPath("gstat")
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(gnu)
+	if err != nil {
+		return false
+	}
+
+	shim := "#!/usr/bin/env bash\nexec " + abs + " \"$@\"\n"
+	if err := os.WriteFile(filepath.Join(e.binDir, "stat"), []byte(shim), 0o755); err != nil {
+		t.Fatalf("write stat shim: %v", err)
+	}
+
+	// Prove the shim resolves before any caller relies on it.
+	probe := exec.Command(filepath.Join(e.binDir, "stat"), "--version")
+	probe.Env = []string{"PATH=" + e.binDir + ":/usr/bin:/bin"}
+	out, perr := probe.Output()
+	if perr != nil || !strings.Contains(string(out), "GNU coreutils") {
+		t.Fatalf("GNU stat shim does not work: err=%v out=%q", perr, out)
+	}
+	return true
+}
+
 // runWithRealHome runs a script with the developer's actual HOME.
 //
 // Used only by the case-folding guard test, where the property under test is
@@ -394,6 +433,37 @@ func sameDirOnDisk(a, b string) bool {
 		return false
 	}
 	return os.SameFile(ai, bi)
+}
+
+// fsFoldsCase reports whether the filesystem holding dir treats "abc" and "ABC"
+// as the same name.
+//
+// Probed rather than inferred from GOOS. Whether "/USERS" names the same
+// directory as "/Users" is a fact about the filesystem, not about the operating
+// system: macOS formats APFS case-insensitively by default but can be formatted
+// case-sensitively, ext4 is case-sensitive, and a single machine can mount both
+// at once. A GOOS switch would assert the common case and be wrong on the
+// others -- including, silently, on a developer's case-sensitive Mac.
+func fsFoldsCase(t *testing.T, dir string) bool {
+	t.Helper()
+
+	lower := filepath.Join(dir, "caseprobe")
+	if err := os.MkdirAll(lower, 0o755); err != nil {
+		t.Fatalf("case probe: mkdir: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(lower) }()
+
+	upper := filepath.Join(dir, "CASEPROBE")
+	ui, err := os.Stat(upper)
+	if err != nil {
+		// The upper-cased name does not resolve, so names are distinct here.
+		return false
+	}
+	li, err := os.Stat(lower)
+	if err != nil {
+		t.Fatalf("case probe: stat: %v", err)
+	}
+	return os.SameFile(li, ui)
 }
 
 // invocations returns the argv lines the stub recorded.

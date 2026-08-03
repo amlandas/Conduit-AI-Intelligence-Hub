@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 )
@@ -43,19 +42,37 @@ func TestAssertSafeDataDir_CaseInsensitiveEvasion(t *testing.T) {
 }
 
 // The same hole, reached through a mixed-case system directory.
+//
+// Each spelling is checked against the protected path it is supposed to alias,
+// not against runtime.GOOS. Whether "/ETC" is "/etc" is a fact about the
+// filesystem: macOS formats APFS case-insensitively by default but can be
+// formatted case-sensitively, ext4 is case-sensitive, and one machine can mount
+// both. A GOOS switch asserts the common case and is silently wrong on the rest
+// -- which is exactly how these rows passed on macOS and failed on Linux.
 func TestAssertSafeDataDir_MixedCaseSystemDirs(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("case-folding behaviour is filesystem-specific; exercised on macOS")
+	cases := []struct{ spelling, aliasOf string }{
+		{"/ETC", "/etc"},
+		{"/Etc", "/etc"},
+		{"/etc/", "/etc"},
+		{"/USERS", "/Users"},
+		{"/users", "/Users"},
 	}
 
-	for _, spelling := range []string{"/ETC", "/etc/", "/Etc", "/USERS", "/users"} {
-		if !sameDir(spelling, filepath.Clean(strings.ToLower(spelling))) {
-			// Not case-folding here, so there is nothing to evade.
+	tested := 0
+	for _, c := range cases {
+		if !sameDir(c.spelling, c.aliasOf) {
+			// Genuinely a different path here, so there is nothing to evade
+			// and accepting it would be correct.
 			continue
 		}
-		if _, err := AssertSafeDataDir(spelling); err == nil {
-			t.Errorf("accepted %q, which resolves to a protected directory", spelling)
+		tested++
+		if _, err := AssertSafeDataDir(c.spelling); err == nil {
+			t.Errorf("accepted %q, which IS %q on this filesystem", c.spelling, c.aliasOf)
 		}
+	}
+
+	if tested == 0 {
+		t.Skip("filesystem is case-sensitive and /etc is exact; no aliasing spellings to test")
 	}
 }
 

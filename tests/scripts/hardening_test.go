@@ -49,25 +49,184 @@ func TestGuardCatchesCaseFoldedRealHome(t *testing.T) {
 }
 
 // The reviewer's evasion table, run against the fake machine's own home.
+//
+// The rows split into two kinds, and conflating them is what broke CI on
+// ubuntu-latest. "/Users" names a protected directory on every platform,
+// because the guard lists that exact string. "/USERS" only names one where the
+// filesystem folds case: on ext4 it is simply a path that does not exist and is
+// genuinely NOT /Users, so a guard that accepts it is behaving correctly.
+//
+// Whether a row is testable is therefore a question about the filesystem under
+// the test, which is probed rather than assumed.
 func TestGuardEvasionTable(t *testing.T) {
-	cases := []string{
-		"/USERS", "/Users", "/users",
-		"/ETC", "/etc", "/Etc",
-		"/Volumes", "/Volumes/", "/mnt", "/media", "/net", "/srv",
-		"/", "//", "/.", "/usr/..",
-		"~", "~/",
+	cases := []struct {
+		dir string
+		// aliasOf, when set, names the protected directory this spelling is
+		// only equivalent to on a case-insensitive filesystem. The row is
+		// tested when the two really are one directory on this machine.
+		//
+		// Checked per row rather than by probing a temp directory, because
+		// TMPDIR is not necessarily on the same filesystem as / -- tmpfs on
+		// Linux, a separate volume on a partitioned Mac -- and the question the
+		// row asks is specifically about /Users and /etc.
+		aliasOf string
+	}{
+		// Literal deny-list entries and path-arithmetic tricks: protected
+		// everywhere, whatever the filesystem does with case.
+		{dir: "/"},
+		{dir: "//"},
+		{dir: "/."},
+		{dir: "/usr/.."},
+		{dir: "~"},
+		{dir: "~/"},
+		{dir: "/Users"},
+		{dir: "/etc"},
+		{dir: "/Volumes"},
+		{dir: "/Volumes/"},
+		{dir: "/mnt"},
+		{dir: "/media"},
+		{dir: "/net"},
+		{dir: "/srv"},
+
+		// Case-folded spellings: the same directory only where names fold.
+		{dir: "/USERS", aliasOf: "/Users"},
+		{dir: "/users", aliasOf: "/Users"},
+		{dir: "/ETC", aliasOf: "/etc"},
+		{dir: "/Etc", aliasOf: "/etc"},
 	}
 
 	for _, script := range []string{"uninstall.sh", "remove-v1.sh"} {
-		for _, dir := range cases {
-			t.Run(script+" "+dir, func(t *testing.T) {
+		for _, c := range cases {
+			t.Run(script+" "+c.dir, func(t *testing.T) {
+				if c.aliasOf != "" && !sameDirOnDisk(c.dir, c.aliasOf) {
+					t.Skipf("%s is not %s on this filesystem, so it is a genuinely different path and accepting it is correct",
+						c.dir, c.aliasOf)
+				}
+
 				e := newEnv(t)
-				r := e.run(t, script, "--data-dir", dir, "--dry-run")
+				r := e.run(t, script, "--data-dir", c.dir, "--dry-run")
 				if r.code == 0 {
-					t.Fatalf("%s accepted %q\n%s", script, dir, r.combined)
+					t.Fatalf("%s accepted %q\n%s", script, c.dir, r.combined)
 				}
 			})
 		}
+	}
+}
+
+// The evasion table above reasons about /Users and /etc, which live on the root
+// filesystem. This one exercises the same property against the fake machine's
+// own home directory on whatever filesystem the test's temp dir lives on --
+// which on a CI runner is frequently not the root one.
+//
+// It is also the case that matters most in practice: HOME is the protected path
+// a mistyped --data-dir is most likely to land on.
+func TestGuardCatchesCaseFoldedFakeHome(t *testing.T) {
+	probeRoot := t.TempDir()
+	if !fsFoldsCase(t, probeRoot) {
+		t.Skip("temp filesystem is case-sensitive; a folded spelling names a different directory here")
+	}
+
+	for _, script := range []string{"uninstall.sh", "remove-v1.sh"} {
+		t.Run(script, func(t *testing.T) {
+			e := newEnv(t)
+
+			folded := strings.ToUpper(e.home)
+			if !sameDirOnDisk(e.home, folded) {
+				t.Skipf("%s is not %s here", folded, e.home)
+			}
+
+			r := e.run(t, script, "--data-dir", folded, "--dry-run")
+			if r.code == 0 {
+				t.Fatalf("%s accepted %q, which IS the home directory\n%s", script, folded, r.combined)
+			}
+			if !r.contains("refusing") {
+				t.Errorf("no guard message:\n%s", r.combined)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// BSD / GNU stat divergence
+// ---------------------------------------------------------------------------
+
+// GNU's -f is --file-system and takes no format argument, so `stat -f '%Lp'
+// FILE` is parsed as "show filesystem status for '%Lp' and FILE": the first
+// fails, the second prints a six-line status block, and the exit status is
+// non-zero. A `stat -f ... || stat -c ...` chain therefore ran its fallback with
+// that block already on stdout, and the caller captured 237 characters of
+// filesystem statistics as a file mode. chmod rejected it, `|| true` swallowed
+// the failure, and the rewritten profile kept mktemp's 0600.
+//
+// This test exercises that branch on a Mac, where BSD stat would otherwise hide
+// it -- the reason it reached CI twice.
+func TestProfilePermissionsUnderGNUStat(t *testing.T) {
+	e := newEnv(t)
+	if !e.withGNUStat(t) {
+		t.Skip("GNU coreutils stat (gstat) not installed; the GNU branch is covered natively on Linux")
+	}
+
+	profile := e.profile()
+	e.writeFile(t, profile, "# created by pipx\nexport PATH=\"$HOME/.local/bin:$PATH\"\n\n# Conduit\nexport PATH=\"$HOME/.local/bin:$PATH\"\n\nexport EDITOR=vim\n")
+	if err := os.Chmod(profile, 0o644); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+
+	if r := e.run(t, "uninstall.sh"); r.code != 0 {
+		t.Fatalf("exit %d\n%s", r.code, r.combined)
+	}
+
+	info, err := os.Stat(profile)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Errorf("profile mode = %o, want 644 (mktemp's 600 leaked through under GNU stat)", got)
+	}
+
+	// The surgery itself must still be correct under GNU.
+	after := readFile(t, profile)
+	if strings.Contains(after, "# Conduit") {
+		t.Errorf("Conduit block survived:\n%s", after)
+	}
+	if !strings.Contains(after, "# created by pipx") {
+		t.Errorf("pipx line was removed:\n%s", after)
+	}
+}
+
+// The identity guard must work under GNU stat too: it is what stops a
+// case-folded or symlinked spelling of a protected directory getting through.
+func TestPathIdentityGuardUnderGNUStat(t *testing.T) {
+	for _, script := range []string{"uninstall.sh", "remove-v1.sh"} {
+		t.Run(script, func(t *testing.T) {
+			e := newEnv(t)
+			if !e.withGNUStat(t) {
+				t.Skip("GNU coreutils stat (gstat) not installed")
+			}
+
+			// A symlink to the home directory: refused only if the identity
+			// check resolves it, which is what the polluted-stdout chain broke.
+			link := filepath.Join(e.home, "link-to-home")
+			if err := os.Symlink(e.home, link); err != nil {
+				t.Skipf("cannot create symlink: %v", err)
+			}
+
+			r := e.run(t, script, "--data-dir", link, "--dry-run")
+			if r.code == 0 {
+				t.Fatalf("%s accepted a symlink to the home directory under GNU stat\n%s", script, r.combined)
+			}
+
+			// And a legitimate data directory must still be accepted, so the
+			// guard is not simply refusing everything.
+			if script == "uninstall.sh" {
+				e2 := newEnv(t)
+				e2.withGNUStat(t)
+				e2.installStubOnPath(t, v2Stub())
+				if r := e2.run(t, script, "--data-dir", e2.dataDir, "--dry-run"); r.code != 0 {
+					t.Errorf("a real data directory was refused under GNU stat\n%s", r.combined)
+				}
+			}
+		})
 	}
 }
 
