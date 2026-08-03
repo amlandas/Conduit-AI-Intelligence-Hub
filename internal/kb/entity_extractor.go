@@ -63,7 +63,7 @@ func GenerateCanonicalEntityID(name string, entityType EntityType) string {
 type EntityExtractor struct {
 	provider       LLMProvider
 	db             *sql.DB
-	graphStore     *FalkorDBStore
+	graphStore     *GraphStore
 	config         KAGConfig
 	validator      *ExtractionValidator
 	logger         zerolog.Logger
@@ -77,7 +77,7 @@ type EntityExtractor struct {
 type EntityExtractorConfig struct {
 	Provider   LLMProvider
 	DB         *sql.DB
-	GraphStore *FalkorDBStore
+	GraphStore *GraphStore
 	Config     KAGConfig
 	NumWorkers int
 }
@@ -239,16 +239,23 @@ func (e *EntityExtractor) ExtractFromChunkWithRetry(ctx context.Context, chunkID
 		e.logger.Warn().Err(err).Str("chunk_id", chunkID).Msg("failed to store relations in SQLite")
 	}
 
-	// Store in graph database if available
-	if e.graphStore != nil && e.graphStore.IsConnected() {
-		for _, entity := range validatedEntities {
-			if err := e.graphStore.CreateEntity(ctx, &entity); err != nil {
-				e.logger.Debug().Err(err).Str("entity_id", entity.ID).Msg("failed to store entity in graph")
+	// Mirror into the graph edge tables when the knowledge graph is enabled.
+	//
+	// The store is inert when KAG is off, so this whole block costs one boolean
+	// check on the default path. The edge table carries document provenance that
+	// kb_relations does not, which is what makes DeleteByDocument and traversal
+	// citations possible.
+	if e.graphStore.Enabled() {
+		for i := range validatedEntities {
+			if err := e.graphStore.UpsertEntity(ctx, &validatedEntities[i]); err != nil {
+				e.logger.Debug().Err(err).Str("entity_id", validatedEntities[i].ID).Msg("failed to store entity in graph")
 			}
 		}
-		for _, relation := range validatedRelations {
-			if err := e.graphStore.CreateRelation(ctx, &relation); err != nil {
-				e.logger.Debug().Err(err).Str("relation_id", relation.ID).Msg("failed to store relation in graph")
+		for i := range validatedRelations {
+			rel := validatedRelations[i]
+			rel.SourceDocumentID = documentID
+			if err := e.graphStore.UpsertEdge(ctx, &rel); err != nil {
+				e.logger.Debug().Err(err).Str("relation_id", rel.ID).Msg("failed to store edge in graph")
 			}
 		}
 	}

@@ -8,6 +8,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/simpleflo/conduit/internal/kb"
+	"github.com/simpleflo/conduit/internal/querylog"
 )
 
 // textResult builds a CallToolResult from one or more text blocks. The
@@ -71,6 +72,11 @@ func (s *Server) toolSearch(ctx context.Context, _ *mcp.CallToolRequest, args se
 	if args.SourceID != "" {
 		opts.SourceIDs = []string{args.SourceID}
 	}
+
+	// Query-shape instrumentation: features only, never the query text.
+	// kb_search has no hop argument, so hop depth is recorded as 0 -- which is
+	// exactly the baseline the graph's evidence gate is measured against.
+	s.queryLog.Log(querylog.Shape(ToolSearch, args.Query, 0, s.graph.Enabled()))
 
 	// Use hybrid searcher with fallback for better results
 	result, err := s.hybrid.SearchWithFallback(ctx, args.Query, opts)
@@ -305,19 +311,64 @@ func (s *Server) toolStats(ctx context.Context, _ *mcp.CallToolRequest, args sta
 	return textResult(text), nil, nil
 }
 
+// graphDisabledNote is the degraded-mode banner kag_query emits when the
+// knowledge graph is turned off.
+//
+// It follows the existing degraded-mode convention (kb.SearchResult.Note): a
+// short human-readable line, appended to the content the client is already
+// getting, rather than a protocol-level error. An AI client can detect the
+// disabled state by matching "graph: disabled"; a human reading the transcript
+// gets an explanation and a next step.
+const graphDisabledNote = "graph: disabled\n\n" +
+	"The knowledge graph is not enabled on this Conduit install, so there are no " +
+	"entities or relationships to traverse. Enable it with `kb.kag.enabled: true` " +
+	"in ~/.conduit/conduit.yaml, then run `conduit kb kag-sync` to populate it.\n\n" +
+	"Answering from hybrid retrieval over the same query instead -- the passages " +
+	"below are real indexed content, not graph results."
+
+// graphEmptyNote covers the enabled-but-unpopulated case: the feature is on, but
+// nothing has been extracted yet, so the honest answer is still "no graph data".
+const graphEmptyNote = "graph: enabled, empty\n\n" +
+	"The knowledge graph is enabled but contains no entities matching this query. " +
+	"Run `conduit kb kag-sync` to extract entities from indexed documents.\n\n" +
+	"Answering from hybrid retrieval over the same query instead."
+
 // toolKagQuery performs a knowledge graph query.
+//
+// Two behaviors, both non-failing:
+//
+//   - Graph disabled (the default): return a labelled note plus hybrid search
+//     results for the same query, so the client still receives grounded,
+//     citable content instead of an error it has to recover from.
+//   - Graph enabled: search entities and traverse the SQLite edge tables, in
+//     the same response shape as before.
 func (s *Server) toolKagQuery(ctx context.Context, _ *mcp.CallToolRequest, args kagQueryArgs) (*mcp.CallToolResult, any, error) {
+	graphEnabled := s.graph.Enabled()
+
+	// Query-shape instrumentation. Records features of the query, never the
+	// query itself -- see internal/querylog.
+	s.queryLog.Log(querylog.Shape(ToolKAGQuery, args.Query, args.MaxHops, graphEnabled))
+
+	if !graphEnabled {
+		return s.kagFallback(ctx, args, graphDisabledNote)
+	}
+
 	// Set defaults
 	includeRelations := true
 	if args.IncludeRelations != nil {
 		includeRelations = *args.IncludeRelations
 	}
 
+	maxHops := args.MaxHops
+	if maxHops <= 0 || maxHops > s.graphMaxHops {
+		maxHops = s.graphMaxHops
+	}
+
 	// Build search request
 	req := &kb.KAGSearchRequest{
 		Query:            args.Query,
 		EntityHints:      args.Entities,
-		MaxHops:          args.MaxHops,
+		MaxHops:          maxHops,
 		Limit:            args.Limit,
 		IncludeRelations: includeRelations,
 		SourceFilter:     args.SourceID,
@@ -329,16 +380,78 @@ func (s *Server) toolKagQuery(ctx context.Context, _ *mcp.CallToolRequest, args 
 		return nil, nil, fmt.Errorf("kag search: %w", err)
 	}
 
+	// An enabled graph with no matching entities is still a dead end for the
+	// caller. Degrade the same way rather than returning "no entities found".
+	if len(result.Entities) == 0 {
+		return s.kagFallback(ctx, args, graphEmptyNote)
+	}
+
 	// Add formatted context as main content
 	texts := []string{result.Context}
 
 	// Add entity details if present
-	if len(result.Entities) > 0 {
-		entityDetails := fmt.Sprintf("\n---\nFound %d entities", len(result.Entities))
-		if len(result.Relations) > 0 {
-			entityDetails += fmt.Sprintf(" with %d relationships", len(result.Relations))
+	entityDetails := fmt.Sprintf("\n---\nFound %d entities", len(result.Entities))
+	if len(result.Relations) > 0 {
+		entityDetails += fmt.Sprintf(" with %d relationships", len(result.Relations))
+	}
+	texts = append(texts, entityDetails)
+
+	return textResult(texts...), nil, nil
+}
+
+// kagFallback answers a kag_query from hybrid retrieval, prefixed with a note
+// explaining why no graph results are present.
+//
+// The fallback deliberately reuses the kb_search formatting (formatHit) so the
+// hits carry the same title/score/path/snippet citation fields the client
+// already knows how to read.
+func (s *Server) kagFallback(ctx context.Context, args kagQueryArgs, note string) (*mcp.CallToolResult, any, error) {
+	limit := args.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 50 {
+		limit = 50
+	}
+
+	opts := kb.HybridSearchOptions{
+		Limit:      limit,
+		Mode:       kb.HybridModeFusion,
+		RecallMode: kb.RecallModeBalanced,
+	}
+	if args.SourceID != "" {
+		opts.SourceIDs = []string{args.SourceID}
+	}
+
+	// Entity hints are query terms too; folding them in keeps the fallback
+	// faithful to what the caller asked for.
+	query := args.Query
+	if len(args.Entities) > 0 {
+		query = strings.TrimSpace(query + " " + strings.Join(args.Entities, " "))
+	}
+
+	texts := []string{note}
+
+	result, err := s.hybrid.SearchWithFallback(ctx, query, opts)
+	if err != nil {
+		// Retrieval failing too is worth saying plainly, but it is still not a
+		// protocol error: the client asked a question and gets an answer about
+		// why there is no content.
+		s.logger.Warn().Err(err).Msg("kag_query fallback retrieval failed")
+		texts = append(texts, "Retrieval fallback also failed: "+err.Error())
+		return textResult(texts...), nil, nil
+	}
+
+	for _, hit := range result.Results {
+		texts = append(texts, formatHit(hit))
+	}
+
+	if len(result.Results) == 0 {
+		noteText := "No results found for: " + query
+		if result.Note != "" {
+			noteText += "\n\n" + result.Note
 		}
-		texts = append(texts, entityDetails)
+		texts = append(texts, noteText)
 	}
 
 	return textResult(texts...), nil, nil

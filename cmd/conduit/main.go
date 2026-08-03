@@ -1051,15 +1051,6 @@ func vectorIndexCount() (int64, error) {
 	return count, nil
 }
 
-// checkFalkorDBRunning checks if FalkorDB is accessible on localhost:6379
-func checkFalkorDBRunning() bool {
-	conn, err := net.DialTimeout("tcp", "localhost:6379", 2*time.Second)
-	if err != nil {
-		return false
-	}
-	conn.Close()
-	return true
-}
 
 // getOllamaModels returns a list of installed Ollama models
 func getOllamaModels() ([]string, error) {
@@ -1248,13 +1239,14 @@ func statusCmd() *cobra.Command {
 					}
 				}
 
-				// FalkorDB (Graph Database)
-				if falkor, ok := deps["falkordb"].(map[string]interface{}); ok {
-					available, _ := falkor["available"].(bool)
-					if available {
-						fmt.Println("   Graph Database:    ✓ FalkorDB")
+				// Knowledge graph. Stored in the knowledge base file since
+				// WP-2.3, so it is a feature flag, not a service to reach.
+				if graph, ok := deps["graph"].(map[string]interface{}); ok {
+					enabled, _ := graph["enabled"].(bool)
+					if enabled {
+						fmt.Println("   Graph:             ✓ Enabled (SQLite)")
 					} else {
-						fmt.Println("   Graph Database:    ○ FalkorDB not running")
+						fmt.Println("   Graph:             ○ Disabled (kb.kag.enabled)")
 					}
 				}
 			}
@@ -1317,12 +1309,7 @@ func statusCmd() *cobra.Command {
 					fmt.Println("   Preload:  ○ Load on first use")
 				}
 
-				// Check FalkorDB status
-				if checkFalkorDBRunning() {
-					fmt.Println("   FalkorDB: ✓ Running")
-				} else {
-					fmt.Println("   FalkorDB: ○ Not running")
-				}
+				fmt.Println("   Storage:  SQLite (knowledge base file)")
 
 				// Get KAG stats from database
 				homeDir, _ := os.UserHomeDir()
@@ -1330,12 +1317,14 @@ func statusCmd() *cobra.Command {
 				if db, err := store.New(dbPath); err == nil {
 					defer db.Close()
 
-					var entityCount, relationCount int
+					var entityCount, relationCount, edgeCount int
 					db.DB().QueryRow("SELECT COUNT(*) FROM kb_entities").Scan(&entityCount)
 					db.DB().QueryRow("SELECT COUNT(*) FROM kb_relations").Scan(&relationCount)
+					db.DB().QueryRow("SELECT COUNT(*) FROM kb_graph_edges").Scan(&edgeCount)
 
 					fmt.Printf("   Entities:  %d\n", entityCount)
 					fmt.Printf("   Relations: %d\n", relationCount)
+					fmt.Printf("   Edges:     %d\n", edgeCount)
 
 					// Get extraction status
 					var completed, pending, errors int
@@ -3726,15 +3715,9 @@ Checks:
 					fmt.Println("   Model loads on first use (1-2 minute delay)")
 				}
 
-				// Check FalkorDB
-				if checkFalkorDBRunning() {
-					fmt.Println("✓ FalkorDB is running")
-				} else {
-					fmt.Println("⚠️  FalkorDB not running")
-					fmt.Println("   Graph queries will be slower (SQLite fallback)")
-					fmt.Println("   Start with: conduit falkordb start")
-					warnings++
-				}
+				// The graph lives in the knowledge base file since WP-2.3, so
+				// there is no service to check and no way for it to be "down".
+				fmt.Println("✓ Graph storage: SQLite (knowledge base file)")
 
 				// Check KAG extraction model
 				if cfg.KB.KAG.Provider == "ollama" {
@@ -4147,6 +4130,18 @@ Example MCP client configuration:
 			}
 			defer st.Close()
 
+			// Load config for the knowledge graph and telemetry toggles. A
+			// missing or broken config file must not stop the MCP server from
+			// serving retrieval, so failure here falls back to defaults: graph
+			// off, query log on.
+			mcpCfg, cfgErr := config.Load()
+			if cfgErr != nil {
+				mcpCfg = config.DefaultConfig()
+			}
+			if mcpCfg.DataDir != "" {
+				dataDir = mcpCfg.DataDir
+			}
+
 			// Create FTS5 searcher
 			ftsSearcher := kb.NewSearcher(st.DB())
 
@@ -4175,7 +4170,12 @@ Example MCP client configuration:
 			// Create and run MCP server with hybrid searcher.
 			// Backed by the official MCP Go SDK (internal/mcpserver); it speaks
 			// the current spec revision and negotiates down for older clients.
-			server := mcpserver.New(st.DB(), hybridSearcher)
+			server := mcpserver.NewWithOptions(st.DB(), hybridSearcher, mcpserver.Options{
+				GraphEnabled:    mcpCfg.KB.KAG.Enabled,
+				GraphMaxHops:    mcpCfg.KB.KAG.Graph.MaxHops,
+				QueryLogDir:     dataDir,
+				QueryLogEnabled: mcpCfg.Telemetry.LocalQueryLog,
+			})
 
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -5104,11 +5104,14 @@ SAFETY FLAGS:
   --dry-run      Show what would be removed without removing
   --json         Output results as JSON
 
-NOTE: Dependencies (Ollama, container runtimes, containers) are NOT removed.
+NOTE: Dependencies (Ollama, container runtimes) are NOT removed.
       These may be shared with other projects. To remove manually:
-      - Stop containers: podman stop falkordb && podman rm falkordb
       - Remove Ollama: See https://ollama.com/download for uninstall instructions
       - Remove Podman: brew uninstall podman
+
+      Conduit no longer runs any containers. If conduit-qdrant or
+      conduit-falkordb are still present from an older install, nothing
+      uses them: podman rm -f conduit-qdrant conduit-falkordb
 
 Examples:
   conduit uninstall                    # Interactive mode
@@ -5275,7 +5278,10 @@ Examples:
 			if !dryRun && result.Success {
 				fmt.Println()
 				fmt.Println("To remove dependencies manually (if no longer needed):")
-				fmt.Println("  • Containers: podman stop falkordb && podman rm falkordb")
+				// TODO(WP-3.2): remove with dead-stack teardown. Conduit no
+				// longer creates containers; these can only be left over from a
+				// pre-v2 install.
+				fmt.Println("  • Leftover containers: podman rm -f conduit-qdrant conduit-falkordb")
 				fmt.Println("  • Ollama: rm -rf ~/.ollama && brew uninstall ollama")
 				fmt.Println("  • Podman: podman machine stop && podman machine rm && brew uninstall podman")
 			}
@@ -5566,285 +5572,74 @@ func commandExists(cmd string) bool {
 }
 
 // ============================================================================
-// FalkorDB Commands (KAG Graph Database)
+// FalkorDB Commands -- deprecation shim
 // ============================================================================
 
+// TODO(WP-3.2): remove with dead-stack teardown.
+//
+// WP-2.3 deleted the FalkorDB graph database. The knowledge graph now lives in
+// the same SQLite file as the rest of the knowledge base, so there is no
+// container to install, start, stop or inspect, no loopback port, and no
+// unauthenticated Redis surface. The command group survives only so that a user
+// (or a stale script, or the frozen desktop app) running `conduit falkordb ...`
+// gets an explanation instead of "unknown command". WP-3.2 deletes it outright.
 func falkordbCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "falkordb",
-		Short: "Manage FalkorDB graph database for KAG",
-		Long: `Manage the FalkorDB graph database for Knowledge-Augmented Generation (KAG).
+		Use:    "falkordb",
+		Short:  "Deprecated: the knowledge graph is stored in the knowledge base file",
+		Hidden: true,
+		Long: `Deprecated. Conduit no longer runs a graph database container.
 
-FalkorDB stores entity-relationship graphs extracted from your documents,
-enabling multi-hop reasoning and aggregation queries.
+The knowledge graph is stored in the same SQLite file as the rest of the
+knowledge base, so there is no container to install, start, stop or inspect.
+The graph is off by default; enable it with kb.kag.enabled in
+~/.conduit/conduit.yaml.
 
-Examples:
-  conduit falkordb install     # Install and start FalkorDB
-  conduit falkordb status      # Check FalkorDB health
-  conduit falkordb stop        # Stop FalkorDB container`,
+  conduit kb kag-sync      # extract entities and edges from indexed documents
+  conduit kb kag-status     # entity and edge counts
+  conduit status           # dependency and capability overview`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return deprecatedGraphStackCmd(cmd)
+		},
 	}
 
-	cmd.AddCommand(falkordbInstallCmd())
-	cmd.AddCommand(falkordbStartCmd())
-	cmd.AddCommand(falkordbStopCmd())
-	cmd.AddCommand(falkordbStatusCmd())
+	for _, sub := range []struct{ use, short string }{
+		{"install", "Deprecated: no graph database container is required"},
+		{"start", "Deprecated: no graph database container is required"},
+		{"stop", "Deprecated: no graph database container is required"},
+		{"status", "Deprecated: use 'conduit kb kag-status'"},
+	} {
+		s := sub
+		cmd.AddCommand(&cobra.Command{
+			Use:    s.use,
+			Short:  s.short,
+			Hidden: true,
+			RunE: func(cmd *cobra.Command, args []string) error {
+				return deprecatedGraphStackCmd(cmd)
+			},
+		})
+	}
 
 	return cmd
 }
 
-func falkordbInstallCmd() *cobra.Command {
-	var preferRuntime string
+// deprecatedGraphStackCmd explains that the external graph database is gone.
+//
+// TODO(WP-3.2): remove with dead-stack teardown.
+func deprecatedGraphStackCmd(cmd *cobra.Command) error {
+	fmt.Fprintf(cmd.OutOrStdout(),
+		`This command is no longer needed.
 
-	cmd := &cobra.Command{
-		Use:   "install",
-		Short: "Install and start FalkorDB container",
-		Long: `Install FalkorDB graph database for KAG (Knowledge-Augmented Generation).
+Conduit stores the knowledge graph in the knowledge base file itself, so there
+is no separate graph database to manage. The graph is off by default.
 
-This command will:
-1. Detect available container runtime (Podman preferred, Docker as fallback)
-2. Pull the FalkorDB image
-3. Create and start the conduit-falkordb container
-4. Verify FalkorDB is healthy
-
-After installation, enable KAG with:
-  conduit kb kag-sync`,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-			homeDir, _ := os.UserHomeDir()
-			dataDir := filepath.Join(homeDir, ".conduit", "falkordb")
-
-			// Ensure data directory exists
-			if err := os.MkdirAll(dataDir, 0755); err != nil {
-				return fmt.Errorf("create data directory: %w", err)
-			}
-
-			// Detect container runtime - use full path to work from Electron
-			var runtimePath string
-			if preferRuntime != "" {
-				runtimePath = findBinaryPath(preferRuntime)
-				if runtimePath == "" {
-					return fmt.Errorf("specified runtime %s not found", preferRuntime)
-				}
-			} else {
-				if podmanPath := findBinaryPath("podman"); podmanPath != "" {
-					runtimePath = podmanPath
-				} else if dockerPath := findBinaryPath("docker"); dockerPath != "" {
-					runtimePath = dockerPath
-				} else {
-					return fmt.Errorf("no container runtime available.\n\nInstall Podman or Docker first:\n  brew install podman && podman machine init && podman machine start")
-				}
-			}
-			fmt.Printf("Using %s as container runtime\n", filepath.Base(runtimePath))
-
-			// Bypass credential helpers (gcloud, docker-credential-desktop, etc.)
-			// Podman: use --authfile with empty JSON
-			// Docker: use DOCKER_CONFIG env pointing to dir with empty config.json
-			isPodman := strings.Contains(filepath.Base(runtimePath), "podman")
-			authFile := ""
-			dockerConfigDir := ""
-			if isPodman {
-				authFile = getEmptyAuthFile()
-			} else {
-				// For Docker, create a temp config directory with empty config.json
-				dockerConfigDir = filepath.Join(os.TempDir(), "conduit-docker-config")
-				os.MkdirAll(dockerConfigDir, 0700)
-				configPath := filepath.Join(dockerConfigDir, "config.json")
-				if _, err := os.Stat(configPath); os.IsNotExist(err) {
-					os.WriteFile(configPath, []byte("{}"), 0600)
-				}
-			}
-
-			// Pull FalkorDB image
-			fmt.Println("Pulling FalkorDB image...")
-			pullArgs := []string{"pull"}
-			if authFile != "" {
-				pullArgs = append(pullArgs, "--authfile", authFile)
-			}
-			pullArgs = append(pullArgs, "falkordb/falkordb:latest")
-			pullCmd := exec.CommandContext(ctx, runtimePath, pullArgs...)
-			if dockerConfigDir != "" {
-				pullCmd.Env = append(os.Environ(), "DOCKER_CONFIG="+dockerConfigDir)
-			}
-			pullCmd.Stdout = os.Stdout
-			pullCmd.Stderr = os.Stderr
-			if err := pullCmd.Run(); err != nil {
-				return fmt.Errorf("pull image: %w", err)
-			}
-
-			// Stop and remove existing container if any
-			exec.CommandContext(ctx, runtimePath, "stop", "conduit-falkordb").Run()
-			exec.CommandContext(ctx, runtimePath, "rm", "conduit-falkordb").Run()
-
-			// Create and start container
-			fmt.Println("Starting FalkorDB container...")
-			runArgs := []string{"run"}
-			if authFile != "" {
-				runArgs = append(runArgs, "--authfile", authFile)
-			}
-			runArgs = append(runArgs, "-d",
-				"--name", "conduit-falkordb",
-				// Loopback only: FalkorDB has no auth (see KNOWN_ISSUES: SEC-001)
-				"-p", "127.0.0.1:6379:6379",
-				"-v", dataDir+":/data",
-				"--restart", "unless-stopped",
-				"falkordb/falkordb:latest",
-			)
-			runCmd := exec.CommandContext(ctx, runtimePath, runArgs...)
-			if dockerConfigDir != "" {
-				runCmd.Env = append(os.Environ(), "DOCKER_CONFIG="+dockerConfigDir)
-			}
-			if output, err := runCmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("start container: %w\n%s", err, string(output))
-			}
-
-			// Wait for healthy
-			fmt.Println("Waiting for FalkorDB to be ready...")
-			for i := 0; i < 30; i++ {
-				time.Sleep(time.Second)
-				checkCmd := exec.CommandContext(ctx, runtimePath, "exec", "conduit-falkordb", "redis-cli", "PING")
-				if output, err := checkCmd.Output(); err == nil && strings.TrimSpace(string(output)) == "PONG" {
-					fmt.Println()
-					fmt.Println("✓ FalkorDB installed and running")
-					fmt.Println()
-					fmt.Println("Next steps:")
-					fmt.Println("  conduit kb kag-sync    # Extract entities from documents")
-					return nil
-				}
-			}
-
-			return fmt.Errorf("FalkorDB did not become healthy in time")
-		},
-	}
-
-	cmd.Flags().StringVar(&preferRuntime, "runtime", "", "Preferred container runtime (podman or docker)")
-
-	return cmd
+  kb.kag.enabled: true     # in ~/.conduit/conduit.yaml, to turn it on
+  conduit kb kag-sync      # extract entities and edges from indexed documents
+  conduit kb kag-status     # entity and edge counts
+`)
+	return nil
 }
 
-func falkordbStartCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "start",
-		Short: "Start FalkorDB container",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-
-			runtimePath := findBinaryPath("podman")
-			if runtimePath == "" {
-				runtimePath = findBinaryPath("docker")
-			}
-			if runtimePath == "" {
-				return fmt.Errorf("no container runtime available")
-			}
-
-			startCmd := exec.CommandContext(ctx, runtimePath, "start", "conduit-falkordb")
-			if err := startCmd.Run(); err != nil {
-				return fmt.Errorf("start container: %w\n\nContainer may not exist. Run: conduit falkordb install", err)
-			}
-
-			fmt.Println("✓ FalkorDB started")
-			return nil
-		},
-	}
-}
-
-func falkordbStopCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "stop",
-		Short: "Stop FalkorDB container",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-
-			runtimePath := findBinaryPath("podman")
-			if runtimePath == "" {
-				runtimePath = findBinaryPath("docker")
-			}
-			if runtimePath == "" {
-				return fmt.Errorf("no container runtime available")
-			}
-
-			stopCmd := exec.CommandContext(ctx, runtimePath, "stop", "conduit-falkordb")
-			if err := stopCmd.Run(); err != nil {
-				return fmt.Errorf("stop container: %w", err)
-			}
-
-			fmt.Println("✓ FalkorDB stopped")
-			return nil
-		},
-	}
-}
-
-func falkordbStatusCmd() *cobra.Command {
-	var verbose bool
-
-	cmd := &cobra.Command{
-		Use:   "status",
-		Short: "Check FalkorDB status",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			ctx := cmd.Context()
-
-			runtimePath := findBinaryPath("podman")
-			if runtimePath == "" {
-				runtimePath = findBinaryPath("docker")
-			}
-			if runtimePath == "" {
-				fmt.Println("FalkorDB Status")
-				fmt.Println("═══════════════════════════════════════")
-				fmt.Println("Container:    ✗ no container runtime available")
-				return nil
-			}
-
-			// Check container status
-			inspectCmd := exec.CommandContext(ctx, runtimePath, "inspect", "--format", "{{.State.Status}}", "conduit-falkordb")
-			output, err := inspectCmd.Output()
-			if err != nil {
-				fmt.Println("FalkorDB Status")
-				fmt.Println("═══════════════════════════════════════")
-				fmt.Println("Container:    ✗ not installed")
-				fmt.Println()
-				fmt.Println("Install with: conduit falkordb install")
-				return nil
-			}
-
-			status := strings.TrimSpace(string(output))
-			fmt.Println("FalkorDB Status")
-			fmt.Println("═══════════════════════════════════════")
-
-			if status == "running" {
-				fmt.Println("Container:    ✓ running")
-
-				// Check if FalkorDB responds
-				pingCmd := exec.CommandContext(ctx, runtimePath, "exec", "conduit-falkordb", "redis-cli", "PING")
-				if pingOutput, err := pingCmd.Output(); err == nil && strings.TrimSpace(string(pingOutput)) == "PONG" {
-					fmt.Println("API:          ✓ responding")
-
-					// Get graph stats if verbose
-					if verbose {
-						// Get list of graphs
-						graphCmd := exec.CommandContext(ctx, runtimePath, "exec", "conduit-falkordb", "redis-cli", "GRAPH.LIST")
-						if graphOutput, err := graphCmd.Output(); err == nil {
-							graphs := strings.TrimSpace(string(graphOutput))
-							if graphs != "" {
-								fmt.Printf("Graphs:       %s\n", graphs)
-							}
-						}
-					}
-				} else {
-					fmt.Println("API:          ✗ not responding")
-				}
-			} else {
-				fmt.Printf("Container:    ○ %s\n", status)
-				fmt.Println()
-				fmt.Println("Start with: conduit falkordb start")
-			}
-
-			return nil
-		},
-	}
-
-	cmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show detailed information")
-
-	return cmd
-}
 
 // ============================================================================
 // KAG (Knowledge-Augmented Generation) Commands
@@ -5950,26 +5745,14 @@ Examples:
 			}
 			defer llmProvider.Close()
 
-			// Create graph store (optional - extraction can work without it)
-			var graphStore *kb.FalkorDBStore
-			graphStore, err = kb.NewFalkorDBStore(kb.FalkorDBStoreConfig{
-				Host:      kagCfg.Graph.FalkorDB.Host,
-				Port:      kagCfg.Graph.FalkorDB.Port,
-				GraphName: kagCfg.Graph.FalkorDB.GraphName,
-			})
-			if err != nil {
-				fmt.Printf("⚠ FalkorDB not available: %v\n", err)
-				fmt.Println("  Entities will be stored in SQLite only")
-				graphStore = nil
-			} else {
-				ctx := cmd.Context()
-				if err := graphStore.Connect(ctx); err != nil {
-					fmt.Printf("⚠ Cannot connect to FalkorDB: %v\n", err)
-					fmt.Println("  Entities will be stored in SQLite only")
-					graphStore = nil
-				} else {
-					defer graphStore.Close()
-				}
+			// Create the graph store. WP-2.3 replaced the FalkorDB container
+			// with edge tables in this same SQLite file, so there is nothing to
+			// connect to and nothing that can be unavailable. Running kag-sync is
+			// an explicit request to populate the graph, so the schema is created
+			// here if it does not exist yet.
+			graphStore := kb.NewGraphStore(db.DB(), true)
+			if err := graphStore.EnsureSchema(cmd.Context()); err != nil {
+				return fmt.Errorf("create graph tables: %w", err)
 			}
 
 			// Create entity extractor
@@ -6998,10 +6781,16 @@ Examples:
 
 			ctx := cmd.Context()
 
-			// Create KAGSearcher configuration
+			// Create KAGSearcher configuration. The graph store is enabled only
+			// when the config says so; when it is off, entity lookup still works
+			// and relations come from the legacy kb_relations table.
+			graphEnabled := false
+			if cfg, err := config.Load(); err == nil {
+				graphEnabled = cfg.KB.KAG.Enabled
+			}
 			kagCfg := kb.KAGSearcherConfig{
 				DB:         db.DB(),
-				GraphStore: nil,
+				GraphStore: kb.NewGraphStore(db.DB(), graphEnabled),
 			}
 
 			// Set up hybrid search if requested

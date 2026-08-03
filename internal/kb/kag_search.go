@@ -125,7 +125,7 @@ func calculateMatchScore(entity EntityResult, tokens []string) float64 {
 // KAGSearcher provides graph-based search over the knowledge graph.
 type KAGSearcher struct {
 	db               *sql.DB
-	graphStore       *FalkorDBStore
+	graphStore       *GraphStore
 	entityVectors    EntityVectorIndex
 	embeddingService Embedder
 	logger           zerolog.Logger
@@ -134,18 +134,26 @@ type KAGSearcher struct {
 // KAGSearcherConfig configures the KAG searcher.
 type KAGSearcherConfig struct {
 	DB               *sql.DB
-	GraphStore       *FalkorDBStore
+	GraphStore       *GraphStore       // Optional: enables multi-hop edge traversal
 	EntityVectors    EntityVectorIndex // Optional: enables semantic entity search
 	EmbeddingService Embedder          // Optional: enables semantic entity search
 }
 
 // NewKAGSearcher creates a new KAG searcher.
-func NewKAGSearcher(db *sql.DB, graphStore *FalkorDBStore) *KAGSearcher {
+//
+// A nil graphStore (or a disabled one) is fine: entity lookup still works, and
+// relation lookup falls back to the legacy single-hop kb_relations table.
+func NewKAGSearcher(db *sql.DB, graphStore *GraphStore) *KAGSearcher {
 	return &KAGSearcher{
 		db:         db,
 		graphStore: graphStore,
 		logger:     observability.Logger("kb.kag_search"),
 	}
+}
+
+// GraphEnabled reports whether multi-hop edge traversal is available.
+func (s *KAGSearcher) GraphEnabled() bool {
+	return s.graphStore.Enabled()
 }
 
 // NewKAGSearcherWithConfig creates a KAG searcher with full configuration.
@@ -414,11 +422,48 @@ func (s *KAGSearcher) searchEntitiesOriginal(ctx context.Context, req *KAGSearch
 }
 
 // getRelations retrieves relations for the given entities.
+//
+// When the knowledge graph is enabled this is a 1-2 hop traversal of the
+// kb_graph_edges table. When it is not, it falls back to the legacy single-hop
+// kb_relations query so that data extracted before WP-2.3 is still readable.
 func (s *KAGSearcher) getRelations(ctx context.Context, entities []EntityResult, maxHops int) ([]RelationResult, error) {
 	if len(entities) == 0 {
 		return nil, nil
 	}
 
+	if s.graphStore.Enabled() {
+		return s.traverseGraph(ctx, entities, maxHops)
+	}
+
+	return s.getRelationsLegacy(ctx, entities)
+}
+
+// traverseGraph walks kb_graph_edges outward from the matched entities.
+func (s *KAGSearcher) traverseGraph(ctx context.Context, entities []EntityResult, maxHops int) ([]RelationResult, error) {
+	seeds := make([]string, 0, len(entities))
+	for _, e := range entities {
+		seeds = append(seeds, e.ID)
+	}
+
+	edges, _, err := s.graphStore.Traverse(ctx, seeds, maxHops)
+	if err != nil {
+		return nil, err
+	}
+
+	results := make([]RelationResult, 0, len(edges))
+	for _, e := range edges {
+		results = append(results, RelationResult{
+			SubjectName: e.SubjectName,
+			Predicate:   e.Predicate,
+			ObjectName:  e.ObjectName,
+			Confidence:  e.Confidence,
+		})
+	}
+	return results, nil
+}
+
+// getRelationsLegacy is the pre-WP-2.3 single-hop kb_relations query.
+func (s *KAGSearcher) getRelationsLegacy(ctx context.Context, entities []EntityResult) ([]RelationResult, error) {
 	// Collect entity IDs
 	entityIDs := make([]interface{}, len(entities))
 	placeholders := make([]string, len(entities))
@@ -601,11 +646,16 @@ func (s *KAGSearcher) GetStats(ctx context.Context) (map[string]interface{}, err
 	}
 	stats["relation_types"] = relStats
 
-	// FalkorDB status
-	if s.graphStore != nil {
-		stats["graph_db_connected"] = s.graphStore.IsConnected()
-	} else {
-		stats["graph_db_connected"] = false
+	// Graph availability. The key name is unchanged so existing CLI/GUI readers
+	// keep working; it now means "SQLite edge traversal is enabled" rather than
+	// "a FalkorDB container answered a ping".
+	stats["graph_db_connected"] = s.graphStore.Enabled()
+	stats["graph_enabled"] = s.graphStore.Enabled()
+
+	if s.graphStore.Enabled() {
+		var edgeCount int
+		_ = s.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM kb_graph_edges").Scan(&edgeCount)
+		stats["total_edges"] = edgeCount
 	}
 
 	// Semantic search availability

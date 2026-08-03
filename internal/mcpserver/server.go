@@ -25,6 +25,7 @@ import (
 
 	"github.com/simpleflo/conduit/internal/kb"
 	"github.com/simpleflo/conduit/internal/observability"
+	"github.com/simpleflo/conduit/internal/querylog"
 )
 
 const (
@@ -50,15 +51,45 @@ type Server struct {
 	searcher    *kb.Searcher
 	hybrid      *kb.HybridSearcher
 	kagSearcher *kb.KAGSearcher
+	graph       *kb.GraphStore
 	indexer     *kb.Indexer
+	queryLog    *querylog.Writer
 	logger      zerolog.Logger
+
+	// graphMaxHops is the configured traversal budget for kag_query.
+	graphMaxHops int
 }
 
-// New creates a KB MCP server.
+// Options configures optional server behavior.
+//
+// The zero value is the default posture: knowledge graph off, no query log.
+// This keeps New(db, hybrid) meaningful for callers and tests that do not care.
+type Options struct {
+	// GraphEnabled turns on SQLite-backed knowledge graph traversal for
+	// kag_query. Mirrors kb.kag.enabled. Off by default.
+	GraphEnabled bool
+
+	// GraphMaxHops caps traversal depth (clamped to kb.MaxGraphHops).
+	GraphMaxHops int
+
+	// QueryLogDir is the directory for the local query-shape log. Empty
+	// disables logging.
+	QueryLogDir string
+
+	// QueryLogEnabled mirrors telemetry.local_query_log.
+	QueryLogEnabled bool
+}
+
+// New creates a KB MCP server with default options.
 //
 // If hybrid is nil, a HybridSearcher backed by FTS5 only is created, matching
 // the behavior of the previous kb.NewMCPServer.
 func New(db *sql.DB, hybrid *kb.HybridSearcher) *Server {
+	return NewWithOptions(db, hybrid, Options{})
+}
+
+// NewWithOptions creates a KB MCP server with explicit options.
+func NewWithOptions(db *sql.DB, hybrid *kb.HybridSearcher, opts Options) *Server {
 	searcher := kb.NewSearcher(db)
 
 	// If no hybrid searcher provided, create one with just FTS5.
@@ -66,16 +97,39 @@ func New(db *sql.DB, hybrid *kb.HybridSearcher) *Server {
 		hybrid = kb.NewHybridSearcher(searcher, nil)
 	}
 
+	// The graph store is inert unless explicitly enabled. WP-2.3 replaced the
+	// FalkorDB container with edge tables in this same SQLite file; when the
+	// feature is off, those tables are never created and kag_query degrades to
+	// hybrid retrieval rather than failing.
+	graph := kb.NewGraphStore(db, opts.GraphEnabled)
+
 	s := &Server{
 		db:     db,
 		source: kb.NewSourceManager(db),
 		// searcher backs kb_lexical_search: a direct, un-fused BM25 path.
 		searcher: searcher,
 		hybrid:   hybrid,
-		// KAG searcher (uses SQLite by default, can connect to FalkorDB later).
-		kagSearcher: kb.NewKAGSearcher(db, nil),
-		indexer:     kb.NewIndexer(db),
-		logger:      observability.Logger("kb.mcp"),
+		kagSearcher: kb.NewKAGSearcherWithConfig(kb.KAGSearcherConfig{
+			DB:         db,
+			GraphStore: graph,
+		}),
+		graph:    graph,
+		indexer:  kb.NewIndexer(db),
+		queryLog: querylog.New(opts.QueryLogDir, opts.QueryLogEnabled),
+		logger:   observability.Logger("kb.mcp"),
+	}
+
+	s.graphMaxHops = opts.GraphMaxHops
+	if s.graphMaxHops <= 0 || s.graphMaxHops > kb.MaxGraphHops {
+		s.graphMaxHops = kb.MaxGraphHops
+	}
+
+	// Creating the edge tables is what "enabling the graph" means. A server that
+	// never enables it leaves no trace in the database.
+	if graph.Enabled() {
+		if err := graph.EnsureSchema(context.Background()); err != nil {
+			s.logger.Warn().Err(err).Msg("knowledge graph schema unavailable; kag_query will degrade to retrieval")
+		}
 	}
 
 	s.mcp = mcp.NewServer(
@@ -126,6 +180,7 @@ func (s *Server) Connect(ctx context.Context, t mcp.Transport) (*mcp.ServerSessi
 // only.
 func (s *Server) Run(ctx context.Context) error {
 	s.logger.Info().Msg("KB MCP server starting")
+	defer func() { _ = s.queryLog.Close() }()
 
 	err := s.mcp.Run(ctx, &mcp.StdioTransport{})
 	if isCleanShutdown(ctx, err) {

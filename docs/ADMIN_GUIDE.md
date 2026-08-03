@@ -743,158 +743,120 @@ In case of database corruption:
 
 ---
 
-## FalkorDB Administration
+## Knowledge Graph Administration
 
-FalkorDB is an optional graph database used for advanced KAG (Knowledge-Augmented Generation) queries. It enables multi-hop graph traversal that SQLite alone cannot efficiently handle.
+The knowledge graph is stored in the same SQLite file as the rest of the
+knowledge base (`~/.conduit/conduit.db`). There is no graph database container,
+no network port, and no separate service to manage.
 
-### Installing FalkorDB
+> **Changed in v2 (WP-2.3).** Earlier versions ran FalkorDB, a Redis-based graph
+> database, in a container on `127.0.0.1:6379` with no authentication. It has
+> been removed. Its traversal code was never finished -- every graph query
+> returned an empty result -- so it cost a container and an unauthenticated
+> loopback port while contributing nothing to search quality. `conduit falkordb`
+> still exists as a hidden shim that explains this; it will be deleted outright.
+>
+> If a `conduit-falkordb` container is still running on this machine from an
+> older install, nothing uses it. Remove it with
+> `podman rm -f conduit-falkordb` (or `docker rm -f conduit-falkordb`).
 
-```bash
-# Install FalkorDB container (requires Docker/Podman)
-conduit falkordb install
+### Enabling the graph
 
-# This pulls falkordb/falkordb:latest and creates the container
-```
-
-### Managing FalkorDB
-
-```bash
-# Start FalkorDB
-conduit falkordb start
-
-# Stop FalkorDB
-conduit falkordb stop
-
-# Check status
-conduit falkordb status
-
-# View logs
-docker logs conduit-falkordb
-```
-
-### FalkorDB Status Output
-
-```
-FalkorDB Status
-───────────────
-Container: conduit-falkordb
-Status:    Running
-Port:      6379 (localhost only)
-Uptime:    2h 15m
-
-Graph Statistics:
-  Graph:     conduit_kg
-  Nodes:     3,456
-  Edges:     1,234
-  Memory:    45 MB
-```
-
-### Configuration
-
-Add to `~/.conduit/conduit.yaml`:
+The graph is **off by default**, and when it is off its tables are never even
+created. Enable it in `~/.conduit/conduit.yaml`:
 
 ```yaml
 kb:
   kag:
     enabled: true
     graph:
-      backend: falkordb  # or "sqlite" for basic mode
-      falkordb:
-        host: localhost
-        port: 6379
-        graph_name: conduit_kg
+      backend: sqlite   # the only supported value
+      max_hops: 2       # traversal depth, 1-2
 ```
 
-### Security Considerations
-
-| Aspect | Default | Recommendation |
-|--------|---------|----------------|
-| Network binding | localhost only | Keep as-is for single-machine |
-| Authentication | None | Add Redis AUTH for shared environments |
-| Persistence | RDB snapshots | Enable AOF for durability |
-
-### Enabling Redis AUTH (Optional)
-
-For shared environments, enable authentication:
+Then populate it:
 
 ```bash
-# Start with password
-docker run -d --name conduit-falkordb \
-  -p 127.0.0.1:6379:6379 \
-  -e REDIS_ARGS="--requirepass your-secure-password" \
-  falkordb/falkordb:latest
+conduit kb kag-sync        # extract entities and edges from indexed documents
+conduit kb kag-query "..."  # query the graph from the CLI
 ```
 
-Update configuration:
+### What extraction produces
+
+By default extraction uses the **pattern** provider: no LLM, no model download,
+no network call. It finds proper nouns, acronyms and identifier-shaped tokens,
+treats Markdown headings as sections, and emits two kinds of edge:
+
+| Predicate | Meaning |
+|-----------|---------|
+| `relates_to` | the two entities appear in the same sentence |
+| `contains` | the entity appears under this heading |
+
+This is a co-occurrence graph, not a semantic one. It will not tell you that A
+*implements* B, because co-occurrence cannot justify that claim. If you want
+semantically typed edges, opt in to an LLM provider (`kb.kag.provider: ollama`),
+which costs a ~4GB model load per extraction run.
+
+### Storage
+
+| Table | Contents |
+|-------|----------|
+| `kb_entities` | canonical entities, deduplicated by normalized name and type |
+| `kb_graph_edges` | typed edges with source chunk, source document, and confidence |
+
+Both are covered by the ordinary knowledge base backup
+(`conduit backup create`) because they live in the same SQLite file.
+
+### Checking status
+
+```bash
+conduit status          # entity, relation and edge counts
+conduit kb kag-status    # extraction progress
+```
+
+### When the graph is off
+
+`kag_query` (the MCP tool) does not fail when the graph is disabled. It returns
+a `graph: disabled` note plus hybrid search results for the same query, so an AI
+client still receives grounded, citable content and can tell that the answer did
+not come from a graph.
+
+---
+
+## Local Query Logging
+
+Conduit appends one line per knowledge base query to
+`~/.conduit/query-shape.jsonl`.
+
+**Nothing leaves the machine.** There is no endpoint, no upload, no identifier,
+and Conduit never reads the file back. It records query *shape* only:
+
+```json
+{"ts":"2026-08-03T09:14:22Z","tool":"kag_query","token_count":6,"has_entity_pattern":true,"hop_depth":2,"graph_enabled":false}
+```
+
+The query text, the entity names and the results are structurally absent -- the
+record type has no field that could hold them.
+
+It exists to answer one question with evidence: **does anyone actually ask
+multi-hop questions?** The knowledge graph is expensive to build well, and
+whether it is worth building well depends on whether `hop_depth` is ever above
+1 in real use. That cannot be measured retroactively, which is why it defaults
+to on.
+
+To turn it off (no file is created):
 
 ```yaml
-kb:
-  kag:
-    graph:
-      falkordb:
-        password: your-secure-password
+telemetry:
+  local_query_log: false
 ```
 
-### Backup and Restore
+To read your own usage:
 
 ```bash
-# Backup (RDB snapshot)
-docker exec conduit-falkordb redis-cli BGSAVE
-docker cp conduit-falkordb:/data/dump.rdb ./falkordb-backup.rdb
-
-# Restore
-docker stop conduit-falkordb
-docker cp ./falkordb-backup.rdb conduit-falkordb:/data/dump.rdb
-docker start conduit-falkordb
-```
-
-### Monitoring
-
-```bash
-# Memory usage
-docker exec conduit-falkordb redis-cli INFO memory
-
-# Graph statistics
-docker exec conduit-falkordb redis-cli GRAPH.QUERY conduit_kg "MATCH (n) RETURN count(n)"
-
-# Slow queries
-docker exec conduit-falkordb redis-cli GRAPH.SLOWLOG conduit_kg
-```
-
-### Troubleshooting FalkorDB
-
-#### Container Won't Start
-
-```bash
-# Check for port conflicts
-lsof -i :6379
-
-# Check container logs
-docker logs conduit-falkordb
-
-# Recreate container
-docker rm conduit-falkordb
-conduit falkordb install
-```
-
-#### High Memory Usage
-
-```bash
-# Check memory
-docker exec conduit-falkordb redis-cli INFO memory
-
-# Set memory limit
-docker update --memory 1g conduit-falkordb
-```
-
-#### Graph Corruption
-
-```bash
-# Drop and recreate graph
-docker exec conduit-falkordb redis-cli GRAPH.DELETE conduit_kg
-
-# Re-sync entities from SQLite
-conduit kb kag-sync --force
+# how often is more than one hop requested?
+jq -s 'group_by(.hop_depth) | map({hops: .[0].hop_depth, calls: length})' \
+  ~/.conduit/query-shape.jsonl
 ```
 
 ---
@@ -1006,16 +968,16 @@ conduit kb kag-sync
 ### Clearing KAG Data
 
 ```bash
-# Clear all KAG data (entities, relations, status)
+# Clear all KAG data (entities, edges, relations, status)
 sqlite3 ~/.conduit/conduit.db << 'EOF'
+DELETE FROM kb_graph_edges;
 DELETE FROM kb_entities;
 DELETE FROM kb_relations;
 DELETE FROM kb_extraction_status;
 EOF
-
-# Also clear FalkorDB if used
-docker exec conduit-falkordb redis-cli GRAPH.DELETE conduit_kg
 ```
+
+There is no second copy of the graph to clear: it lives entirely in this file.
 
 ---
 

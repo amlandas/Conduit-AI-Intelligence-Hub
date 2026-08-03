@@ -2,8 +2,6 @@
 // kag_config.go defines configuration for the KAG pipeline.
 package kb
 
-import "time"
-
 // KAGConfig holds Knowledge-Augmented Generation configuration.
 // Security: All values have safe defaults. KAG is opt-in (Enabled: false by default).
 type KAGConfig struct {
@@ -16,8 +14,12 @@ type KAGConfig struct {
 	// Default: false (opt-in for RAM management)
 	PreloadModel bool `mapstructure:"preload_model"`
 
-	// Provider specifies the LLM provider for entity extraction
-	// Options: "ollama" (default), "openai", "anthropic"
+	// Provider specifies the extraction backend.
+	// Options: "pattern" (default, no LLM, no network), "ollama", "openai", "anthropic".
+	//
+	// The default is deliberately the cheap pattern extractor: enabling the
+	// knowledge graph must not silently enable a 4GB model load or an outbound
+	// API call. LLM extraction is a second, explicit opt-in on top of KAG.
 	Provider string `mapstructure:"provider"`
 
 	// Graph holds graph database configuration
@@ -36,54 +38,21 @@ type KAGConfig struct {
 	Anthropic AnthropicConfig `mapstructure:"anthropic"`
 }
 
-// GraphConfig holds graph database configuration.
+// GraphConfig holds graph storage configuration.
+//
+// WP-2.3 deleted the FalkorDB backend along with its container, its loopback
+// port and the go-redis dependency. The knowledge graph now lives in the same
+// SQLite file as the rest of the knowledge base, so there is nothing to connect
+// to and nothing to authenticate against.
 type GraphConfig struct {
-	// Backend specifies the graph database to use
-	// Options: "falkordb" (default), "sqlite" (embedded fallback)
+	// Backend specifies the graph storage engine.
+	// The only supported value is "sqlite"; the field is retained so an existing
+	// config file that names a backend still parses.
 	Backend string `mapstructure:"backend"`
 
-	// FalkorDB holds FalkorDB-specific settings
-	FalkorDB FalkorDBConfig `mapstructure:"falkordb"`
-}
-
-// FalkorDBConfig holds FalkorDB (Redis-based graph DB) configuration.
-// Security: Binds to localhost by default for security.
-type FalkorDBConfig struct {
-	// Host is the FalkorDB/Redis host
-	// Default: "localhost" (no remote access by default)
-	Host string `mapstructure:"host"`
-
-	// Port is the FalkorDB/Redis port
-	// Default: 6379
-	Port int `mapstructure:"port"`
-
-	// GraphName is the name of the graph in FalkorDB
-	// Default: "conduit_kg"
-	GraphName string `mapstructure:"graph_name"`
-
-	// Password for Redis authentication (optional)
-	// Security: Should be set via environment variable CONDUIT_KB_KAG_GRAPH_FALKORDB_PASSWORD
-	Password string `mapstructure:"password"`
-
-	// Database is the Redis database number
-	// Default: 0
-	Database int `mapstructure:"database"`
-
-	// PoolSize is the connection pool size
-	// Default: 10
-	PoolSize int `mapstructure:"pool_size"`
-
-	// ConnectTimeout is the connection timeout
-	// Default: 5s
-	ConnectTimeout time.Duration `mapstructure:"connect_timeout"`
-
-	// ReadTimeout is the read operation timeout
-	// Default: 30s
-	ReadTimeout time.Duration `mapstructure:"read_timeout"`
-
-	// WriteTimeout is the write operation timeout
-	// Default: 30s
-	WriteTimeout time.Duration `mapstructure:"write_timeout"`
+	// MaxHops caps traversal depth for a graph query.
+	// Range: 1-2 (see MaxGraphHops), Default: 2
+	MaxHops int `mapstructure:"max_hops"`
 }
 
 // ExtractionConfig holds entity extraction settings.
@@ -163,23 +132,13 @@ type AnthropicConfig struct {
 // DefaultKAGConfig returns secure default configuration for KAG.
 func DefaultKAGConfig() KAGConfig {
 	return KAGConfig{
-		Enabled:      false, // Opt-in for security
-		PreloadModel: false, // Opt-in for RAM management
-		Provider:     "ollama",
+		Enabled:      false,     // Opt-in: no graph tables exist until this is true
+		PreloadModel: false,     // Opt-in for RAM management
+		Provider:     "pattern", // No LLM, no network, in the default enabled path
 
 		Graph: GraphConfig{
-			Backend: "falkordb",
-			FalkorDB: FalkorDBConfig{
-				Host:           "localhost", // No remote by default
-				Port:           6379,
-				GraphName:      "conduit_kg",
-				Password:       "",
-				Database:       0,
-				PoolSize:       10,
-				ConnectTimeout: 5 * time.Second,
-				ReadTimeout:    30 * time.Second,
-				WriteTimeout:   30 * time.Second,
-			},
+			Backend: "sqlite",
+			MaxHops: MaxGraphHops,
 		},
 
 		Extraction: ExtractionConfig{
@@ -219,6 +178,7 @@ func (c *KAGConfig) Validate() error {
 
 	// Validate provider
 	validProviders := map[string]bool{
+		"pattern":   true,
 		"ollama":    true,
 		"openai":    true,
 		"anthropic": true,
@@ -227,12 +187,9 @@ func (c *KAGConfig) Validate() error {
 		return ErrInvalidLLMProvider
 	}
 
-	// Validate graph backend
-	validBackends := map[string]bool{
-		"falkordb": true,
-		"sqlite":   true,
-	}
-	if !validBackends[c.Graph.Backend] {
+	// Validate graph backend. SQLite is the only engine; an empty value is
+	// treated as "sqlite" so a config written before WP-2.3 still loads.
+	if c.Graph.Backend != "" && c.Graph.Backend != "sqlite" {
 		return ErrInvalidGraphBackend
 	}
 
@@ -249,9 +206,29 @@ func (c *KAGConfig) IsEnabled() bool {
 	return c.Enabled && c.Validate() == nil
 }
 
+// UsesLLM reports whether the configured extraction provider makes model calls.
+// The default provider ("pattern") does not.
+func (c *KAGConfig) UsesLLM() bool {
+	return c.Provider != "" && c.Provider != "pattern"
+}
+
+// GraphMaxHops returns the configured traversal depth, clamped to MaxGraphHops.
+func (c *KAGConfig) GraphMaxHops() int {
+	hops := c.Graph.MaxHops
+	if hops <= 0 {
+		return MaxGraphHops
+	}
+	if hops > MaxGraphHops {
+		return MaxGraphHops
+	}
+	return hops
+}
+
 // GetProviderModel returns the model string for the configured provider.
 func (c *KAGConfig) GetProviderModel() string {
 	switch c.Provider {
+	case "pattern":
+		return "pattern"
 	case "ollama":
 		return c.Ollama.Model
 	case "openai":
@@ -266,6 +243,8 @@ func (c *KAGConfig) GetProviderModel() string {
 // GetProviderEndpoint returns the endpoint for the configured provider.
 func (c *KAGConfig) GetProviderEndpoint() string {
 	switch c.Provider {
+	case "pattern":
+		return "" // local, in-process
 	case "ollama":
 		return c.Ollama.Host
 	case "openai":
