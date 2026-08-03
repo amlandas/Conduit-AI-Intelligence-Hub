@@ -1,7 +1,7 @@
 # Conduit Real-World Use Cases
 
-**Version**: 0.1.0
-**Last Updated**: December 2025
+**Version**: 2.0.0-beta
+**Last Updated**: August 2026
 
 ---
 
@@ -11,16 +11,25 @@ This document provides practical, real-world examples of how to use Conduit to e
 
 ## Prerequisites
 
-Before following these use cases, ensure Conduit is installed and running:
+Conduit installed, with at least one AI client configured. See
+[QUICK_START.md](QUICK_START.md) or [INSTALL_V2.md](INSTALL_V2.md).
 
 ```bash
-# Install Conduit (if not already installed)
-curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/main/scripts/install.sh | bash
+# Install (from a checkout)
+./scripts/install.sh --from-source
 
-# Verify installation
+# Verify
 conduit status
 conduit doctor
 ```
+
+There is no service to start: Conduit is one binary that runs when called and
+exits.
+
+> **Before you index anything**, know that Conduit hands raw chunks of your
+> indexed documents straight to the AI client. Index content you trust, and
+> keep untrusted corpora in a separate knowledge base with `--db`. See SEC-003
+> in [KNOWN_ISSUES.md](KNOWN_ISSUES.md).
 
 ---
 
@@ -540,20 +549,29 @@ conduit kb remove <old-source-id>
 ### "Search returns too many irrelevant results"
 
 - Use more specific queries
-- Reduce chunk overlap in config
+- Try `--recall precise` for aggressive deduplication
+- Reduce `kb.chunk_overlap` in config (requires a re-index to take effect)
 - Remove irrelevant sources
 
 ### "Can't find content I know exists"
 
+- Try `--recall high` first — diversity filtering may be hiding near-duplicates
+- For an exact identifier or error string, use `--fts5`
 - Re-sync the source: `conduit kb sync <source-id>`
-- Check file encoding (must be UTF-8)
-- Verify file type is supported
+- Check the sync exit code: 2 means semantic indexing failed and only keyword
+  search is available
+- Check file encoding (must be UTF-8) and that the file type is supported
 
 ### "Search is slow"
 
-- Reduce max_results in config
-- Check database size with `conduit kb stats`
-- Consider removing large, infrequently-used sources
+- Filter by source. Vector search is an exact scan, and filters are applied
+  before the distance computation, so a selective filter cuts the cost
+  proportionally.
+- Split unrelated corpora into separate knowledge bases with `--db`
+- Lower `kb.rag.default_limit`
+- Check size with `conduit kb stats`; remove large, infrequently-used sources
+- A slow *first* semantic query is the embedding model loading, not the search.
+  Raise `embed.llama_server.idle_timeout` to keep it warm.
 
 ---
 
