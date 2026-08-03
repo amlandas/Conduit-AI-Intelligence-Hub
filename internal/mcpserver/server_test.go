@@ -315,7 +315,7 @@ func TestToolDescriptionsCarriedOverVerbatim(t *testing.T) {
 		ToolListSources: "List all knowledge base sources with their IDs, paths, document counts, and sync status. Use this to discover available sources before searching or filtering.",
 		ToolGetDocument: "Retrieve the full content of a specific document. Supply exactly one of document_id or path. " +
 			"Flow: run kb_search (or kb_lexical_search / kb_search_with_context), copy the 'document_id:' value printed under the hit you want, then pass it here.",
-		ToolStats: "Get knowledge base statistics including source counts, document counts, chunk counts, and search capability status.",
+		ToolStats:             "Get knowledge base statistics including source counts, document counts, chunk counts, and search capability status.",
 		ToolSearchWithContext: "Search with processed, prompt-ready results. Returns merged chunks from same documents, filters boilerplate, and provides citation-ready source information. Best for RAG use cases.",
 		ToolKAGQuery:          "Query the knowledge graph for entities and their relationships. Use for multi-hop reasoning, aggregation queries, or finding connections between concepts. Complements RAG search with structured entity lookups.",
 	}
@@ -656,7 +656,7 @@ func TestToolSchemasAreFrozen(t *testing.T) {
 		ToolSearch:            {"query", "limit", "source_id", "mode", "recall_mode"},
 		ToolLexicalSearch:     {"query", "limit", "source_id"},
 		ToolSearchWithContext: {"query", "source_id", "limit", "mode", "recall_mode"},
-		ToolListSources: {},
+		ToolListSources:       {},
 		// #91: `path` is a deliberate addition -- kb_get_document accepts either
 		// key, exactly one of them, and the one-of constraint is enforced by the
 		// handler rather than by the schema. `document_id` is consequently no
@@ -664,7 +664,7 @@ func TestToolSchemasAreFrozen(t *testing.T) {
 		// the constraint that replaced it.
 		ToolGetDocument: {"document_id", "path"},
 		ToolStats:       {"source_id"},
-		ToolKAGQuery:          {"query", "entities", "include_relations", "max_hops", "limit", "source_id"},
+		ToolKAGQuery:    {"query", "entities", "include_relations", "max_hops", "limit", "source_id"},
 	}
 
 	for _, tool := range res.Tools {
