@@ -84,6 +84,27 @@ func configureMCPClient(clientID string, forceOverwrite bool) error {
 		return nil
 	}
 
+	// A repair is reported as a repair. The entry existed and pointed
+	// somewhere else, and silently rewriting a file the user did not ask to
+	// have changed is worse than saying so -- particularly when the old value
+	// is the bare "conduit" that every pre-fix install has.
+	if res.Repaired {
+		fmt.Println("✓ MCP KB server entry repaired")
+		fmt.Printf("  Client: %s\n", res.ClientID)
+		fmt.Printf("  Config: %s\n", res.ConfigPath)
+		fmt.Printf("  Was:    %s\n", res.PreviousCommand)
+		fmt.Printf("  Now:    %s\n", setuppkg.ConduitCommand())
+		if res.PreviousCommand == "conduit" {
+			fmt.Println()
+			fmt.Println("  The old entry named the bare command, which an AI client started")
+			fmt.Println("  from the Dock or Spotlight cannot find: it does not read your shell")
+			fmt.Println("  profile. An absolute path needs no PATH lookup.")
+		}
+		fmt.Println()
+		fmt.Printf("Restart %s for the configuration to take effect.\n", res.ClientID)
+		return nil
+	}
+
 	fmt.Println("✓ MCP KB server configured")
 	fmt.Printf("  Client: %s\n", res.ClientID)
 	fmt.Printf("  Config: %s\n", res.ConfigPath)
