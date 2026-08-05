@@ -1305,9 +1305,13 @@ func (hs *HybridSearcher) SearchWithFallback(ctx context.Context, query string, 
 // The expression is now built explicitly and passed through SearchExpr, which
 // does not sanitize. Nothing here comes from raw user text without being
 // quoted first, so the operators are ours and the terms are theirs.
+// Issue #96: query scaffolding is dropped here too. OR-ing "how" against a
+// corpus matches every document containing the word "how", which on this rung
+// is not merely useless but actively harmful: it dilutes the ranking with
+// documents that share nothing but grammar.
 func (hs *HybridSearcher) searchRelaxed(ctx context.Context, query string, opts HybridSearchOptions) *HybridSearchResult {
 	var relaxedTerms []string
-	for _, tk := range splitFTSQuery(query) {
+	for _, tk := range contentFTSTokens(splitFTSQuery(query)) {
 		if utf8.RuneCountInString(tk.text) < 2 {
 			continue
 		}
@@ -1363,7 +1367,9 @@ func (hs *HybridSearcher) searchPartial(ctx context.Context, query string, opts 
 	seen := make(map[string]bool)
 	var allHits []SearchHit
 
-	for _, tk := range splitFTSQuery(query) {
+	// Issue #96: scaffolding words are skipped here for the same reason as on
+	// the relaxed rung -- a single-word search for "how" returns noise.
+	for _, tk := range contentFTSTokens(splitFTSQuery(query)) {
 		clean := tk.text
 		if utf8.RuneCountInString(clean) < 3 {
 			continue // Skip short words

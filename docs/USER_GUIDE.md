@@ -198,6 +198,32 @@ Hybrid mode adapts to what you typed. Quoted phrases push toward exact lexical
 matching; proper nouns boost exact matches; natural-language questions balance
 the two.
 
+### Asking questions
+
+Keyword search requires every word you type to be present in the same chunk, so
+the grammar of a question would otherwise work against you: `how do tokens
+expire` would demand the words "how" and "do" as well as "tokens" and "expire".
+
+Conduit drops that scaffolding from the keyword half of the search — question
+words, `is`/`are`/`do`/`does`, `a`/`the`, and common prepositions and pronouns —
+so these two searches return the same thing:
+
+```bash
+conduit kb search "how do tokens expire"
+conduit kb search "tokens expire"
+```
+
+Three things are worth knowing:
+
+- **Only the keyword half.** Semantic search sees the sentence exactly as you
+  typed it, because there the phrasing genuinely carries meaning.
+- **Quoting overrides it.** If you actually want the word "how", quote it:
+  `conduit kb search '"how" to guide'`.
+- **Nothing else is dropped.** `and`, `or` and `not` are searched for as words,
+  and so are `may`, `must`, `should` and `shall` — they matter too much in
+  specifications to treat as noise. A search made of nothing but question words
+  (`conduit kb search "the"`) searches for those words.
+
 ### Modes
 
 ```bash

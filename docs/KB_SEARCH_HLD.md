@@ -125,16 +125,81 @@ ORDER BY score
 LIMIT ?
 ```
 
+#### Query semantics
+
+The MATCH expression is built by `prepareFTSQuery` in four steps. This is the
+contract; it is pinned by `internal/kb/fts_query_test.go` and
+`internal/kb/issue96_query_shape_test.go`.
+
+1. **Split.** Text inside a *balanced* pair of double quotes becomes one phrase
+   token. Everything else splits on whitespace. An unbalanced quote is an
+   ordinary character, not a delimiter (#70).
+
+2. **Drop query scaffolding** (#96). Interrogatives (`how`, `what`, `why`,
+   `when`, `where`, `which`, `who`), the be/do/have auxiliaries, articles and
+   determiners, high-frequency prepositions, and personal pronouns are removed.
+   The list is in `queryScaffoldWords`.
+
+   Two guards make this safe:
+   - A token the user quoted is never dropped. `"how" to guide` still requires
+     the word "how".
+   - If filtering would leave nothing, the tokens are returned unchanged. A
+     search for `the` is a search for `the`, not a match-all.
+
+   `and`, `or`, `not` and `near` are deliberately *not* scaffolding: #75 pins
+   them as literal search terms. Nor are the RFC-2119 modals `may`, `must`,
+   `should`, `shall`, which are load-bearing vocabulary in specification
+   documents.
+
+3. **Quote every token** as an FTS5 string literal (#75). Quoting is
+   unconditional, which is what makes the result total: no input produces a
+   syntax error and no search term is reinterpreted as an operator.
+
+4. **Wildcard the last token** with a trailing `*`, unless the user quoted it or
+   it is shorter than two characters.
+
+Tokens are joined with a space, which FTS5 reads as an **implicit AND**: every
+remaining token must be present in the chunk.
+
+| Query | MATCH expression |
+|---|---|
+| `tokens expire` | `"tokens" "expire"*` |
+| `how do tokens expire` | `"tokens" "expire"*` |
+| `"big science" lant` | `"big science" "lant"*` |
+| `people NOT nation` | `"people" "NOT" "nation"*` |
+| `the` | `"the"*` |
+
+**Why scaffolding is dropped.** `kb_fts` is created with
+`tokenize='porter unicode61'`, which has no stopword list, so function words are
+indexed and matched like any other word. Under implicit AND every token is a
+hard conjunct, which made `how do tokens expire` return nothing while
+`tokens expire` returned the document — same index, same subject (#96).
+
+Removing a conjunct is **monotonically recall-widening**: the filtered query
+always returns a superset of what the unfiltered conjunction returned, so no
+query that worked before can start failing. The cost is precision on the dropped
+word, which is why the list contains only closed-class function words and no
+nouns, verbs or adjectives.
+
+**Scaffolding is dropped in the lexical leg only.** The semantic leg embeds the
+raw query text, where "how do" is real signal about the shape of the answer
+wanted, and must keep seeing the sentence the user typed. The same filter is
+applied to the relaxed and partial fallback rungs (§9), where OR-ing `how`
+against the corpus would dilute the ranking with documents that share nothing
+but grammar.
+
 **Strengths**:
 - Fast: ~5-20ms for typical queries
 - Exact phrase matching ("Oak Ridge")
-- Boolean operators (AND, OR, NOT)
 - No external dependencies
+- Total: no user input can produce an FTS5 syntax error
 
 **Weaknesses**:
 - No semantic understanding
 - "car" won't match "automobile"
-- Requires exact keyword presence
+- Requires exact keyword presence for every content word
+- FTS5 boolean operators are not exposed; a user who types `AND` / `OR` / `NOT`
+  gets those words searched for (#75)
 
 ### 3.2 Semantic Search
 
