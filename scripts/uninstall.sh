@@ -91,9 +91,9 @@ SYMLINK_PATHS=(
 # typed on the command line for one run. They are not reasonable consequences of
 # an environment variable the user exported months ago and has forgotten about,
 # which would silently narrow every uninstall they ever ran.
-if [[ -n "${CONDUIT_PREFIX:-}" ]]; then
-    BINARY_PATHS=("${CONDUIT_PREFIX}/${BINARY}" "${BINARY_PATHS[@]}")
-fi
+#
+# It is applied below, after the output functions exist, because a bad value has
+# to be reported.
 
 # ---------------------------------------------------------------------------
 # Output
@@ -112,6 +112,28 @@ plan() { printf '%s\n' "  ${C_YELLOW}would remove${C_RESET}  $*"; }
 warn() { printf '%s\n' "  ${C_YELLOW}!${C_RESET} $*" >&2; }
 bad()  { printf '%s\n' "  ${C_RED}failed${C_RESET}  $*" >&2; }
 die()  { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; exit 1; }
+
+# CONDUIT_PREFIX, applied now that warn() exists.
+#
+# It is required to be absolute, and ignored with a warning if it is not.
+# `CONDUIT_PREFIX=. ./uninstall.sh` would otherwise resolve against whatever
+# directory the script was run from and delete ./conduit -- a file this script
+# has no reason to believe is Conduit's.
+#
+# Warning rather than dying is deliberate, and is the difference from
+# install.sh's treatment of the same variable. install.sh is about to WRITE a
+# PATH entry naming it, so a bad value has to stop the run. Here it only widens
+# a search, and a stale variable in someone's shell profile must not block an
+# uninstall of the perfectly ordinary installs in the default locations.
+if [[ -n "${CONDUIT_PREFIX:-}" ]]; then
+    if [[ "$CONDUIT_PREFIX" == /* ]]; then
+        BINARY_PATHS=("${CONDUIT_PREFIX}/${BINARY}" "${BINARY_PATHS[@]}")
+    else
+        warn "ignoring CONDUIT_PREFIX='${CONDUIT_PREFIX}': it is not an absolute path."
+        warn "  A relative prefix resolves against the current directory, which is not"
+        warn "  something to guess at before a delete. Use --prefix to name one exactly."
+    fi
+fi
 
 usage() {
     cat <<'EOF'

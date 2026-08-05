@@ -124,7 +124,9 @@ OPTIONS
                         needs cgo.
     --version TAG       Release tag to install, e.g. v2.0.0-beta.1. The default
                         is the newest v2 release. Ignored with --from-source.
-    --prefix DIR        Where to install the binary. Must be an ABSOLUTE path.
+    --prefix DIR        Where to install the binary. Must be an ABSOLUTE path
+                        with no ASCII shell metacharacters; accented and
+                        non-Latin characters are fine, as are spaces.
                         Default: ~/.local/bin, or $CONDUIT_PREFIX.
     --model             Download and verify the embedding model after install.
                         A few hundred MB. Off by default.
@@ -177,9 +179,11 @@ PIPED INVOCATION
     none. Clone first for that.
 
 ENVIRONMENT
-    CONDUIT_PREFIX          Default for --prefix. Held to the same rules: it
-                            must be absolute and free of shell metacharacters.
-                            uninstall.sh also looks there.
+    CONDUIT_PREFIX          Default for --prefix. This script holds it to the
+                            same rules as the flag: absolute, and free of ASCII
+                            shell metacharacters. uninstall.sh also searches
+                            there; it requires only that the path be absolute,
+                            and ignores it with a warning otherwise.
     CONDUIT_RELEASE_BASE_URL   Download release artifacts from here instead of
                             GitHub. Announced when used. Checksum verification
                             still applies.
@@ -240,16 +244,18 @@ assert_prefix_safe() {
     local prefix="$1" source_label="$2"
 
     [[ -n "${prefix//[[:space:]]/}" ]] || \
-        die "${source_label} requires a directory (got an empty value)"
+        die "the install prefix is empty (it came from ${source_label})$(prefix_remedy)"
 
     [[ "$prefix" == /* ]] || die \
-        "${source_label} must be an absolute path (got: '${prefix}').
+        "the install prefix must be an absolute path.
+
+It came from ${source_label}, and its value was:
+
+    ${prefix}
 
 A relative path resolves against whichever directory this script was run from,
 and the PATH entry written to your shell profile would name a different
-directory in every shell that read it. Use an absolute path:
-
-    ${source_label} \"\$PWD/${prefix#./}\""
+directory in every shell that read it.$(prefix_remedy)"
 
     # A newline cannot be seen by the character check below -- tr deletes it and
     # the leftover is an empty line -- so it is tested for on its own. A prefix
@@ -257,23 +263,67 @@ directory in every shell that read it. Use an absolute path:
     # which the uninstaller's two-line block removal knows about.
     case "$prefix" in
         *"
-"*) die "${source_label} must not contain a newline" ;;
+"*) die "the install prefix must not contain a newline (it came from ${source_label})$(prefix_remedy)" ;;
     esac
 
-    # A whitelist, not a blacklist. Listing the dangerous characters means
-    # every character nobody thought of is permitted, and this value reaches a
-    # file the shell evaluates.
+    # An ASCII whitelist, not a blacklist. Listing the dangerous characters
+    # means every character nobody thought of is permitted, and this value
+    # reaches a file the shell evaluates.
+    #
+    # Non-ASCII bytes are EXEMPT, in two stages: first the allowed ASCII set is
+    # deleted, then every byte >= 0x80. Whatever survives is an ASCII character
+    # outside the allowed set -- which is exactly the question being asked.
+    #
+    # The exemption is not a loosening. The first version of this check deleted
+    # only the ASCII set, so a single accented character survived as "leftover"
+    # and the prefix was refused. /Users/José and /home/müller are ordinary home
+    # directories, so that made the DEFAULT install -- no flags at all --
+    # impossible for anyone whose name does not fit in ASCII, with an error
+    # blaming a --prefix they had never passed.
+    #
+    # No shell metacharacter is >= 0x80: UTF-8 encodes every non-ASCII codepoint
+    # entirely in high bytes, so a multi-byte character cannot smuggle in a `$`
+    # or a backtick. And add_to_path single-quotes the value, which is byte
+    # transparent. Verified: a PATH block naming '/tmp/José bin' sources cleanly
+    # and puts exactly that directory on PATH.
     local leftover
-    leftover="$(LC_ALL=C printf '%s' "$prefix" | LC_ALL=C tr -d 'A-Za-z0-9 ._/+@,=-')"
+    leftover="$(LC_ALL=C printf '%s' "$prefix" \
+                | LC_ALL=C tr -d 'A-Za-z0-9 ._/+@,=-' \
+                | LC_ALL=C tr -d '\200-\377')"
     if [[ -n "$leftover" ]]; then
-        die "${source_label} contains characters that are not allowed in an install prefix: ${leftover}
+        die "the install prefix contains characters that are not allowed: ${leftover}
+
+It came from ${source_label}, and its value was:
+
+    ${prefix}
 
 The prefix is written into your shell startup file. Characters the shell treats
 specially -- \$ \` \" ' \\ ; & | < > ( ) and the like -- would be interpreted
 there rather than read as part of a directory name.
 
-Allowed: letters, digits, space, and . _ / + @ , = -"
+Allowed: letters, digits, space, accented and non-Latin characters, and
+. _ / + @ , = -
+$(prefix_remedy)"
     fi
+}
+
+# prefix_remedy suggests the fix that fits wherever the prefix came from.
+#
+# "Use an absolute path" is useless advice to somebody who passed no flag at
+# all: the value came from $HOME, which they cannot usefully retype. For them
+# the answer is to name a prefix explicitly.
+prefix_remedy() {
+    case "$PREFIX_SOURCE" in
+        "--prefix")
+            printf '\n%s' "Pass a different --prefix." ;;
+        "CONDUIT_PREFIX")
+            printf '\n%s' "Unset CONDUIT_PREFIX, or set it to a different directory." ;;
+        *)
+            printf '\n%s' "This is the default prefix, \$HOME/.local/bin, so the value came from your
+home directory rather than from anything you typed. Install somewhere else:
+
+    ./install.sh --prefix /usr/local/bin" ;;
+    esac
 }
 
 # assert_tag_shape refuses a --version value that is not a v2 release tag.
@@ -330,9 +380,14 @@ Supported clients: ${SUPPORTED_CLIENTS// /, }"
 # Arguments
 # ---------------------------------------------------------------------------
 
-# Which of --prefix and CONDUIT_PREFIX supplied the value, so the refusal names
-# the thing the user actually set.
-PREFIX_SOURCE="--prefix"
+# Where the prefix came from, so a refusal names the thing the user actually
+# set -- and does not name one they did not.
+#
+# There are THREE sources, not two. This defaulted to "--prefix", so a refusal
+# triggered by the untouched default (${HOME}/.local/bin, derived entirely from
+# $HOME) told the user their `--prefix` was wrong when they had passed no flag
+# at all. Nothing in that message pointed at the actual cause.
+PREFIX_SOURCE="your home directory (the default prefix is \$HOME/.local/bin)"
 [[ -n "${CONDUIT_PREFIX:-}" ]] && PREFIX_SOURCE="CONDUIT_PREFIX"
 
 while [[ $# -gt 0 ]]; do
@@ -632,7 +687,21 @@ fetch_status() {
     esac
 
     if have curl; then
-        curl "${curl_opts[@]}" "$url" 2>/dev/null || printf '000'
+        # `|| true`, NOT `|| printf '000'`.
+        #
+        # --write-out fires whether or not the transfer succeeded, and curl
+        # already prints 000 itself when no HTTP exchange happened. It then
+        # exits non-zero (7 for a refused connection, 6 for DNS), so the old
+        # `|| printf '000'` appended a SECOND 000 and this function returned
+        # "000000". That matched neither the 000 case nor 2xx nor 403, fell
+        # through to the catch-all, and reported a DNS or connection failure as
+        # "a failure at api.github.com, not on this machine" -- exactly
+        # backwards, and it made the no-network branch unreachable.
+        #
+        # The `||` is still needed: without it `set -e` aborts the subshell on
+        # curl's non-zero exit before this function can return. It just must
+        # not write anything.
+        curl "${curl_opts[@]}" "$url" 2>/dev/null || true
         return 0
     fi
 
@@ -982,14 +1051,23 @@ install_binary() {
     if ! mv -f -- "$STAGED" "$dest"; then
         die "could not install to ${dest}"
     fi
-    STAGED=""   # the rename consumed it; there is nothing left to clean up
 
     # The rename reporting success is not the same as an executable being there.
     # Verified rather than assumed, because "OK installed" over a destination
     # that holds no runnable binary is the single most misleading thing this
     # script could print.
+    #
+    # These two checks come BEFORE STAGED is cleared, and the ordering is the
+    # point. Clearing first told the cleanup trap there was nothing to remove,
+    # so a `mv` that exited 0 without actually moving the file -- an
+    # overlayfs/9p/NFS quirk, or a filesystem that reports success on a rename
+    # it did not perform -- left conduit.new.<pid> orphaned in a directory on
+    # the user's PATH, with nothing left that knew its name. Verifying first
+    # means any such failure still has a live cleanup registration.
     [[ -f "$dest" ]] || die "nothing was installed at ${dest} (the rename reported success)"
     [[ -x "$dest" ]] || die "${dest} exists but is not executable"
+
+    STAGED=""   # verified moved; there is nothing left to clean up
 
     success "installed ${dest}"
 

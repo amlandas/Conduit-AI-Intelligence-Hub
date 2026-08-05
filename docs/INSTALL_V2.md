@@ -70,7 +70,7 @@ Re-running either is safe, and is the supported way to upgrade.
 |---|---|
 | `--from-source` | Build from this checkout. Needs Go and a C compiler. |
 | `--version TAG` | Install a specific release, e.g. `v2.0.0-beta.1`. Default: the newest v2 release. Must look like a v2 tag — a value that could reshape the download URL is refused. |
-| `--prefix DIR` | Install somewhere other than `~/.local/bin`. Must be an **absolute** path containing no shell metacharacters: it is written into your shell startup file. |
+| `--prefix DIR` | Install somewhere other than `~/.local/bin`. Must be an **absolute** path containing no ASCII shell metacharacters, because it is written into your shell startup file. Spaces, accented characters and non-Latin scripts are all fine — `/Users/José/bin` and `/home/müller/bin` work, and so does the default prefix on such a machine. |
 | `--model` | Also download the embedding model (a few hundred MB). |
 | `--client NAME` | Configure `claude-code` (default), `cursor` or `vscode`. An unrecognised name is refused before anything is installed. |
 | `--no-setup` | Install the binary only; configure nothing. |
@@ -79,7 +79,7 @@ Re-running either is safe, and is the supported way to upgrade.
 
 | Variable | Effect |
 |---|---|
-| `CONDUIT_PREFIX` | Default for `--prefix`, and held to the same rules. `uninstall.sh` searches there too, in addition to the usual locations. |
+| `CONDUIT_PREFIX` | Default for `--prefix`, and `install.sh` holds it to the same rules. `uninstall.sh` searches there too, in addition to the usual locations; it requires only that the value be absolute, and ignores it with a warning otherwise — a stale variable must not block an uninstall of an ordinary install. |
 | `CONDUIT_RELEASE_BASE_URL` | Fetch release artifacts from here instead of GitHub. **Announced loudly when used.** Checksum verification still applies, and plaintext HTTP is accepted only for loopback. |
 | `CONDUIT_RELEASE_API_URL` | Where to look up the newest release. Default `https://api.github.com`. |
 
