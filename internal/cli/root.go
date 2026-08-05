@@ -110,6 +110,12 @@ Examples:
 
 	globalFlags = root.PersistentFlags()
 
+	// Applied before every command body, whatever route that command takes to
+	// its configuration. See applyLogLevel.
+	root.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		applyLogLevel()
+	}
+
 	root.AddCommand(kbCmd())
 	root.AddCommand(mcpCmd())
 	root.AddCommand(configCmd())
@@ -160,22 +166,32 @@ func loadConfig() (*config.Config, error) {
 		fmt.Fprint(os.Stderr, msg)
 	}
 
-	// --log-level is applied HERE, and this is the only place it ever is.
-	//
-	// It was a documented persistent flag whose value was parsed into
-	// cfg.LogLevel, printed by `conduit config show`, and then applied to
-	// nothing: observability.SetupLogging had no caller outside a test, so the
-	// global zerolog level stayed at its zero value and every command emitted
-	// debug JSON on stderr regardless of what the user asked for. That is what
-	// put raw log lines through the middle of the installer's transcript.
-	//
-	// loadConfig is the right seam because it is the single funnel every
-	// command goes through to reach its configuration, and it runs before
-	// kbservice.Open -- which is where the noisy loggers live. It is called
-	// more than once per command; SetupLogging is idempotent.
-	observability.SetupDefaultLogging(res.Config.LogLevel)
-
 	return res.Config, nil
+}
+
+// applyLogLevel configures the global logger from --log-level.
+//
+// --log-level was a documented persistent flag that was applied to nothing:
+// observability.SetupLogging had no caller outside a test, so the global
+// zerolog level stayed at its zero value and every command emitted debug JSON
+// onto stderr whatever the user asked for. That is what put raw log lines
+// through the middle of the installer's transcript.
+//
+// It runs in the root command's PersistentPreRun rather than in loadConfig,
+// which is where it was first put and where it did not work. loadConfig is not
+// the only route to a *config.Config: runDoctor calls config.LoadWithFlags
+// directly, so `conduit doctor --log-level error` still printed debug lines
+// from kbservice.Open. A persistent hook is the one place that runs before
+// EVERY command body regardless of how that command gets its configuration.
+//
+// A config file too broken to load must not stop the command: `conduit doctor`
+// exists to diagnose exactly that. The default level is used instead.
+func applyLogLevel() {
+	level := config.DefaultConfig().LogLevel
+	if res, err := config.LoadWithFlags(globalFlags); err == nil && res.Config.LogLevel != "" {
+		level = res.Config.LogLevel
+	}
+	observability.SetupDefaultLogging(level)
 }
 
 // kbPath returns the knowledge base file path, honouring --db, and makes sure
