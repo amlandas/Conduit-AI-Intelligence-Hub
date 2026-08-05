@@ -12,6 +12,10 @@
 // Exactly one configuration file is read: the first one found, searched most
 // specific first, so a project directory can override a user's settings.
 //
+// Only the names "conduit.yaml" and "conduit.yml" are honoured. An
+// extensionless file named "conduit" is NOT configuration -- it is, far more
+// often, the binary (#90).
+//
 // # One schema
 //
 // The Config struct below IS the schema. Anything not reachable from it is not
@@ -441,6 +445,74 @@ func LoadDetailed() (*LoadResult, error) {
 	return LoadWithFlags(nil)
 }
 
+// configFileNames are the ONLY file names that may be honoured as a Conduit
+// configuration file, in probe order within a single directory.
+//
+// The list is deliberately closed. Viper's SetConfigName search would also
+// accept conduit.json, conduit.toml, conduit.ini and friends, none of which
+// Conduit documents, parses correctly (the loader forces YAML) or wants.
+var configFileNames = []string{"conduit.yaml", "conduit.yml"}
+
+// configSearchPaths returns the configuration search directories, first match
+// wins: most specific to least.
+//
+// The working directory comes first so a project can carry its own
+// conduit.yaml next to its own knowledge base. Before WP-3.2 the home
+// directory was searched first, which meant a project-local config could
+// never take effect once a user config existed.
+func configSearchPaths() []string {
+	paths := make([]string, 0, 3)
+
+	// Absolute where possible so that res.File, the doctor check and any parse
+	// error all name a path the operator can act on rather than "conduit.yaml".
+	if cwd, err := os.Getwd(); err == nil {
+		paths = append(paths, cwd)
+	} else {
+		paths = append(paths, ".")
+	}
+	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+		paths = append(paths, filepath.Join(homeDir, ".conduit"))
+	}
+	paths = append(paths, "/etc/conduit")
+
+	return paths
+}
+
+// findConfigFile returns the first readable configuration file across paths,
+// or "" when there is none.
+//
+// This replaces viper's SetConfigName + AddConfigPath search, which was the
+// root cause of #90. Viper's searchInPath tries name+"."+ext for every
+// supported extension and THEN, whenever SetConfigType has been called, falls
+// back to the extensionless file:
+//
+//	if v.configType != "" {
+//	    if b, _ := exists(v.fs, filepath.Join(in, v.configName)); b { ... }
+//	}
+//
+// Conduit sets the type to "yaml" (it must -- the schema is YAML), so a plain
+// file named "conduit" in the working directory was accepted as configuration.
+// Building the binary into the repository root is enough to trigger it: a user
+// ran every command against a 32MB Mach-O and got
+// "yaml: invalid trailing UTF-8 octet" with no indication of what was read.
+//
+// A configuration file is a thing a user writes on purpose and names on
+// purpose. Requiring the extension costs nothing and removes a whole class of
+// accidental collision.
+func findConfigFile(paths []string) string {
+	for _, dir := range paths {
+		for _, name := range configFileNames {
+			p := filepath.Join(dir, name)
+			// A directory named conduit.yaml is not a config file, and Stat
+			// failures (missing, unreadable parent) mean "keep looking".
+			if st, err := os.Stat(p); err == nil && st.Mode().IsRegular() {
+				return p
+			}
+		}
+	}
+	return ""
+}
+
 // LoadWithFlags loads configuration and, if flags is non-nil, gives any flag
 // the user actually set the highest precedence.
 //
@@ -450,19 +522,12 @@ func LoadWithFlags(flags *pflag.FlagSet) (*LoadResult, error) {
 	cfg := DefaultConfig()
 
 	v := viper.New()
-	v.SetConfigName("conduit")
-	v.SetConfigType("yaml")
 
-	// Configuration search paths, first match wins: most specific to least.
-	//
-	// The working directory comes first so a project can carry its own
-	// conduit.yaml next to its own knowledge base. Before WP-3.2 the home
-	// directory was searched first, which meant a project-local config could
-	// never take effect once a user config existed.
-	homeDir, _ := os.UserHomeDir()
-	v.AddConfigPath(".")
-	v.AddConfigPath(filepath.Join(homeDir, ".conduit"))
-	v.AddConfigPath("/etc/conduit")
+	// The file is located by hand rather than by viper's SetConfigName search.
+	// See findConfigFile: viper's search accepts an extensionless file, which
+	// made a build artifact named "conduit" in the working directory get
+	// parsed as YAML (#90).
+	v.SetConfigType("yaml")
 
 	// Environment: CONDUIT_KB_CHUNK_SIZE -> kb.chunk_size
 	//
@@ -479,13 +544,16 @@ func LoadWithFlags(flags *pflag.FlagSet) (*LoadResult, error) {
 
 	res := &LoadResult{}
 
-	if err := v.ReadInConfig(); err != nil {
-		// A missing config file is the normal case, not an error.
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, err
+	// A missing config file is the normal case, not an error.
+	if file := findConfigFile(configSearchPaths()); file != "" {
+		v.SetConfigFile(file)
+		if err := v.ReadInConfig(); err != nil {
+			// Naming the file is the whole point: the operator who hit #90 was
+			// told only "yaml: invalid trailing UTF-8 octet" and had no way to
+			// learn which of three search paths produced it.
+			return nil, fmt.Errorf("config file %s: %w", file, err)
 		}
-	} else {
-		res.File = v.ConfigFileUsed()
+		res.File = file
 		res.UnknownKeys = unknownKeys(v.AllSettings())
 	}
 

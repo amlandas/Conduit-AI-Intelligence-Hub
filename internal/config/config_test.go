@@ -455,6 +455,204 @@ func TestLoadWithFlags_ParsesDurations(t *testing.T) {
 	}
 }
 
+// --- #90: only conduit.yaml / conduit.yml may be honoured -------------------
+
+// TestLoadWithFlags_IgnoresExtensionlessConduitFile is the #90 regression.
+//
+// A user built the binary into the directory they ran it from, so a 32MB
+// Mach-O named "conduit" sat next to their knowledge base. Viper's config
+// search accepts an extensionless file whenever SetConfigType has been called,
+// so every command tried to parse the binary as YAML and died with
+// "yaml: invalid trailing UTF-8 octet".
+func TestLoadWithFlags_IgnoresExtensionlessConduitFile(t *testing.T) {
+	dir := t.TempDir()
+
+	// Stand in for the build artifact: binary bytes that are not valid UTF-8,
+	// which is what produced the reported error.
+	binary := []byte{0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0x00, 0x00, 0x01, 0xff, 0xfe}
+	if err := os.WriteFile(filepath.Join(dir, "conduit"), binary, 0755); err != nil {
+		t.Fatalf("write fake binary: %v", err)
+	}
+
+	isolate(t, dir)
+
+	res, err := LoadWithFlags(nil)
+	if err != nil {
+		t.Fatalf("a file named %q must not be read as configuration: %v",
+			"conduit", err)
+	}
+	if res.File != "" {
+		t.Errorf("File = %q, want \"\" (nothing was configured)", res.File)
+	}
+	if res.Config.LogLevel != DefaultConfig().LogLevel {
+		t.Errorf("expected clean defaults; LogLevel = %q", res.Config.LogLevel)
+	}
+}
+
+// TestLoadWithFlags_IgnoresUnsupportedConfigExtensions pins the closed list.
+//
+// Viper's search would also have accepted conduit.json, conduit.toml and
+// conduit.ini. None are documented, and the loader forces YAML anyway, so a
+// conduit.json would have been parsed as YAML -- silently for a flat file,
+// confusingly for anything else.
+func TestLoadWithFlags_IgnoresUnsupportedConfigExtensions(t *testing.T) {
+	for _, name := range []string{"conduit.json", "conduit.toml", "conduit.ini", "conduit.properties"} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, name),
+				[]byte(`{"log_level": "debug"}`), 0600); err != nil {
+				t.Fatalf("write %s: %v", name, err)
+			}
+
+			isolate(t, dir)
+
+			res, err := LoadWithFlags(nil)
+			if err != nil {
+				t.Fatalf("LoadWithFlags: %v", err)
+			}
+			if res.File != "" {
+				t.Errorf("%s was read as configuration (File = %q)", name, res.File)
+			}
+		})
+	}
+}
+
+// TestLoadWithFlags_HonoursYmlExtension keeps the shorter spelling working.
+func TestLoadWithFlags_HonoursYmlExtension(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "conduit.yml"),
+		[]byte("log_level: warn\n"), 0600); err != nil {
+		t.Fatalf("write conduit.yml: %v", err)
+	}
+
+	isolate(t, dir)
+
+	res, err := LoadWithFlags(nil)
+	if err != nil {
+		t.Fatalf("LoadWithFlags: %v", err)
+	}
+	if res.Config.LogLevel != "warn" {
+		t.Errorf("LogLevel = %q, want warn (conduit.yml ignored?)", res.Config.LogLevel)
+	}
+	if !strings.HasSuffix(res.File, "conduit.yml") {
+		t.Errorf("File = %q, want a path ending in conduit.yml", res.File)
+	}
+}
+
+// TestLoadWithFlags_YamlWinsOverYml pins the within-directory probe order.
+func TestLoadWithFlags_YamlWinsOverYml(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, "log_level: error\n")
+	if err := os.WriteFile(filepath.Join(dir, "conduit.yml"),
+		[]byte("log_level: warn\n"), 0600); err != nil {
+		t.Fatalf("write conduit.yml: %v", err)
+	}
+
+	isolate(t, dir)
+
+	res, err := LoadWithFlags(nil)
+	if err != nil {
+		t.Fatalf("LoadWithFlags: %v", err)
+	}
+	if res.Config.LogLevel != "error" {
+		t.Errorf("LogLevel = %q, want error (conduit.yaml should win)", res.Config.LogLevel)
+	}
+}
+
+// TestLoadWithFlags_ParseErrorNamesTheFile is the second half of #90.
+//
+// The reported error was "yaml: invalid trailing UTF-8 octet" with no file
+// name, so the operator could not tell which of three search paths -- or which
+// file within one -- was at fault.
+func TestLoadWithFlags_ParseErrorNamesTheFile(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, "log_level: [unclosed\n\tnot: yaml\n")
+
+	isolate(t, dir)
+
+	_, err := LoadWithFlags(nil)
+	if err == nil {
+		t.Fatal("a corrupt conduit.yaml must be an error")
+	}
+
+	want := filepath.Join(dir, "conduit.yaml")
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error must name the offending file.\n got: %v\nwant substring: %s",
+			err, want)
+	}
+}
+
+// TestLoadWithFlags_ProjectConfigBeatsHome pins search-path precedence, which
+// the hand-rolled probe now owns instead of viper.
+func TestLoadWithFlags_ProjectConfigBeatsHome(t *testing.T) {
+	dir := t.TempDir()
+	writeConfig(t, dir, "log_level: error\n")
+
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".conduit"), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".conduit", "conduit.yaml"),
+		[]byte("log_level: debug\n"), 0600); err != nil {
+		t.Fatalf("write home config: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(dir)
+
+	res, err := LoadWithFlags(nil)
+	if err != nil {
+		t.Fatalf("LoadWithFlags: %v", err)
+	}
+	if res.Config.LogLevel != "error" {
+		t.Errorf("LogLevel = %q, want error (project config should win)", res.Config.LogLevel)
+	}
+}
+
+// TestLoadWithFlags_FallsBackToHomeConfig is the other half of precedence: no
+// project config means the user config is used.
+func TestLoadWithFlags_FallsBackToHomeConfig(t *testing.T) {
+	dir := t.TempDir()
+
+	home := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(home, ".conduit"), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".conduit", "conduit.yaml"),
+		[]byte("log_level: debug\n"), 0600); err != nil {
+		t.Fatalf("write home config: %v", err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Chdir(dir)
+
+	res, err := LoadWithFlags(nil)
+	if err != nil {
+		t.Fatalf("LoadWithFlags: %v", err)
+	}
+	if res.Config.LogLevel != "debug" {
+		t.Errorf("LogLevel = %q, want debug (home config not found?)", res.Config.LogLevel)
+	}
+}
+
+// TestFindConfigFile_SkipsDirectories: a directory named conduit.yaml must not
+// stop the search, or it would mask a real config further down the path list.
+func TestFindConfigFile_SkipsDirectories(t *testing.T) {
+	shadow := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(shadow, "conduit.yaml"), 0700); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+
+	real := t.TempDir()
+	writeConfig(t, real, "log_level: warn\n")
+
+	got := findConfigFile([]string{shadow, real})
+	want := filepath.Join(real, "conduit.yaml")
+	if got != want {
+		t.Errorf("findConfigFile = %q, want %q", got, want)
+	}
+}
+
 // writeConfig drops a conduit.yaml into dir.
 func writeConfig(t *testing.T, dir, content string) {
 	t.Helper()
