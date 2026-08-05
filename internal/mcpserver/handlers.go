@@ -138,10 +138,31 @@ func (s *Server) toolSearch(ctx context.Context, _ *mcp.CallToolRequest, args se
 		if result.Note != "" {
 			noteText += "\n\n" + result.Note
 		}
+		noteText += s.indexGuidance(ctx)
 		texts = append(texts, noteText)
 	}
 
 	return textResult(texts...), nil, nil
+}
+
+// indexGuidance returns the #97 note, already prefixed with a blank line, or
+// "" when there is nothing to say.
+//
+// It is appended to RESULT TEXT only. Tool names, descriptions and input
+// schemas are frozen -- AI clients are prompt-tuned against them, and
+// TestToolDescriptionsCarriedOverVerbatim and TestToolSchemasAreFrozen pin
+// them byte for byte. What a tool RETURNS is allowed to be more helpful.
+//
+// The note matters more here than on the CLI: a human seeing "no results" may
+// wonder whether they forgot a step, but an AI client will simply report to the
+// user that their documents do not mention the thing they asked about, with no
+// hint that nothing was ever indexed.
+func (s *Server) indexGuidance(ctx context.Context) string {
+	note := s.source.IndexGuidanceNote(ctx)
+	if note == "" {
+		return ""
+	}
+	return "\n\nindex: incomplete\n\n" + note
 }
 
 // toolLexicalSearch performs a pure FTS5/BM25 keyword search.
@@ -181,7 +202,7 @@ func (s *Server) toolLexicalSearch(ctx context.Context, _ *mcp.CallToolRequest, 
 	}
 
 	if len(texts) == 0 {
-		texts = append(texts, "No results found for: "+args.Query)
+		texts = append(texts, "No results found for: "+args.Query+s.indexGuidance(ctx))
 	}
 
 	return textResult(texts...), nil, nil
@@ -225,6 +246,7 @@ func (s *Server) toolSearchWithContext(ctx context.Context, _ *mcp.CallToolReque
 		if banner != "" {
 			text = banner + "\n\n" + text
 		}
+		text += s.indexGuidance(ctx)
 		return textResult(text), nil, nil
 	}
 
@@ -544,6 +566,7 @@ func (s *Server) kagFallback(ctx context.Context, args kagQueryArgs, note string
 		if result.Note != "" {
 			noteText += "\n\n" + result.Note
 		}
+		noteText += s.indexGuidance(ctx)
 		texts = append(texts, noteText)
 	}
 

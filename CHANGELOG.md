@@ -149,6 +149,46 @@ deal of what follows is deletion.
 
 ### Fixed
 
+Dogfood week — four defects found by running Conduit as a user rather than as a
+test suite:
+
+- **Natural-language questions returned nothing.** `how do tokens expire` found
+  0 results where `tokens expire` found 1, from the same knowledge base. FTS5
+  joins terms with an implicit AND and `kb_fts` uses `porter unicode61`, which
+  has no stopword list, so "how" and "do" were hard requirements. Question
+  scaffolding — interrogatives, be/do/have auxiliaries, articles, common
+  prepositions and pronouns — is now dropped from the **lexical** leg only; the
+  semantic leg still sees the sentence you typed. Quoted words are never
+  dropped, a query made entirely of such words is left alone, and `and`/`or`/
+  `not` and the RFC-2119 modals are not treated as noise.
+  ([#96](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/96))
+- **A never-synced knowledge base answered "No results found" and stopped.**
+  `conduit kb add` registers a source, `conduit kb sync` indexes it; skipping
+  the second step produced an empty search that looked exactly like an answer.
+  An empty result now names `conduit kb sync` and says which sources were never
+  indexed — in the CLI, in `--json` (new `index_note` key), and in the MCP tool
+  results under an `index: incomplete` heading. A populated knowledge base that
+  simply does not contain the query still gets the plain message. MCP tool
+  names, descriptions and schemas are unchanged.
+  ([#97](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/97))
+- **Interactive commands printed raw zerolog JSON.** `kb add` emitted
+  `{"level":"info",…}` into its own transcript and `kb search` wrapped its
+  llama-server guidance in the same JSON. `log_format` now defaults to `auto`:
+  human-readable console output for interactive commands, structured JSON for
+  `conduit mcp kb` and for `--log-level debug`. `log_level` defaults to `warn`
+  rather than `info`, because every info-level line duplicates narration the
+  command already prints. The llama-server guidance now also names the
+  keyword-only opt-out, `conduit config set embed.provider none`, and corrects
+  a config key it named that does not exist.
+  ([#98](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/98))
+- **A file named `conduit` was parsed as a config file.** Viper's config search
+  accepts an extensionless file, so building the binary into the directory you
+  run it from made every command try to read a 32MB Mach-O as YAML and fail
+  with `yaml: invalid trailing UTF-8 octet` — naming nothing. Only
+  `conduit.yaml` and `conduit.yml` are honoured now, and a parse error names the
+  offending path.
+  ([#90](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/90))
+
 Installer hardening, from a review of `scripts/install.sh`:
 
 - **The MCP entry now records the absolute path of the installed binary**, not

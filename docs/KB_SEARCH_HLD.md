@@ -567,6 +567,40 @@ if err := s.semantic.Search(...); err != nil {
 }
 ```
 
+### 9.1 Empty results: missing content vs. missing index
+
+An empty result is ambiguous. "Your knowledge base does not contain this" and
+"your knowledge base is empty because you never ran `conduit kb sync`" look
+identical to the caller, and the second is a step the user forgot rather than an
+answer (#97).
+
+`kb.BuildIndexGuidance` (`internal/kb/index_guidance.go`) resolves it from
+`kb_sources`, which carries `last_sync` (NULL until the first sync) and
+`chunk_count`. Both are written by `updateSourceStats` in a single statement, so
+they cannot disagree.
+
+| State | Note |
+|---|---|
+| No sources configured | names `conduit kb add`, then `conduit kb sync` |
+| Every source never synced | "Nothing has been indexed yet…", names the sources |
+| Some sources never synced | "N of M sources have never been synced…" |
+| All synced, some hold no chunks | "…holds no indexed content", suggests re-sync |
+| All synced and populated | **no note** — the query genuinely missed |
+
+The last row is the important one. A note on every empty search is noise, and
+noise is how a real warning gets ignored.
+
+It is computed only on the zero-hit path, so it costs nothing on a search that
+found something. Both frontends call the same function:
+
+- **CLI**: printed under the existing `No results found for: …` line, and
+  carried in `--json` as an added `index_note` key.
+- **MCP**: appended to the RESULT TEXT of `kb_search`, `kb_lexical_search`,
+  `kb_search_with_context` and `kag_query`, under an `index: incomplete`
+  heading, in the same style as the `retrieval: degraded` and `graph: disabled`
+  notes. Tool names, descriptions and input schemas are unchanged — those are
+  frozen, and AI clients are prompt-tuned against them.
+
 ---
 
 ## 9.5 Data Lifecycle: Source Removal

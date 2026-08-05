@@ -147,6 +147,29 @@ func openAndSeed(dbPath string) (*sql.DB, string, error) {
 		}
 	}
 
+	// Mark the source synced.
+	//
+	// This fixture indexes through kb.Indexer directly rather than through
+	// SourceManager.Sync, so last_sync stays NULL and the stored counts stay 0
+	// -- a shape production never produces, because `kb sync` writes the
+	// timestamp and the counts in one statement. Without this the source looks
+	// "added but never indexed" and every no-results assertion in this file
+	// would carry the #97 guidance note, hiding whether the note fires for the
+	// right reason.
+	if _, err := db.ExecContext(ctx, `
+		UPDATE kb_sources
+		SET last_sync = datetime('now'),
+		    doc_count = (SELECT COUNT(*) FROM kb_documents WHERE source_id = ?),
+		    chunk_count = (
+		        SELECT COUNT(*) FROM kb_chunks c
+		        JOIN kb_documents d ON c.document_id = d.document_id
+		        WHERE d.source_id = ?
+		    )
+		WHERE source_id = ?`,
+		src.SourceID, src.SourceID, src.SourceID); err != nil {
+		return nil, "", err
+	}
+
 	return db, src.SourceID, nil
 }
 

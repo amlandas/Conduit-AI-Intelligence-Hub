@@ -297,6 +297,34 @@ If your query matches nothing directly, Conduit relaxes it in stages rather
 than handing back an empty list. Results from a relaxed stage are still real
 matches, just for a looser interpretation of what you asked.
 
+### When a search finds nothing
+
+A genuinely empty result says so and stops:
+
+```
+No results found for: kubernetes ingress
+```
+
+But if the reason is that nothing has been indexed yet, it says that instead:
+
+```
+No results found for: how do tokens expire
+
+Nothing has been indexed yet: these sources have never been synced
+(meeting-notes, project-docs). Run `conduit kb sync` to index them, then search
+again. Until then this result says nothing about whether the content exists.
+```
+
+`conduit kb add` registers a source; `conduit kb sync` indexes it. Skipping the
+second command used to produce a bare "No results found", which is true and
+useless.
+
+The same note is appended to the MCP tool results, under an `index: incomplete`
+heading. That matters more there than here — an AI client reading an empty tool
+result will otherwise tell you, confidently, that your documents do not mention
+what you asked about. `--json` carries it as an added `index_note` key, present
+only when there is something to fix.
+
 ---
 
 ## Connecting AI clients
