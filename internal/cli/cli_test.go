@@ -564,9 +564,20 @@ func TestSmoke_MCPConfigure(t *testing.T) {
 	if !ok {
 		t.Fatalf("conduit-kb entry missing; got %v", cfg.MCPServers)
 	}
-	if entry.Command != "conduit" || len(entry.Args) != 2 ||
-		entry.Args[0] != "mcp" || entry.Args[1] != "kb" {
-		t.Errorf("unexpected server entry: %+v", entry)
+	if len(entry.Args) != 2 || entry.Args[0] != "mcp" || entry.Args[1] != "kb" {
+		t.Errorf("unexpected server args: %+v", entry)
+	}
+	// The command must be an ABSOLUTE path. An AI client launched from a GUI
+	// inherits no shell PATH, so a bare "conduit" -- which is what this used to
+	// write -- cannot be spawned at all, and the client reports the server as
+	// broken with nothing naming PATH as the cause. Under `go test` the running
+	// executable is this test binary, so the property asserted is
+	// absoluteness, not the basename.
+	if entry.Command == "conduit" {
+		t.Errorf(`command is the bare name "conduit"; it must be an absolute path`)
+	}
+	if !filepath.IsAbs(entry.Command) {
+		t.Errorf("command = %q, want an absolute path", entry.Command)
 	}
 
 	// Now mcp status must agree that the client is configured.

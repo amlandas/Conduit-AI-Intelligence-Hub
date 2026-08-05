@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -59,8 +60,34 @@ func TestConfigureMCPClient_WritesEntry(t *testing.T) {
 	if !ok {
 		t.Fatalf("%s entry missing; got %v", ServerName, servers)
 	}
-	if entry["command"] != "conduit" {
-		t.Errorf("command = %v, want conduit", entry["command"])
+	// An ABSOLUTE path, not the bare name. A client launched from a GUI does
+	// not read the shell profile install.sh writes the PATH block to, so a bare
+	// "conduit" is looked up in a PATH that never contained the install prefix.
+	assertAbsoluteConduitCommand(t, entry["command"])
+}
+
+// assertAbsoluteConduitCommand checks an MCP entry's command is an absolute
+// path to a conduit binary.
+func assertAbsoluteConduitCommand(t *testing.T, got interface{}) {
+	t.Helper()
+
+	cmd, ok := got.(string)
+	if !ok {
+		t.Fatalf("command is %T, want string: %v", got, got)
+	}
+	if cmd == "conduit" {
+		t.Fatalf(`command is the bare name "conduit"; it must be an absolute path, ` +
+			`or a GUI-launched AI client cannot find the binary`)
+	}
+	if !filepath.IsAbs(cmd) {
+		t.Errorf("command = %q, want an absolute path", cmd)
+	}
+	if filepath.Base(cmd) != "conduit" && !strings.Contains(filepath.Base(cmd), "setup") {
+		// Under `go test` the running executable is the package's test binary,
+		// so the basename is whatever the toolchain named it. The absolute-path
+		// property is the one being asserted; this only catches a path pointing
+		// at something unrelated entirely.
+		t.Logf("command basename is %q (test binary)", filepath.Base(cmd))
 	}
 }
 
@@ -169,9 +196,10 @@ func TestConfigureMCPClient_ForceRewrites(t *testing.T) {
 
 	cfg := readJSON(t, path)
 	entry := cfg["mcpServers"].(map[string]interface{})[ServerName].(map[string]interface{})
-	if entry["command"] != "conduit" {
+	if entry["command"] == "old-binary" {
 		t.Errorf("stale command survived --force: %v", entry["command"])
 	}
+	assertAbsoluteConduitCommand(t, entry["command"])
 }
 
 func TestConfigureMCPClient_RejectsUnparseableConfig(t *testing.T) {

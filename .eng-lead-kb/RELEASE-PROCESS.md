@@ -128,7 +128,7 @@ instead. Any other tooling written against these releases must do the same.
 
 | | Why |
 |---|---|
-| **Apple code signing / notarisation** | Needs a paid Developer ID and a signing identity in CI. Deferred to public launch. Until then macOS quarantines downloaded binaries; `xattr -d com.apple.quarantine` clears it, and `--from-source` avoids it. |
+| **Apple code signing / notarisation** | Needs a paid Developer ID and a signing identity in CI. Deferred to public launch. Note that quarantine is applied by the downloading program, so it does NOT affect `install.sh` — curl and wget do not set the attribute (verified). It affects **browser** downloads of the release tarball, where `xattr -d com.apple.quarantine` clears it. `--from-source` avoids it entirely. |
 | **Windows** | No native build, no runner in the matrix, `scripts/install-windows.ps1` is untested against v2. |
 | **linux-arm64, darwin-amd64** | No demand yet. `--from-source` works on both. |
 | **Homebrew tap / apt repo** | Packaging overhead that a personal-grade release does not earn. |
@@ -146,5 +146,7 @@ When any of these lands, this table is the checklist to update.
 | Workflow did not run at all | Tag does not match `v2.*`. The trigger is deliberately narrow so a stray `v0.1.x` tag cannot start it. |
 | `version` reports `dev` | `-ldflags -X` naming a symbol that does not exist. See above. |
 | Release published with one platform | Should be impossible: `fail-fast: true` plus an explicit both-artifacts-present check in the `Checksums` step. If you see it, that check regressed. |
-| `install.sh` says "no Conduit 2.0 release has been published yet" | The releases list holds no `v2.*` entry — either nothing is published, or the workflow failed before the publish step. |
-| macOS refuses to run the binary | Gatekeeper quarantine. Not a broken build. |
+| `install.sh` says "no Conduit 2.0 release has been published yet" | The releases list was **read successfully** and holds no `v2.*` entry — either nothing is published, or the workflow failed before the publish step. This message no longer covers a failed lookup: rate limiting, an unreachable API and a non-list response each report themselves, so seeing this one really does mean the list was empty. |
+| `install.sh` says the API refused the request (403/429) | GitHub's unauthenticated API rate limit, 60/hour/IP. Nothing to do with the release. Use `--version TAG`, which does not call the API. |
+| `install.sh` says the API answered with something that is not a list | A captive portal or an intercepting proxy. Also use `--version TAG`. |
+| macOS refuses to run a binary downloaded **through a browser** | Gatekeeper quarantine. Not a broken build. Binaries fetched by `install.sh` (curl/wget) are not quarantined. |

@@ -16,26 +16,40 @@ from Conduit 1.x — see [INSTALL_V2.md](INSTALL_V2.md).
 ```bash
 git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub
 cd Conduit-AI-Intelligence-Hub
-./scripts/install.sh --from-source
+./scripts/install.sh
+```
+
+That downloads the newest published v2 release and verifies its SHA-256 against
+the release's `SHA256SUMS` before unpacking. No Go toolchain needed.
+
+To build from source instead — required on Intel Macs and Linux arm64, which
+have no published binaries:
+
+```bash
+./scripts/install.sh --from-source     # needs Go 1.21+ and a C compiler
 ```
 
 **What this does:**
 
-- Builds one binary (`conduit`) with `CGO_ENABLED=1 -tags fts5`
-- Installs it to `~/.local/bin`
+- Puts one binary (`conduit`) in `~/.local/bin`
 - Creates the data directory `~/.conduit`
 - Registers the MCP server with Claude Code
 - Prints diagnostics
 
 **What it does not do:** there is no daemon, no background service, no
 containers, and nothing that starts at login. Conduit runs when you call it and
-exits.
+exits. It also does not install document extraction tools; see
+[INSTALL_V2.md](INSTALL_V2.md#document-extraction-tools) if you index PDFs.
 
-**Requirements:** macOS arm64 or Linux x86_64, Go 1.21+, and a C compiler.
-About 13 MB for the binary.
+**Requirements:** macOS arm64 or Linux x86_64. About 13 MB for the binary, plus
+Go 1.21+ and a C compiler if you use `--from-source`.
 
-Restart your terminal afterwards, or `source ~/.zshrc`, so `~/.local/bin` is on
-your `PATH`.
+If `~/.local/bin` was not already on your `PATH`, the installer appends a block
+to your shell's startup file and **names the file it wrote to** on the last
+line of its output. Open a new terminal, or source that file — which one it is
+depends on your shell and platform (`~/.zshrc` for zsh, `~/.bash_profile` for
+bash on macOS, `~/.bashrc` for bash on Linux), so use the name the installer
+printed rather than guessing.
 
 > **Coming from Conduit 1.x?** Installing v2 does not remove the v1 daemon or
 > its containers. Run `./scripts/remove-v1.sh` first — it is a dry run by

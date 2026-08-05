@@ -15,7 +15,10 @@ Conduit installed, with at least one AI client configured. See
 [QUICK_START.md](QUICK_START.md) or [INSTALL_V2.md](INSTALL_V2.md).
 
 ```bash
-# Install (from a checkout)
+# Install the newest published release (no Go toolchain needed)
+./scripts/install.sh
+
+# Or build from this checkout instead
 ./scripts/install.sh --from-source
 
 # Verify

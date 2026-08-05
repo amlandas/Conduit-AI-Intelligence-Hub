@@ -67,6 +67,48 @@ func LookupMCPClient(id string) (MCPClient, error) {
 	return client, nil
 }
 
+// ConduitCommand returns the command an AI client should launch to reach
+// Conduit's MCP server.
+//
+// It is the ABSOLUTE path of the running executable, not the bare name
+// "conduit", and the difference is not cosmetic.
+//
+// An AI client started from a GUI -- Claude Code from Spotlight, Cursor from
+// the Dock -- inherits launchd's or the desktop session's environment, not the
+// one a terminal builds. The PATH block install.sh appends to ~/.zshrc is read
+// by interactive shells and by nothing else, so a bare "conduit" is looked up
+// in a PATH that has never contained ~/.local/bin. The spawn fails with ENOENT
+// and the client reports the MCP server as broken, with nothing anywhere
+// pointing at PATH as the cause.
+//
+// With `install.sh --prefix DIR` it is worse: that directory may be on no PATH
+// at all, in any process.
+//
+// Writing the path the binary is actually running from removes the lookup
+// entirely. That path is also the right one on principle: it is the copy the
+// user just installed and just ran, rather than whichever copy a PATH search
+// would happen to find first.
+//
+// The two platforms disagree about symlinks and that is left alone
+// deliberately: on Linux os.Executable reads /proc/self/exe and returns the
+// RESOLVED target, while on macOS it returns the path the process was invoked
+// by, link intact. Both are absolute and both spawn, which is all this needs.
+// Do not "fix" one to match the other -- resolving on macOS would rewrite a
+// deliberate symlink (a version manager's shim, say) into the versioned path
+// behind it, and that is a different install from the one the user chose.
+func ConduitCommand() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		// A PATH lookup is a worse answer, but it is better than writing an
+		// empty command that cannot spawn at all.
+		return "conduit"
+	}
+	if abs, aerr := filepath.Abs(exe); aerr == nil {
+		return abs
+	}
+	return exe
+}
+
 // ConfigureResult reports what ConfigureMCPClient did.
 type ConfigureResult struct {
 	// ClientID is the client that was configured.
@@ -75,9 +117,18 @@ type ConfigureResult struct {
 	// ConfigPath is the file that was read (and possibly written).
 	ConfigPath string
 
-	// AlreadyConfigured is true when an entry existed and force was not set,
-	// in which case nothing was written.
+	// AlreadyConfigured is true when a CORRECT entry existed and force was not
+	// set, in which case nothing was written.
 	AlreadyConfigured bool
+
+	// Repaired is true when an entry existed but named a different command and
+	// was rewritten to point at this binary.
+	Repaired bool
+
+	// PreviousCommand is the command a repaired entry used to name. It is
+	// reported so the user can see what changed rather than being told only
+	// that something did.
+	PreviousCommand string
 }
 
 // ConfigureMCPClient registers Conduit's KB MCP server in an AI client's
@@ -103,13 +154,36 @@ func ConfigureMCPClient(clientID string, force bool) (*ConfigureResult, error) {
 
 	res := &ConfigureResult{ClientID: clientID, ConfigPath: client.ConfigPath}
 
-	if _, exists := servers[ServerName]; exists && !force {
-		res.AlreadyConfigured = true
-		return res, nil
+	want := ConduitCommand()
+
+	// "An entry exists" is not the same as "the entry is correct", and treating
+	// them as the same made the absolute-path fix reach only new installs.
+	//
+	// Every user configured before that fix has an entry naming the bare command
+	// "conduit", which a GUI-launched client cannot spawn. Re-running
+	// `conduit setup` or `conduit mcp configure` is the obvious thing to try,
+	// and it reported "already configured" and changed nothing -- so the broken
+	// entry survived exactly the action taken to repair it. The same applies
+	// after `install.sh --prefix B` on a machine previously installed at A: the
+	// entry keeps pointing at A, which may no longer exist.
+	//
+	// So the command is compared, not merely the key's presence. A mismatch is
+	// repaired; a match is left alone, which keeps a re-run a genuine no-op.
+	// Only this server's "command" is touched -- the rest of the file, including
+	// every other MCP server and unrelated editor settings, is carried through
+	// the merge untouched.
+	if existing, exists := servers[ServerName].(map[string]interface{}); exists && !force {
+		if cmd, ok := existing["command"].(string); ok && cmd == want {
+			res.AlreadyConfigured = true
+			return res, nil
+		} else if ok {
+			res.Repaired = true
+			res.PreviousCommand = cmd
+		}
 	}
 
 	servers[ServerName] = map[string]interface{}{
-		"command": "conduit",
+		"command": want,
 		"args":    []string{"mcp", "kb"},
 	}
 	container[lastSegment(client.ServersKey)] = servers

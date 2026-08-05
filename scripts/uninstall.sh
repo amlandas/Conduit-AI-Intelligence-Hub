@@ -79,6 +79,22 @@ SYMLINK_PATHS=(
     "/opt/homebrew/bin/${BINARY}"
 )
 
+# CONDUIT_PREFIX is where install.sh puts the binary when it is set, and this
+# script knew nothing about it: `CONDUIT_PREFIX=/opt/bin ./install.sh` followed
+# by `CONDUIT_PREFIX=/opt/bin ./uninstall.sh` searched the two default
+# locations, found nothing, and left the install exactly where it was.
+#
+# It is added as an ADDITIONAL location rather than treated as --prefix, and the
+# distinction is deliberate. --prefix means "this install and no other": it
+# empties SYMLINK_PATHS, skips shell profile and MCP cleanup, and is mutually
+# exclusive with --remove-data. Those are reasonable consequences of a flag
+# typed on the command line for one run. They are not reasonable consequences of
+# an environment variable the user exported months ago and has forgotten about,
+# which would silently narrow every uninstall they ever ran.
+#
+# It is applied below, after the output functions exist, because a bad value has
+# to be reported.
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -97,6 +113,28 @@ warn() { printf '%s\n' "  ${C_YELLOW}!${C_RESET} $*" >&2; }
 bad()  { printf '%s\n' "  ${C_RED}failed${C_RESET}  $*" >&2; }
 die()  { printf '%s\n' "${C_RED}error:${C_RESET} $*" >&2; exit 1; }
 
+# CONDUIT_PREFIX, applied now that warn() exists.
+#
+# It is required to be absolute, and ignored with a warning if it is not.
+# `CONDUIT_PREFIX=. ./uninstall.sh` would otherwise resolve against whatever
+# directory the script was run from and delete ./conduit -- a file this script
+# has no reason to believe is Conduit's.
+#
+# Warning rather than dying is deliberate, and is the difference from
+# install.sh's treatment of the same variable. install.sh is about to WRITE a
+# PATH entry naming it, so a bad value has to stop the run. Here it only widens
+# a search, and a stale variable in someone's shell profile must not block an
+# uninstall of the perfectly ordinary installs in the default locations.
+if [[ -n "${CONDUIT_PREFIX:-}" ]]; then
+    if [[ "$CONDUIT_PREFIX" == /* ]]; then
+        BINARY_PATHS=("${CONDUIT_PREFIX}/${BINARY}" "${BINARY_PATHS[@]}")
+    else
+        warn "ignoring CONDUIT_PREFIX='${CONDUIT_PREFIX}': it is not an absolute path."
+        warn "  A relative prefix resolves against the current directory, which is not"
+        warn "  something to guess at before a delete. Use --prefix to name one exactly."
+    fi
+fi
+
 usage() {
     cat <<'EOF'
 uninstall.sh - remove Conduit 2.0
@@ -113,7 +151,9 @@ OPTIONS
                     it comes from the flag or the environment variable.
     --prefix DIR    Remove the install at DIR instead of searching the usual
                     locations. Use this if you installed with
-                    `install.sh --prefix DIR`.
+                    `install.sh --prefix DIR`. It targets that one install:
+                    shell profile lines and MCP entries are shared between
+                    installs, so they are left alone.
     --manual        Do not delegate to the conduit binary; remove what is on
                     disk directly. Use this when the binary runs but refuses.
                     Less thorough: MCP entries are reported rather than edited.
@@ -132,6 +172,15 @@ WHAT IS REMOVED
 WHAT IS NEVER REMOVED
     Tools you may share with other projects: Ollama, poppler, llama.cpp,
     Docker, Podman. Remove those yourself if nothing else needs them.
+
+ENVIRONMENT
+    CONDUIT_DATA_DIR   Default for --data-dir. Must be an absolute path, and is
+                       held to the same deny list as the flag.
+    CONDUIT_PREFIX     A directory install.sh may have installed into. It is
+                       SEARCHED IN ADDITION to ~/.local/bin and ~/bin -- unlike
+                       --prefix, it does not narrow the uninstall to one
+                       install, so shell profile lines and MCP entries are still
+                       cleaned up.
 
 CONDUIT 1.x
     This script knows nothing about the v1 daemon, its launchd/systemd
