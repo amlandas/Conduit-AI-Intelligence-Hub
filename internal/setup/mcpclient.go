@@ -88,6 +88,7 @@ func LookupMCPClient(id string) (MCPClient, error) {
 // entirely. That path is also the right one on principle: it is the copy the
 // user just installed and just ran, rather than whichever copy a PATH search
 // would happen to find first.
+//
 // The two platforms disagree about symlinks and that is left alone
 // deliberately: on Linux os.Executable reads /proc/self/exe and returns the
 // RESOLVED target, while on macOS it returns the path the process was invoked

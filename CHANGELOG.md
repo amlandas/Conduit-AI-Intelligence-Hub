@@ -195,6 +195,27 @@ Installer hardening, from a review of `scripts/install.sh`:
   read — the matching uninstall previously left that install in place.
 - Shadow warnings now cover a regular file at `/usr/local/bin/conduit`, not
   only a symlink, and consult PATH order before warning at all.
+- **A non-ASCII home directory no longer blocks the install.** The prefix
+  validation refused any byte outside a small ASCII set, so `/Users/José` and
+  `/home/müller` made the *default* install — with no flags at all —
+  impossible, and the error blamed a `--prefix` that had never been passed.
+  Accented, non-Latin and emoji characters are accepted; ASCII shell
+  metacharacters are still refused, and the message now names whichever of
+  `--prefix`, `$CONDUIT_PREFIX` or your home directory actually supplied the
+  value.
+- **A failed release lookup with no network says so.** `curl` prints `000`
+  itself and *also* exits non-zero, so the fallback appended a second `000` and
+  the resulting `000000` fell through to "a failure at api.github.com, not on
+  this machine" — the opposite of the truth, and it made the no-network branch
+  unreachable.
+- **`conduit setup` and `conduit mcp configure` now repair an existing MCP
+  entry that names the wrong command.** They previously stopped at "already
+  configured" if the `conduit-kb` key merely existed, so every user configured
+  before the absolute-path fix kept the broken bare `conduit` command — and
+  re-running the tool, which is the obvious repair, changed nothing. A stale
+  entry left behind by `install.sh --prefix` is repaired the same way. Other
+  MCP servers and unrelated settings in the file are untouched, and a correct
+  entry is still a no-op.
 
 - MCP handoff: every search hit now prints a `document_id:` line, and
   `kb_get_document` accepts a document path as an alternative key, so AI
