@@ -171,8 +171,8 @@ SUPPORTED PLATFORMS
         xattr -d com.apple.quarantine <file>
 
 PIPED INVOCATION
-    The release path works piped:
-        curl -fsSL https://raw.githubusercontent.com/OWNER/REPO/v2/scripts/install.sh | bash
+    The release path works piped, because everything it needs is downloaded:
+        curl -fsSL https://raw.githubusercontent.com/amlandas/Conduit-AI-Intelligence-Hub/v2/scripts/install.sh | bash
     --from-source does not: it compiles this repository, and a piped script has
     none. Clone first for that.
 

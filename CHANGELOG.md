@@ -149,6 +149,53 @@ deal of what follows is deletion.
 
 ### Fixed
 
+Installer hardening, from a review of `scripts/install.sh`:
+
+- **The MCP entry now records the absolute path of the installed binary**, not
+  the bare name `conduit`. An AI client launched from a GUI inherits no shell
+  PATH, so it never read the block the installer appends to `~/.zshrc`, and the
+  server failed to spawn with nothing naming PATH as the cause. With `--prefix`
+  the directory may be on no PATH at all.
+- **`--prefix` must be an absolute path with no shell metacharacters, and the
+  PATH block it writes is single-quoted.** The prefix was previously
+  interpolated unescaped into a double-quoted `export PATH="…"` line, so a
+  prefix containing `$( )` or backticks became code that ran in every login
+  shell thereafter.
+- **`--version` must look like a v2 tag.** A value such as
+  `../download/v2.0.0-beta.3` traversed the download URL while every message
+  went on quoting the tag as given.
+- **`--client <typo>` fails before anything is installed.** It used to install
+  the binary, run setup, and print "Done." with no client configured anywhere.
+  `conduit setup` now also returns an error rather than exiting 0 when the MCP
+  registration fails.
+- **A failed release lookup says what actually failed.** Rate limiting (HTTP
+  403/429), an unreachable API, an HTTP error and a 200 carrying something that
+  is not a releases list are four distinct messages; all of them name
+  `--version`, which skips the API entirely. Previously every one of them
+  reported "no Conduit 2.0 release has been published yet", and a 403 reported
+  it *in addition to* the correct error.
+- **A directory where the binary belongs is refused.** `mv` moves a file
+  *inside* a directory destination rather than failing, so the install reported
+  success with the binary at `conduit/conduit.new.<pid>`.
+- **The install prefix is checked for writability before the download**, not
+  after 13 MB and a verified checksum.
+- **`--from-source` piped from `curl` explains itself.** It died with
+  `BASH_SOURCE[0]: unbound variable` on bash 3.2; it now detects the missing
+  checkout and prints clone instructions. The release path works piped.
+- **`--log-level` now does something.** It was a documented flag applied to
+  nothing, which is why raw zerolog JSON appeared in the installer's output and
+  in ordinary command output. The installer also no longer runs `doctor` twice
+  or prints the next steps twice.
+- **`install.sh` no longer runs a package manager unattended.** It passes
+  `--skip-tools` to `conduit setup`, so installing Conduit cannot turn into a
+  `brew install poppler`. It reports when `pdftotext` is missing.
+- **v1 detection matches `remove-v1.sh`**, adding `conduit-daemon.service`,
+  three more `conduit-daemon` locations, and the Qdrant/FalkorDB containers.
+- **`uninstall.sh` honours `CONDUIT_PREFIX`**, which `install.sh` has always
+  read — the matching uninstall previously left that install in place.
+- Shadow warnings now cover a regular file at `/usr/local/bin/conduit`, not
+  only a symlink, and consult PATH order before warning at all.
+
 - MCP handoff: every search hit now prints a `document_id:` line, and
   `kb_get_document` accepts a document path as an alternative key, so AI
   clients can go from a search hit to the full document without touching the

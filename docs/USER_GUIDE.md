@@ -53,7 +53,13 @@ The short version:
 ```bash
 git clone https://github.com/amlandas/Conduit-AI-Intelligence-Hub
 cd Conduit-AI-Intelligence-Hub
-./scripts/install.sh --from-source
+./scripts/install.sh                   # newest published release
+```
+
+Or build it yourself, which is the only option on Intel Macs and Linux arm64:
+
+```bash
+./scripts/install.sh --from-source     # needs Go 1.21+ and a C compiler
 ```
 
 > **Coming from Conduit 1.x?** Installing v2 does not remove the v1 daemon or

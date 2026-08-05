@@ -43,6 +43,11 @@ Either way the script installs the binary to `~/.local/bin`, creates the data
 directory, and registers the MCP server with Claude Code. Re-running it is safe
 and is the supported way to upgrade.
 
+If `~/.local/bin` is not already on your `PATH`, it also appends a two-line
+block to your shell's startup file, marked with a `# Conduit` comment so
+`uninstall.sh` can remove exactly that block later. The installer names the file
+it wrote to; open a new terminal or source that file.
+
 Full options and troubleshooting are in
 [docs/INSTALL_V2.md](docs/INSTALL_V2.md).
 
@@ -60,9 +65,11 @@ Full options and troubleshooting are in
 `no such module: fts5`. `install.sh` sets `CGO_ENABLED=1` and `-tags fts5`. If
 you build by hand, so must you.
 
-**How long this takes.** The build is a minute or two. The model download is
-262 MB, so it depends entirely on your connection — budget more than you think
-on a slow link. Indexing time scales with your corpus.
+**How long this takes.** Installing from a release is a ~13 MB download and a
+checksum check — seconds on a decent link. `--from-source` compiles instead, so
+it is a minute or two plus the Go toolchain you already have. The model download
+is a separate 262 MB, and depends entirely on your connection — budget more than
+you think on a slow link. Indexing time scales with your corpus.
 
 ### 2. Get the embedding model (optional but recommended)
 
