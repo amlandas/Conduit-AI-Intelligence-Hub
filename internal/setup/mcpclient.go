@@ -67,6 +67,40 @@ func LookupMCPClient(id string) (MCPClient, error) {
 	return client, nil
 }
 
+// ConduitCommand returns the command an AI client should launch to reach
+// Conduit's MCP server.
+//
+// It is the ABSOLUTE path of the running executable, not the bare name
+// "conduit", and the difference is not cosmetic.
+//
+// An AI client started from a GUI -- Claude Code from Spotlight, Cursor from
+// the Dock -- inherits launchd's or the desktop session's environment, not the
+// one a terminal builds. The PATH block install.sh appends to ~/.zshrc is read
+// by interactive shells and by nothing else, so a bare "conduit" is looked up
+// in a PATH that has never contained ~/.local/bin. The spawn fails with ENOENT
+// and the client reports the MCP server as broken, with nothing anywhere
+// pointing at PATH as the cause.
+//
+// With `install.sh --prefix DIR` it is worse: that directory may be on no PATH
+// at all, in any process.
+//
+// Writing the path the binary is actually running from removes the lookup
+// entirely. That path is also the right one on principle: it is the copy the
+// user just installed and just ran, rather than whichever copy a PATH search
+// would happen to find first.
+func ConduitCommand() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		// A PATH lookup is a worse answer, but it is better than writing an
+		// empty command that cannot spawn at all.
+		return "conduit"
+	}
+	if abs, aerr := filepath.Abs(exe); aerr == nil {
+		return abs
+	}
+	return exe
+}
+
 // ConfigureResult reports what ConfigureMCPClient did.
 type ConfigureResult struct {
 	// ClientID is the client that was configured.
@@ -109,7 +143,7 @@ func ConfigureMCPClient(clientID string, force bool) (*ConfigureResult, error) {
 	}
 
 	servers[ServerName] = map[string]interface{}{
-		"command": "conduit",
+		"command": ConduitCommand(),
 		"args":    []string{"mcp", "kb"},
 	}
 	container[lastSegment(client.ServersKey)] = servers

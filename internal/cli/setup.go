@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -53,6 +54,19 @@ Examples:
   conduit setup --client cursor`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
+
+			// The client name is checked BEFORE anything is created.
+			//
+			// An unrecognised name used to travel all the way to step 4, print
+			// a warning, and let setup exit 0. `install.sh --client cursr`
+			// therefore installed the binary, ran setup, and announced "Done."
+			// with no client configured anywhere and nothing in the transcript
+			// that read as a failure. Refusing here costs a re-run of one
+			// command; the old behaviour cost a debugging session.
+			if _, err := setuppkg.LookupMCPClient(client); err != nil {
+				return fmt.Errorf("%w (supported: %s)",
+					err, strings.Join(setuppkg.MCPClientIDs(), ", "))
+			}
 
 			fmt.Println("Conduit Setup")
 			fmt.Println("═══════════════════════════════════════════════════════")
@@ -106,9 +120,17 @@ Examples:
 			}
 
 			// ---- 4. MCP client ---------------------------------------------
+			//
+			// A failure here is recorded rather than returned immediately: the
+			// diagnostics below are the most useful thing setup produces, and
+			// suppressing them because the last step failed would hide the
+			// reason. But it IS returned at the end. Registering the MCP server
+			// is the point of setup, and a run that did not manage it has not
+			// succeeded, whatever else it did.
 			fmt.Printf("\nConfiguring MCP server for %s...\n", client)
-			if err := configureMCPClient(client, false); err != nil {
-				fmt.Printf("  ⚠ %v\n", err)
+			mcpErr := configureMCPClient(client, false)
+			if mcpErr != nil {
+				fmt.Printf("  ⚠ %v\n", mcpErr)
 				fmt.Println("  Run 'conduit mcp configure --client <name>' to retry.")
 			}
 
@@ -138,6 +160,9 @@ Examples:
 				fmt.Println("  conduit model download     # enable semantic search")
 			}
 
+			if mcpErr != nil {
+				return fmt.Errorf("configure MCP client %q: %w", client, mcpErr)
+			}
 			return nil
 		},
 	}

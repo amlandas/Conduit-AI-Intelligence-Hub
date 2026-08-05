@@ -130,11 +130,14 @@ func mcpKBCmd() *cobra.Command {
 This server provides search and document retrieval tools for AI clients
 to access your private knowledge base.
 
-Example MCP client configuration:
+Example MCP client configuration. The command must be the ABSOLUTE path to the
+binary: an AI client launched from a GUI does not read your shell profile, so
+the directory Conduit was installed into is usually not on its PATH.
+'conduit mcp configure' writes this for you, using the path it is running from.
 {
   "mcpServers": {
     "conduit-kb": {
-      "command": "conduit",
+      "command": "/Users/you/.local/bin/conduit",
       "args": ["mcp", "kb"]
     }
   }
@@ -304,15 +307,17 @@ Use --json for machine-readable output (used by GUI).`,
 				fmt.Println("────────────────────────────────────────────────────────")
 				fmt.Println("  Run: conduit mcp configure --client <client-name>")
 				fmt.Println()
-				fmt.Println("  Or add manually to client config:")
-				fmt.Println(`  {
+				fmt.Println("  Or add manually to client config, using the ABSOLUTE")
+				fmt.Printf("  path to this binary (%s):\n", setuppkg.ConduitCommand())
+				fmt.Printf(`  {
     "mcpServers": {
       "conduit-kb": {
-        "command": "conduit",
+        "command": %q,
         "args": ["mcp", "kb"]
       }
     }
-  }`)
+  }
+`, setuppkg.ConduitCommand())
 			}
 
 			return nil

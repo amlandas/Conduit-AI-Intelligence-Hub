@@ -25,6 +25,7 @@ import (
 
 	"github.com/simpleflo/conduit/internal/config"
 	"github.com/simpleflo/conduit/internal/kbservice"
+	"github.com/simpleflo/conduit/internal/observability"
 )
 
 // Build information, injected by main.
@@ -158,6 +159,22 @@ func loadConfig() (*config.Config, error) {
 	if msg := config.FormatUnknownKeys(res.File, res.UnknownKeys); msg != "" {
 		fmt.Fprint(os.Stderr, msg)
 	}
+
+	// --log-level is applied HERE, and this is the only place it ever is.
+	//
+	// It was a documented persistent flag whose value was parsed into
+	// cfg.LogLevel, printed by `conduit config show`, and then applied to
+	// nothing: observability.SetupLogging had no caller outside a test, so the
+	// global zerolog level stayed at its zero value and every command emitted
+	// debug JSON on stderr regardless of what the user asked for. That is what
+	// put raw log lines through the middle of the installer's transcript.
+	//
+	// loadConfig is the right seam because it is the single funnel every
+	// command goes through to reach its configuration, and it runs before
+	// kbservice.Open -- which is where the noisy loggers live. It is called
+	// more than once per command; SetupLogging is idempotent.
+	observability.SetupDefaultLogging(res.Config.LogLevel)
+
 	return res.Config, nil
 }
 
