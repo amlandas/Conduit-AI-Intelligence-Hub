@@ -101,7 +101,14 @@ func TestMarkerInAnUnrelatedCommentDoesNotSuppressTheWrite(t *testing.T) {
 			}
 
 			after := readFile(t, e.profile())
-			if !strings.Contains(after, `export PATH="`+prefix) {
+			// Deliberately not matched against a particular quoting style.
+			// The subject here is whether the block was written at all, and
+			// pinning the exact characters made this test fail when the write
+			// was correctly changed from double to single quotes -- the fix for
+			// a prefix containing $( ) executing at every login. What the line
+			// has to do is put the prefix on PATH, which startupPATH below asks
+			// a real shell about.
+			if !strings.Contains(after, "export PATH=") || !strings.Contains(after, prefix) {
 				t.Fatalf("the PATH line was never written; the decoy line suppressed it:\n%s\n--- installer said ---\n%s",
 					after, r.combined)
 			}
