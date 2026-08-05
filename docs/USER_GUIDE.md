@@ -198,6 +198,32 @@ Hybrid mode adapts to what you typed. Quoted phrases push toward exact lexical
 matching; proper nouns boost exact matches; natural-language questions balance
 the two.
 
+### Asking questions
+
+Keyword search requires every word you type to be present in the same chunk, so
+the grammar of a question would otherwise work against you: `how do tokens
+expire` would demand the words "how" and "do" as well as "tokens" and "expire".
+
+Conduit drops that scaffolding from the keyword half of the search — question
+words, `is`/`are`/`do`/`does`, `a`/`the`, and common prepositions and pronouns —
+so these two searches return the same thing:
+
+```bash
+conduit kb search "how do tokens expire"
+conduit kb search "tokens expire"
+```
+
+Three things are worth knowing:
+
+- **Only the keyword half.** Semantic search sees the sentence exactly as you
+  typed it, because there the phrasing genuinely carries meaning.
+- **Quoting overrides it.** If you actually want the word "how", quote it:
+  `conduit kb search '"how" to guide'`.
+- **Nothing else is dropped.** `and`, `or` and `not` are searched for as words,
+  and so are `may`, `must`, `should` and `shall` — they matter too much in
+  specifications to treat as noise. A search made of nothing but question words
+  (`conduit kb search "the"`) searches for those words.
+
 ### Modes
 
 ```bash
@@ -207,6 +233,39 @@ conduit kb search "class AuthProvider" --fts5       # keywords only
 ```
 
 `--semantic` needs an embedding provider. `--fts5` always works.
+
+### Keyword-only mode (no model required)
+
+Semantic search is optional. If you do not want a 260 MB model and a llama.cpp
+install, turn it off once:
+
+```bash
+conduit config set embed.provider none
+```
+
+Everything except vector matching keeps working — `kb add`, `kb sync`,
+`kb search`, natural-language questions, phrase search, every MCP tool.
+`conduit doctor` then reports the embedding checks as
+`ⓘ semantic search disabled by configuration` and exits 0, because this is a
+configuration, not a fault.
+
+What you give up is wording-independent matching: keyword search finds the words
+you typed and their stems (`expire` matches `expires`), but will not connect
+"car" to "automobile".
+
+To turn it on later:
+
+```bash
+conduit config set embed.provider llama-server
+brew install llama.cpp     # macOS; or build from source
+conduit model download
+conduit kb migrate         # embed the documents you already indexed
+```
+
+The last step is not optional. `conduit kb sync` skips files whose contents have
+not changed, so it will not backfill vectors for documents indexed while
+embeddings were off; `conduit kb migrate` embeds exactly those documents. See
+[INSTALL_V2.md](INSTALL_V2.md#keyword-only-mode) for the full picture.
 
 ### Tuning
 
@@ -237,6 +296,34 @@ boilerplate is filtered. `--raw` turns that off.
 If your query matches nothing directly, Conduit relaxes it in stages rather
 than handing back an empty list. Results from a relaxed stage are still real
 matches, just for a looser interpretation of what you asked.
+
+### When a search finds nothing
+
+A genuinely empty result says so and stops:
+
+```
+No results found for: kubernetes ingress
+```
+
+But if the reason is that nothing has been indexed yet, it says that instead:
+
+```
+No results found for: how do tokens expire
+
+Nothing has been indexed yet: these sources have never been synced
+(meeting-notes, project-docs). Run `conduit kb sync` to index them, then search
+again. Until then this result says nothing about whether the content exists.
+```
+
+`conduit kb add` registers a source; `conduit kb sync` indexes it. Skipping the
+second command used to produce a bare "No results found", which is true and
+useless.
+
+The same note is appended to the MCP tool results, under an `index: incomplete`
+heading. That matters more there than here — an AI client reading an empty tool
+result will otherwise tell you, confidently, that your documents do not mention
+what you asked about. `--json` carries it as an added `index_note` key, present
+only when there is something to fix.
 
 ---
 

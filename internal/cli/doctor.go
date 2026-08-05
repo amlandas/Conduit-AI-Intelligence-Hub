@@ -44,7 +44,10 @@ func (c check) icon() string {
 	case checkFail:
 		return "✗"
 	default:
-		return "-"
+		// checkSkip. A deliberately disabled subsystem is information, not an
+		// absence: "-" read as "we could not check this", which is exactly the
+		// wrong impression for embed.provider=none, a supported configuration.
+		return "ⓘ"
 	}
 }
 
@@ -235,15 +238,18 @@ func runDoctor(ctx context.Context, probeTimeout time.Duration) []check {
 	embedInfo := svc.EmbedInfo()
 	switch {
 	case cfg.Embed.Provider == config.EmbedProviderNone:
+		// Not a failure and not a gap in the diagnosis: keyword-only is a
+		// supported mode that a user chooses on purpose.
 		checks = append(checks, check{
 			Name: "embedding provider", Status: checkSkip,
-			Detail: "disabled (embed.provider = none); search is lexical-only",
+			Detail: "semantic search disabled by configuration (embed.provider=none); " +
+				"keyword search is unaffected",
 		})
 	case !embedInfo.Available:
 		checks = append(checks, check{
 			Name: "embedding provider", Status: checkFail,
 			Detail: fmt.Sprintf("%s could not be configured: %s", embedInfo.Provider, embedInfo.Err),
-			Remedy: "fix the provider settings, or set embed.provider to \"none\" for lexical-only search",
+			Remedy: embedRemedy(cfg),
 		})
 	case caps.SemanticAvailable:
 		checks = append(checks, check{
@@ -335,14 +341,24 @@ func probeWritable(ctx context.Context, svc *kbservice.Service) error {
 }
 
 // embedRemedy returns the actionable next step for an unreachable provider.
+// embedRemedy names every route out, including the one that says "I did not
+// want this in the first place".
+//
+// Semantic search is optional. A user who is happy with keyword search should
+// be told here that switching it off is a supported choice with a one-line
+// command, rather than left to conclude that Conduit is broken because a model
+// they never asked for is missing.
 func embedRemedy(cfg *config.Config) string {
+	const noneOptOut = "or, if you only want keyword search, " +
+		"`conduit config set embed.provider none`"
+
 	switch cfg.Embed.Provider {
 	case config.EmbedProviderOllama:
-		return fmt.Sprintf("start Ollama (it should answer at %s), or set embed.provider to \"none\"",
-			cfg.Embed.Ollama.Host)
+		return fmt.Sprintf("start Ollama (it should answer at %s), %s",
+			cfg.Embed.Ollama.Host, noneOptOut)
 	case config.EmbedProviderLlamaServer:
-		return "install llama-server (brew install llama.cpp), run 'conduit model download', " +
-			"or set embed.provider to \"none\" for lexical-only search"
+		return "install llama.cpp (`brew install llama.cpp`) and run " +
+			"`conduit model download`, " + noneOptOut
 	default:
 		return "set embed.provider to \"llama-server\", \"ollama\" or \"none\""
 	}

@@ -3,6 +3,7 @@ package kbservice
 import (
 	"context"
 	"fmt"
+	"reflect"
 
 	"github.com/simpleflo/conduit/internal/kb"
 )
@@ -73,7 +74,54 @@ func NewSearchRequest(query string) SearchRequest {
 // The returned map is a compatibility contract reproduced from the removed
 // daemon's GET /api/v1/kb/search. Keys, nesting and types are identical; do
 // not "clean it up" without versioning the consumers.
+//
+// One key is ADDED, never removed: "index_note" (#97) appears only when the
+// search found nothing AND the knowledge base has a source that was never
+// synced or holds no chunks. Additive keys are safe for the existing consumers,
+// which read the keys they know by name.
 func (s *Service) Search(ctx context.Context, req SearchRequest) (map[string]interface{}, error) {
+	out, err := s.search(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	s.annotateEmptyResult(ctx, out)
+	return out, nil
+}
+
+// annotateEmptyResult attaches indexing guidance to a zero-hit response.
+//
+// It runs only on the empty path, so the extra source query costs nothing on a
+// search that found something.
+func (s *Service) annotateEmptyResult(ctx context.Context, out map[string]interface{}) {
+	if out == nil {
+		return
+	}
+	// "results" is the authority, not "total_hits": total_hits is the FTS5 match
+	// count before the score floor and paging, so it can be non-zero on a
+	// response that shows the user nothing.
+	if !isEmptyResults(out["results"]) {
+		return
+	}
+	if note := s.source.IndexGuidanceNote(ctx); note != "" {
+		out["index_note"] = note
+	}
+}
+
+// isEmptyResults reports whether the "results" value holds nothing, whatever
+// concrete slice type the mode-specific converter produced.
+func isEmptyResults(v interface{}) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice, reflect.Array, reflect.Map:
+		return rv.Len() == 0
+	}
+	return false
+}
+
+func (s *Service) search(ctx context.Context, req SearchRequest) (map[string]interface{}, error) {
 	if req.Query == "" {
 		return nil, fmt.Errorf("query is required")
 	}

@@ -216,13 +216,103 @@ func quoteFTSToken(text string) string {
 	return `"` + strings.ReplaceAll(text, `"`, `""`) + `"`
 }
 
+// ---------------------------------------------------------------------------
+// Query scaffolding (issue #96)
+//
+// FTS5 joins juxtaposed terms with an implicit AND, so every token in a query
+// is a hard conjunct: the chunk must contain all of them. That is the right
+// rule for content words and the wrong rule for the words a human uses to
+// SHAPE a question.
+//
+// "how do tokens expire" became `"how" "do" "tokens" "expire"*` and returned
+// nothing, while "tokens expire" returned the document -- from the same
+// knowledge base, about the same subject. The index cannot help here: kb_fts is
+// created with tokenize='porter unicode61', which has no stopword list, so
+// "how" and "do" are indexed and matched like any other word.
+//
+// Dropping these tokens from the conjunction is monotonically recall-widening:
+// removing a conjunct can only ever return a superset of what the unfiltered
+// query returned, so no query that worked before can start failing. BM25 then
+// ranks on the content words that remain, which is what the user meant.
+//
+// This applies to the LEXICAL leg only. The semantic leg embeds the raw query
+// text, where "how do" is real signal about the shape of the answer wanted, and
+// it must keep seeing the sentence the user typed.
+// ---------------------------------------------------------------------------
+
+// queryScaffoldWords are the words dropped from a lexical conjunction when at
+// least one other token survives.
+//
+// The list is deliberately restricted to interrogatives, the be/do/have
+// auxiliaries, articles, high-frequency prepositions and determiners, and
+// personal pronouns -- the closed-class function words that give a question its
+// grammar. It contains no nouns, verbs or adjectives, because in a technical
+// knowledge base almost any open-class word can be the subject of a document.
+//
+// Deliberately ABSENT:
+//
+//   - and / or / not / near: #75 pins these as literal search terms rather than
+//     FTS5 operators, and a user who types them means them.
+//   - the RFC-2119 modals may / must / should / shall: they are load-bearing
+//     vocabulary in exactly the specification documents Conduit indexes.
+//   - it / its: "IT" is a topic.
+//
+// A user who genuinely wants one of the words below as a search term can quote
+// it; phrase tokens are never dropped.
+var queryScaffoldWords = map[string]bool{
+	// Interrogatives.
+	"how": true, "what": true, "why": true, "when": true, "where": true,
+	"which": true, "who": true, "whom": true, "whose": true,
+	// Auxiliaries and copulas.
+	"do": true, "does": true, "did": true, "is": true, "are": true, "was": true,
+	"were": true, "be": true, "been": true, "being": true, "am": true,
+	"has": true, "have": true, "had": true,
+	// Articles and determiners.
+	"a": true, "an": true, "the": true, "this": true, "that": true,
+	"these": true, "those": true,
+	// High-frequency prepositions and conjunctions of question form.
+	"of": true, "to": true, "in": true, "on": true, "for": true, "with": true,
+	"from": true, "at": true, "by": true, "about": true, "into": true,
+	"than": true, "then": true, "there": true, "here": true, "if": true,
+	// Personal pronouns.
+	"i": true, "me": true, "my": true, "we": true, "our": true, "us": true,
+	"you": true, "your": true, "they": true, "them": true, "their": true,
+	"he": true, "him": true, "his": true, "she": true, "her": true,
+}
+
+// contentFTSTokens drops query-scaffolding words from a lexical token stream.
+//
+// Two invariants make this safe:
+//
+//   - A token the user double-quoted is never dropped. Quoting is how the
+//     existing design (#70, #75) says "I mean this literally", and it is the
+//     escape hatch for anyone searching for the word "how" itself.
+//   - If filtering would leave nothing, the original tokens are returned
+//     unchanged. A search for "the" is a search for "the", not a search for
+//     everything.
+func contentFTSTokens(toks []ftsToken) []ftsToken {
+	kept := make([]ftsToken, 0, len(toks))
+	for _, tk := range toks {
+		if !tk.phrase && queryScaffoldWords[strings.ToLower(tk.text)] {
+			continue
+		}
+		kept = append(kept, tk)
+	}
+	if len(kept) == 0 {
+		return toks
+	}
+	return kept
+}
+
 // sanitizeFTSQuery turns user text into a safe FTS5 MATCH expression.
 //
 // Tokens are joined with a space, which FTS5 reads as an implicit AND -- the
 // same semantics the old sanitizer produced. The result is either a valid
 // expression or the empty string, never something FTS5 will reject.
+//
+// Query scaffolding is dropped first: see contentFTSTokens and #96.
 func sanitizeFTSQuery(query string) string {
-	toks := splitFTSQuery(query)
+	toks := contentFTSTokens(splitFTSQuery(query))
 	parts := make([]string, 0, len(toks))
 	for _, tk := range toks {
 		parts = append(parts, quoteFTSToken(tk.text))
@@ -234,8 +324,11 @@ func sanitizeFTSQuery(query string) string {
 // token, so that a partially typed last word still matches.
 //
 // A token the user quoted is left exact: they asked for that literal text.
+//
+// Query scaffolding is dropped first (#96), so the wildcard lands on the last
+// CONTENT word rather than on a trailing "the".
 func (s *Searcher) prepareFTSQuery(query string) string {
-	toks := splitFTSQuery(query)
+	toks := contentFTSTokens(splitFTSQuery(query))
 	if len(toks) == 0 {
 		return ""
 	}

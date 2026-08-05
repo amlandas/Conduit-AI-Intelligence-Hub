@@ -501,6 +501,14 @@ Examples:
 
 			if len(results) == 0 {
 				fmt.Printf("No results found for: %s\n", query)
+				// #97: "no results" from a knowledge base that was never
+				// indexed is not an answer, it is a missing step. kbservice
+				// sets index_note only when there is genuinely something to
+				// fix; a populated knowledge base that simply does not contain
+				// the query still gets the bare line above.
+				if note, _ := resp["index_note"].(string); note != "" {
+					fmt.Printf("\n%s\n", note)
+				}
 				return nil
 			}
 
