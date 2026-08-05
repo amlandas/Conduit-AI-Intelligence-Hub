@@ -234,6 +234,39 @@ conduit kb search "class AuthProvider" --fts5       # keywords only
 
 `--semantic` needs an embedding provider. `--fts5` always works.
 
+### Keyword-only mode (no model required)
+
+Semantic search is optional. If you do not want a 260 MB model and a llama.cpp
+install, turn it off once:
+
+```bash
+conduit config set embed.provider none
+```
+
+Everything except vector matching keeps working — `kb add`, `kb sync`,
+`kb search`, natural-language questions, phrase search, every MCP tool.
+`conduit doctor` then reports the embedding checks as
+`ⓘ semantic search disabled by configuration` and exits 0, because this is a
+configuration, not a fault.
+
+What you give up is wording-independent matching: keyword search finds the words
+you typed and their stems (`expire` matches `expires`), but will not connect
+"car" to "automobile".
+
+To turn it on later:
+
+```bash
+conduit config set embed.provider llama-server
+brew install llama.cpp     # macOS; or build from source
+conduit model download
+conduit kb migrate         # embed the documents you already indexed
+```
+
+The last step is not optional. `conduit kb sync` skips files whose contents have
+not changed, so it will not backfill vectors for documents indexed while
+embeddings were off; `conduit kb migrate` embeds exactly those documents. See
+[INSTALL_V2.md](INSTALL_V2.md#keyword-only-mode) for the full picture.
+
 ### Tuning
 
 ```bash

@@ -314,16 +314,49 @@ brew install llama.cpp          # macOS
 `conduit doctor` reports the model file and the `llama-server` binary
 separately, because they fail for different reasons and have different fixes.
 
-### Running without embeddings
+### Keyword-only mode
 
-Entirely supported:
+**You do not need a model.** Semantic search is optional. If keyword search is
+enough for you, say so once and Conduit will stop asking:
 
 ```bash
 conduit config set embed.provider none
 ```
 
-Search then uses FTS5 keyword matching only. No model is downloaded, no port is
-opened, and no process is spawned.
+That is the whole setup. No model is downloaded (saving ~260 MB), llama.cpp is
+not required, no port is opened and no process is spawned. `conduit doctor`
+reports the embedding checks as `ⓘ ... disabled by configuration` and exits 0 —
+this is a supported configuration, not a broken one.
+
+**What still works.** Everything except vector matching: `kb add`, `kb sync`,
+`kb search`, every MCP tool, natural-language questions, phrase search, source
+filters, `--context`, ranking by BM25.
+
+**What you give up.** Only wording-independent matching. Keyword search finds
+the words you typed (plus their stems — a search for `expire` matches
+`expires`); it will not connect "car" to "automobile" or "auth token" to
+"credential". Search results carry no degraded-mode warning in this mode,
+because nothing is degraded.
+
+**Enabling semantic search later.** Three steps, and the third one matters:
+
+```bash
+conduit config set embed.provider llama-server
+brew install llama.cpp          # macOS; or build from source
+conduit model download
+conduit kb migrate              # embed the documents you already indexed
+```
+
+`conduit kb migrate` is required. A plain `conduit kb sync` compares each file's
+content hash against what is already indexed and skips anything unchanged, so it
+will not backfill vectors for documents that were ingested while embeddings were
+off. `kb migrate` walks the documents that are in the full-text index and have no
+vector, and embeds exactly those. (`conduit kb sync --rebuild-vectors` also
+works, by re-indexing everything from scratch; `migrate` is the cheaper route.)
+
+Going the other way — back to `embed.provider none` — needs no cleanup. The
+vectors stay in the database, unused, and become live again if you re-enable a
+provider.
 
 ---
 

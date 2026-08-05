@@ -249,6 +249,69 @@ func TestDoctorReportsMissingModel(t *testing.T) {
 	if !strings.Contains(out, "conduit model download") {
 		t.Errorf("doctor does not name the download command:\n%s", out)
 	}
+	// #98 addendum: "install the thing you did not ask for" is not the only
+	// route out. A user who wants keyword search must be told, here, that
+	// turning semantic search off is a supported choice.
+	if !strings.Contains(out, "conduit config set embed.provider none") {
+		t.Errorf("doctor does not offer the keyword-only opt-out:\n%s", out)
+	}
+}
+
+// TestDoctorIsHealthyWithEmbeddingsDisabled: choosing keyword-only search is a
+// configuration, not a fault.
+//
+// The failure mode this guards against is a user running `conduit doctor` after
+// deliberately setting embed.provider=none and being told their installation is
+// broken -- which would push them into downloading a 260MB model they have no
+// use for.
+func TestDoctorIsHealthyWithEmbeddingsDisabled(t *testing.T) {
+	env := newTestEnv(t) // sets CONDUIT_EMBED_PROVIDER=none
+
+	out, _ := env.run(t, "doctor", "--json")
+
+	var payload struct {
+		Checks []struct {
+			Name   string `json:"name"`
+			Status string `json:"status"`
+			Detail string `json:"detail"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal([]byte(out), &payload); err != nil {
+		t.Fatalf("parse doctor --json: %v\n%s", err, out)
+	}
+
+	// Nothing embedding-related may be reported as a failure.
+	for _, c := range payload.Checks {
+		switch c.Name {
+		case "embedding provider", "embedding model", "vector index":
+			if c.Status == "fail" {
+				t.Errorf("%s reported %q with embed.provider=none: %s",
+					c.Name, c.Status, c.Detail)
+			}
+		}
+	}
+
+	var provider string
+	for _, c := range payload.Checks {
+		if c.Name == "embedding provider" {
+			provider = c.Detail
+			if c.Status != "skip" {
+				t.Errorf("embedding provider status = %q, want skip", c.Status)
+			}
+		}
+	}
+	if !strings.Contains(provider, "disabled by configuration") {
+		t.Errorf("the reason is not stated as a configuration choice: %q", provider)
+	}
+
+	// And the human rendering must not read as an unchecked gap.
+	human, code := env.run(t, "doctor")
+	if code != 0 {
+		t.Errorf("doctor exited %d with embed.provider=none:\n%s", code, human)
+	}
+	if !strings.Contains(human, "embed.provider=none") {
+		t.Errorf("doctor does not name the setting responsible:\n%s", human)
+	}
 }
 
 // With embeddings off, the model check must be a skip rather than a failure:

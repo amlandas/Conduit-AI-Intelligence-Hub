@@ -111,9 +111,9 @@ Examples:
 	globalFlags = root.PersistentFlags()
 
 	// Applied before every command body, whatever route that command takes to
-	// its configuration. See applyLogLevel.
+	// its configuration. See applyLogging.
 	root.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		applyLogLevel()
+		applyLogging(cmd)
 	}
 
 	root.AddCommand(kbCmd())
@@ -169,10 +169,13 @@ func loadConfig() (*config.Config, error) {
 	return res.Config, nil
 }
 
-// applyLogLevel configures the global logger from --log-level.
+// mcpStdioCommandPath is the one command whose stderr is machine-facing.
+const mcpStdioCommandPath = "conduit mcp kb"
+
+// applyLogging configures the global logger from --log-level and log_format.
 //
-// --log-level was a documented persistent flag that was applied to nothing:
-// observability.SetupLogging had no caller outside a test, so the global
+// --log-level was a documented persistent flag that was applied to nothing
+// (#95): observability.SetupLogging had no caller outside a test, so the global
 // zerolog level stayed at its zero value and every command emitted debug JSON
 // onto stderr whatever the user asked for. That is what put raw log lines
 // through the middle of the installer's transcript.
@@ -184,14 +187,52 @@ func loadConfig() (*config.Config, error) {
 // from kbservice.Open. A persistent hook is the one place that runs before
 // EVERY command body regardless of how that command gets its configuration.
 //
+// #98 added the second half: getting the level right does not help if the
+// surviving lines are unreadable. See resolveLogFormat.
+//
 // A config file too broken to load must not stop the command: `conduit doctor`
-// exists to diagnose exactly that. The default level is used instead.
-func applyLogLevel() {
-	level := config.DefaultConfig().LogLevel
-	if res, err := config.LoadWithFlags(globalFlags); err == nil && res.Config.LogLevel != "" {
-		level = res.Config.LogLevel
+// exists to diagnose exactly that. The defaults are used instead.
+func applyLogging(cmd *cobra.Command) {
+	def := config.DefaultConfig()
+	level, format := def.LogLevel, def.LogFormat
+
+	if res, err := config.LoadWithFlags(globalFlags); err == nil {
+		if res.Config.LogLevel != "" {
+			level = res.Config.LogLevel
+		}
+		if res.Config.LogFormat != "" {
+			format = res.Config.LogFormat
+		}
 	}
-	observability.SetupDefaultLogging(level)
+
+	observability.SetupLogging(level, resolveLogFormat(format, level, cmd), os.Stderr)
+}
+
+// resolveLogFormat turns the configured log_format into a concrete format.
+//
+// "auto" -- the default -- means JSON in the two contexts where a machine or a
+// maintainer is reading, and human-readable console output everywhere else:
+//
+//   - `conduit mcp kb`. Its stderr is read by an AI client's process
+//     supervisor, and its stdout is the MCP frame stream. Nothing here should
+//     ever become prettier at the cost of being parseable, and
+//     TestMCPKBStdoutIsProtocolPureUnderDebugLogging pins the stdout half.
+//   - --log-level debug (or trace). Debug output exists to be pasted into a bug
+//     report, where the timestamp, caller and component fields are the point.
+//
+// An explicit "json", "console" or "text" in the config file or CONDUIT_LOG_FORMAT
+// wins over all of it, because someone who set it meant it.
+func resolveLogFormat(format, level string, cmd *cobra.Command) string {
+	if format != config.LogFormatAuto && format != "" {
+		return format
+	}
+	if cmd != nil && cmd.CommandPath() == mcpStdioCommandPath {
+		return observability.LogFormatJSON
+	}
+	if level == "debug" || level == "trace" {
+		return observability.LogFormatJSON
+	}
+	return observability.LogFormatConsole
 }
 
 // kbPath returns the knowledge base file path, honouring --db, and makes sure

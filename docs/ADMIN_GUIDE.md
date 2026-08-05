@@ -139,11 +139,36 @@ Complete schema, with defaults.
 ```yaml
 data_dir: ~/.conduit          # root of everything Conduit owns
 db_path: ""                   # "" means <data_dir>/conduit.db
-log_level: info               # debug, info, warn, error
-log_format: json              # json or console
+log_level: warn               # debug, info, warn, error
+log_format: auto              # auto, console, json
 ```
 
 `db_path` is the workspace-isolation seam; the `--db` flag binds to it.
+
+#### Logging
+
+`log_level` defaults to `warn` because every Conduit command narrates itself:
+`kb add` prints what it added, `kb sync` prints its progress, `kb search` prints
+its results. Info-level lines duplicate that in a second voice. Warnings do not
+duplicate anything — "embedding provider unavailable; retrieval is
+lexical-only" silently changes what search can do — so warnings and errors are
+on by default.
+
+`log_format: auto` resolves to:
+
+| Context | Format | Why |
+|---|---|---|
+| `conduit mcp kb` | `json` | its stderr is read by an AI client's process supervisor |
+| `--log-level debug` (or `trace`) | `json` | debug output exists to be pasted into a bug report |
+| everything else | `console` | a person is reading it |
+
+Console output is one line per event: severity, message, and any error, with no
+timestamp, caller or component field. Colour is used only when stderr is a
+terminal; `NO_COLOR` and `TERM=dumb` disable it.
+
+Setting `log_format` explicitly to `console` or `json` overrides all of the
+above. `--log-level` and `CONDUIT_LOG_LEVEL` / `CONDUIT_LOG_FORMAT` work as
+documented in the precedence rules above.
 
 ### Knowledge base ingestion
 

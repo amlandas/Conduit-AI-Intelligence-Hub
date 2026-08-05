@@ -20,11 +20,27 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.DataDir == "" {
 		t.Error("DataDir should not be empty")
 	}
-	if cfg.LogLevel != "info" {
-		t.Errorf("LogLevel should be 'info', got %s", cfg.LogLevel)
+	// CHANGED DELIBERATELY for #98, from "info"/"json".
+	//
+	// info: every info-level line in the codebase narrates something the
+	// command is already printing for itself ("✓ Added source", sync progress,
+	// search results), so at info the user reads everything twice -- once in
+	// English and once as JSON. Warnings are the opposite: "embedding provider
+	// unavailable; retrieval is lexical-only" silently changes what search can
+	// do and must be seen. Warnings and errors on by default; narration off.
+	//
+	// json -> auto: log_format was a schema field nothing read, because every
+	// caller went through SetupDefaultLogging, which hardcoded "json". "auto"
+	// means console for an interactive command and JSON where a machine or a
+	// maintainer is reading -- `conduit mcp kb`, and --log-level debug.
+	//
+	// Both are still fully overridable by config file, CONDUIT_LOG_LEVEL /
+	// CONDUIT_LOG_FORMAT, and --log-level.
+	if cfg.LogLevel != "warn" {
+		t.Errorf("LogLevel should be 'warn', got %s", cfg.LogLevel)
 	}
-	if cfg.LogFormat != "json" {
-		t.Errorf("LogFormat should be 'json', got %s", cfg.LogFormat)
+	if cfg.LogFormat != LogFormatAuto {
+		t.Errorf("LogFormat should be %q, got %s", LogFormatAuto, cfg.LogFormat)
 	}
 }
 

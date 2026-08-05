@@ -58,6 +58,11 @@ const (
 	EmbedProviderNone = "none"
 )
 
+// LogFormatAuto is the default log_format: human-readable console output for an
+// interactive command, structured JSON for `conduit mcp kb` and for
+// --log-level debug. See internal/cli.resolveLogFormat and issue #98.
+const LogFormatAuto = "auto"
+
 // expandPath expands ~ to the user's home directory.
 func expandPath(path string) string {
 	if path == "" {
@@ -322,9 +327,34 @@ func DefaultConfig() *Config {
 	dataDir := filepath.Join(homeDir, ".conduit")
 
 	return &Config{
-		DataDir:   dataDir,
-		LogLevel:  "info",
-		LogFormat: "json",
+		DataDir: dataDir,
+
+		// warn, not info (#98).
+		//
+		// Conduit's commands narrate themselves: `kb add` prints
+		// "✓ Added source", `kb sync` prints its progress, `kb search` prints
+		// its results. Everything the library logs at info level duplicates
+		// that narration in a second, uglier voice, and the duplication was
+		// running through the middle of the installer's transcript.
+		//
+		// Warnings are the opposite case: "embedding provider unavailable;
+		// retrieval is lexical-only" is something the user must see, because it
+		// silently changes what search can do. Warnings and errors are on by
+		// default; progress narration is not. `--log-level info` brings it back
+		// and `--log-level debug` brings back everything, as JSON.
+		LogLevel: "warn",
+
+		// auto, not json (#98).
+		//
+		// Structured JSON is right for a machine and wrong for a terminal.
+		// "auto" resolves to console for an interactive command and to JSON for
+		// `conduit mcp kb`, whose stderr is read by a process supervisor, and
+		// for --log-level debug, whose output belongs in a bug report. An
+		// explicit "json", "console" or "text" overrides the choice.
+		//
+		// Before this, log_format was a schema field nothing read: every caller
+		// went through SetupDefaultLogging, which hardcoded "json".
+		LogFormat: LogFormatAuto,
 
 		KB: KBConfig{
 			Workers:       4,

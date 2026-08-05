@@ -69,8 +69,21 @@ var wellKnownBinaryDirs = []string{
 }
 
 // installHint is the actionable remedy attached to ErrBinaryNotFound.
-const installHint = "install it with `brew install llama.cpp` (macOS) or build llama.cpp from source, " +
-	"then re-run; alternatively set kb.embed.binary_path in ~/.conduit/conduit.yaml to an explicit llama-server path"
+//
+// It names three routes, not two. A user who does not want semantic search --
+// keyword search alone needs no model, no sidecar and no port -- was previously
+// told only how to install something they did not want, and had no way to learn
+// that turning it off was a supported choice rather than a failure to configure.
+//
+// The config key was also wrong: it read "kb.embed.binary_path", which is not a
+// key Conduit has. The real one is embed.llama_server.binary (see
+// config.LlamaServerConfig), and `conduit config set` is the way to write it.
+const installHint = "either install llama.cpp (`brew install llama.cpp` on macOS, " +
+	"or build it from source) and re-run; " +
+	"or point Conduit at an existing binary with " +
+	"`conduit config set embed.llama_server.binary /path/to/llama-server`; " +
+	"or, if you only want keyword search, turn semantic search off with " +
+	"`conduit config set embed.provider none`"
 
 // ManagerConfig configures the llama-server sidecar manager.
 type ManagerConfig struct {

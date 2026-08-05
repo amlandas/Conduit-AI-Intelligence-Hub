@@ -113,7 +113,14 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 		var embErr error
 		embeddings, embErr = idx.semantic.EmbedChunks(ctx, chunksWithIDs)
 		if embErr != nil {
-			idx.logger.Warn().
+			// Info, not Warn (#98). This fires once PER DOCUMENT, and the one
+			// cause that matters -- no embedding provider -- makes it fire for
+			// every document in the sync. A thousand identical lines is not a
+			// warning, it is a wall. semanticErrors is counted here and `kb
+			// sync` reports the aggregate ("Semantic indexing failed for N
+			// documents") along with what to do about it; the per-document
+			// detail is available at --log-level info.
+			idx.logger.Info().
 				Err(embErr).
 				Str("document_id", doc.DocumentID).
 				Msg("embedding failed, indexing lexical content only")
