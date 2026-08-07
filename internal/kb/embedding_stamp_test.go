@@ -881,11 +881,68 @@ func TestStamp_CapabilitiesReportTheModelThatBuiltTheVectors(t *testing.T) {
 	}
 }
 
+// TestStamp_CapabilitiesWithdrawnOnWidthOnlyMismatch pins F1.
+//
+// DetectCapabilities built the active identity with a zero width, so Compare's
+// width branch could never fire there. The SAME model at two widths therefore
+// reported "semantic search: available" while every search refused — the #107
+// defect reproduced in the status line that is supposed to report it.
+func TestStamp_CapabilitiesWithdrawnOnWidthOnlyMismatch(t *testing.T) {
+	ctx := context.Background()
+	db, vi := newStampedIndex(t, embed.ModelNomicEmbedTextV15)
+	if err := writeOnePoint(t, db, vi, "chunk-1", 0); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Same model, half the width: a Matryoshka-truncation swap.
+	narrow := &sizedProbe{model: embed.ModelNomicEmbedTextV15, dim: stampDim / 2}
+	caps := DetectCapabilities(ctx, db, narrow)
+	if caps.SemanticAvailable {
+		t.Error("SemanticAvailable = true for a width the stored vectors cannot be compared against")
+	}
+	if caps.SearchMode() != "fts5" {
+		t.Errorf("SearchMode() = %q, want fts5", caps.SearchMode())
+	}
+
+	// The guard agrees, which is the property that matters: a status line must
+	// never claim a capability the engine refuses to exercise.
+	sameWidth := indexOver(t, db, NewEmbeddingIdentity(
+		embed.ModelNomicEmbedTextV15, "test", stampDim/2, embed.PrefixSchemeNone))
+	if _, err := sameWidth.Search(ctx, unitVector(stampDim/2, 0), VectorSearchOptions{Limit: 5}); !errors.Is(err, ErrEmbeddingModelMismatch) {
+		t.Fatalf("search at the narrower width: err = %v, want ErrEmbeddingModelMismatch", err)
+	}
+
+	// And the matching width is still reported as available, so the fix did not
+	// simply make the check pessimistic.
+	wide := &sizedProbe{model: embed.ModelNomicEmbedTextV15, dim: stampDim}
+	if caps := DetectCapabilities(ctx, db, wide); !caps.SemanticAvailable {
+		t.Error("SemanticAvailable = false when the widths agree")
+	}
+
+	// A probe that cannot report a width falls back to the name-only
+	// comparison rather than guessing, which keeps this no stricter than the
+	// guard it describes.
+	if caps := DetectCapabilities(ctx, db, &stampProbe{model: embed.ModelNomicEmbedTextV15}); !caps.SemanticAvailable {
+		t.Error("SemanticAvailable = false for a probe that cannot report its width")
+	}
+}
+
 // stampProbe is the minimal EmbedProbe: a model name and a healthy provider.
 type stampProbe struct{ model string }
 
 func (p *stampProbe) Model() string                     { return p.model }
 func (p *stampProbe) HealthCheck(context.Context) error { return nil }
+
+// sizedProbe is a probe that can also report its vector width, as every
+// production embedder (kb.Embedder) can.
+type sizedProbe struct {
+	model string
+	dim   int
+}
+
+func (p *sizedProbe) Model() string                     { return p.model }
+func (p *sizedProbe) Dimension() int                    { return p.dim }
+func (p *sizedProbe) HealthCheck(context.Context) error { return nil }
 
 // ---------------------------------------------------------------------------
 // Schema parity
