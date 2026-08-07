@@ -8,6 +8,7 @@ package cli
 // vectors were never stamped.
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -149,6 +150,48 @@ func TestDoctor_EmbedStampStates(t *testing.T) {
 				t.Error("no icon for this state")
 			}
 		})
+	}
+}
+
+// TestKBStats_ReportsVectorsAndModel pins F8. `kb stats` reported chunk counts
+// and said nothing about how many of them were searchable by meaning, or by
+// which model — leaving out the fact most likely to be wrong.
+func TestKBStats_ReportsVectorsAndModel(t *testing.T) {
+	env := newTestEnv(t)
+	env.mustRun(t, "kb", "add", corpus(t), "--name", "docs")
+	env.mustRun(t, "kb", "sync")
+
+	out := env.mustRun(t, "kb", "stats")
+	// embed.provider=none in this harness, so there is no vector space to
+	// describe and the section is correctly silent rather than misleading.
+	if strings.Contains(out, "Vectors:") {
+		t.Errorf("kb stats described a vector space in lexical-only mode:\n%s", out)
+	}
+	for _, want := range []string{"Documents:", "Chunks:"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("kb stats no longer reports %q:\n%s", want, out)
+		}
+	}
+}
+
+// TestKBSearch_JSONCarriesNoDegradedKeysWhenHealthy guards the contract half of
+// F5: the new keys are additive and absent when nothing failed, so the shapes
+// scripts already parse are unchanged.
+func TestKBSearch_JSONCarriesNoDegradedKeysWhenHealthy(t *testing.T) {
+	env := newTestEnv(t)
+	env.mustRun(t, "kb", "add", corpus(t), "--name", "docs")
+	env.mustRun(t, "kb", "sync")
+
+	out := env.mustRun(t, "kb", "search", "authentication", "--json")
+	var resp map[string]interface{}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &resp); err != nil {
+		t.Fatalf("kb search --json invalid: %v\n%s", err, out)
+	}
+	if _, present := resp["degraded"]; present {
+		t.Errorf(`"degraded" present on a healthy lexical-only search: %v`, resp["degraded"])
+	}
+	if _, present := resp["note"]; present {
+		t.Errorf(`"note" present on a healthy lexical-only search: %v`, resp["note"])
 	}
 }
 

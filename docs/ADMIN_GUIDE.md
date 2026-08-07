@@ -400,7 +400,7 @@ The stamp is what closes that (issue #107).
 | Semantic search | The semantic leg is skipped. The response carries a note naming both models and the remedy. |
 | Keyword search | Unaffected. |
 | `kb sync --rebuild-vectors` (all sources) | Discards the old vectors, rebuilds, and re-stamps. |
-| `kb sync --rebuild-vectors <source>` | Leaves the mismatch in place — rebuilding one source would leave the rest in the old model's space. Use the whole-knowledge-base form. |
+| `kb sync --rebuild-vectors <source>` | **Refused, before anything is deleted.** Re-indexing a document deletes its vectors before writing the replacements, and the replacements are what the guard refuses — so running it would destroy usable vectors and put nothing back. Rebuilding one source could not fix the mismatch anyway: the others would stay in the old model's space. The error names the whole-knowledge-base form. |
 | `kb migrate` | Detects the change and re-embeds everything, rather than backfilling into a mixed index. |
 
 **Model identity is canonical, not literal**
@@ -428,22 +428,32 @@ to another unregistered one, will not be caught. Adding the model to the
 registry, or watching for the warning in `conduit doctor`, is the mitigation.
 
 A width change is always a mismatch regardless of model name, because two
-widths are never comparable.
+widths are never comparable. This is checked first and unconditionally, so it
+holds even when neither identifier is in the registry.
 
 **Upgrading a knowledge base built before 2.0.0-beta.5**
 
 Such a knowledge base has vectors and no stamp. On the first open with a build
-that stamps, Conduit adopts the currently configured model as the stamp, if and
-only if the stored vector width matches that model's, and logs one
-informational line saying it has assumed this. `conduit doctor` marks the stamp
-`(assumed: ...)` afterwards.
+that stamps, Conduit always records something — what it records depends on
+whether the stored vector width matches the model configured now:
 
-The assumption is necessary. Without it, the first write after the upgrade
-would stamp the knowledge base with whatever model was configured then —
-blessing exactly the mixture the stamp exists to prevent. It is also
-falsifiable: **if you changed embedding model before upgrading, run
-`conduit kb sync --rebuild-vectors` once.** No information exists on disk that
-could tell Conduit this had happened.
+| Stored width | What is stamped | Effect |
+|---|---|---|
+| Matches the configured model | That model, marked as an assumption | Normal operation; `conduit doctor` shows `(assumed: ...)` |
+| Does not match | An unnamed identity carrying the width actually found | Mismatch: writes refuse, doctor reports ✗, `kb migrate` rebuilds |
+
+Stamping in the second case matters more than it looks. Those vectors
+demonstrably did not come from the configured model, and recording nothing
+would leave the knowledge base looking unstamped — which reads as "nothing to
+compare", so the next write would be accepted and would stamp the knowledge
+base with the current model on top of vectors that can never be read again.
+
+The assumption in the first case is necessary for the same reason. Without it,
+the first write after the upgrade would stamp the knowledge base with whatever
+model was configured then — blessing exactly the mixture the stamp exists to
+prevent. It is also falsifiable: **if you changed embedding model before
+upgrading, run `conduit kb sync --rebuild-vectors` once.** No information
+exists on disk that could tell Conduit this had happened.
 
 **Instruction prefixes are recorded too**
 

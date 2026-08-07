@@ -589,13 +589,14 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 		degradedNotes = append(degradedNotes, "Lexical search failed: "+ftsErr.Error())
 	}
 	if semErr != nil {
-		// A model change gets its own line. The generic one reads as a transient
-		// fault -- "failed, using FTS5 only" invites a retry -- and stacks the
-		// wrapped error text on top of a message that already says everything
-		// worth saying.
+		// A model change is reported in the RESULT, to every frontend, by the
+		// degraded note below -- so logging it here as well would print it to a
+		// CLI user twice. Debug keeps it available when someone is actually
+		// debugging. The generic failure stays at warn because its note does not
+		// carry the underlying error, and that detail has to live somewhere.
 		var mismatch *ModelMismatchError
 		if errors.As(semErr, &mismatch) {
-			hs.logger.Warn().Msg(mismatch.Note())
+			hs.logger.Debug().Err(semErr).Msg("semantic leg skipped: embedding model changed")
 		} else {
 			hs.logger.Warn().Err(semErr).Msg("semantic search failed, using FTS5 only")
 		}
@@ -1192,7 +1193,10 @@ func (hs *HybridSearcher) searchSemanticOnly(ctx context.Context, query string, 
 		// is completely unaffected -- and carry the explanation with it.
 		var mismatch *ModelMismatchError
 		if errors.As(err, &mismatch) {
-			hs.logger.Warn().Err(err).Msg("semantic search refused: embedding model changed")
+			// Debug, for the same reason as in searchFusion: the note below
+			// reaches every frontend, and repeating it in the log prints it to a
+			// CLI user twice.
+			hs.logger.Debug().Err(err).Msg("semantic leg skipped: embedding model changed")
 			out := hs.searchFTSOnly(ctx, query, opts)
 			out.DegradedMode = true
 			out.Note = strings.TrimSpace(mismatch.Note() + " " + out.Note)

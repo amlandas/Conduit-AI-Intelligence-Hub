@@ -2,6 +2,7 @@ package kbservice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -75,10 +76,15 @@ func NewSearchRequest(query string) SearchRequest {
 // daemon's GET /api/v1/kb/search. Keys, nesting and types are identical; do
 // not "clean it up" without versioning the consumers.
 //
-// One key is ADDED, never removed: "index_note" (#97) appears only when the
-// search found nothing AND the knowledge base has a source that was never
-// synced or holds no chunks. Additive keys are safe for the existing consumers,
-// which read the keys they know by name.
+// Keys are ADDED, never removed. Additive keys are safe for the existing
+// consumers, which read the keys they know by name:
+//
+//	index_note  (#97)  the search found nothing AND a source was never synced
+//	degraded    (#107) a retrieval strategy did not run
+//	note        (#107) why, in one sentence, with the remedy
+//
+// The last two were previously visible only to the MCP server, which meant the
+// CLI could not tell a user that half the engine had been switched off.
 func (s *Service) Search(ctx context.Context, req SearchRequest) (map[string]interface{}, error) {
 	out, err := s.search(ctx, req)
 	if err != nil {
@@ -133,6 +139,15 @@ func (s *Service) search(ctx context.Context, req SearchRequest) (map[string]int
 		}
 		result, err := s.semantic.Search(ctx, req.Query, s.semanticOpts(req))
 		if err != nil {
+			// A model change is not a transient failure and no retry can clear
+			// it. Returning an error here would tell a CLI user their knowledge
+			// base is broken while an MCP client asking the same question got
+			// results plus an explanation -- the two frontends are peers and
+			// must not answer the same condition differently.
+			var mismatch *kb.ModelMismatchError
+			if errors.As(err, &mismatch) {
+				return s.lexicalFallback(ctx, req, mismatch.Note())
+			}
 			return nil, fmt.Errorf("semantic search failed: %w", err)
 		}
 		if req.Raw {
@@ -164,7 +179,7 @@ func (s *Service) search(ctx context.Context, req SearchRequest) (map[string]int
 			return nil, fmt.Errorf("hybrid search failed: %w", err)
 		}
 		if req.Raw {
-			return map[string]interface{}{
+			return withDegradedNote(map[string]interface{}{
 				"results":        result.Results,
 				"total_hits":     result.TotalHits,
 				"query":          result.Query,
@@ -174,10 +189,63 @@ func (s *Service) search(ctx context.Context, req SearchRequest) (map[string]int
 				"semantic_hits":  result.SemanticHits,
 				"query_analysis": result.QueryAnalysis,
 				"processed":      false,
-			}, nil
+			}, result), nil
 		}
-		return processHybridResult(result), nil
+		return withDegradedNote(processHybridResult(result), result), nil
 	}
+}
+
+// withDegradedNote adds the degraded-mode signal to a hybrid response.
+//
+// The MCP server has surfaced this since #75, as the "retrieval: degraded"
+// banner. The CLI never has -- in human output or in --json -- so a scripted
+// consumer could not tell a search that ran on one leg from one that ran on
+// two, and a person only saw it if a log line happened to be above their log
+// level. The keys are additive, and absent entirely when nothing failed, so
+// existing consumers are unaffected.
+func withDegradedNote(out map[string]interface{}, result *kb.HybridSearchResult) map[string]interface{} {
+	if result == nil || !result.DegradedMode {
+		return out
+	}
+	out["degraded"] = true
+	if result.Note != "" {
+		out["note"] = result.Note
+	}
+	return out
+}
+
+// lexicalFallback answers a semantic-mode request from the lexical index when
+// the semantic leg cannot run, carrying the reason with it.
+//
+// It mirrors what HybridSearcher.searchSemanticOnly does for the MCP server, so
+// that "I asked for semantic search and the model had changed" produces the
+// same behaviour whichever frontend asked.
+//
+// search_mode reports "fts5" because that is what actually ran. Claiming
+// "semantic" would be the same class of lie as the stats field this whole work
+// item started from.
+func (s *Service) lexicalFallback(ctx context.Context, req SearchRequest, note string) (map[string]interface{}, error) {
+	result, err := s.searcher.Search(ctx, req.Query, s.ftsOpts(req))
+	if err != nil {
+		return nil, fmt.Errorf("fts5 search failed: %w", err)
+	}
+
+	var out map[string]interface{}
+	if req.Raw {
+		out = map[string]interface{}{
+			"results":     result.Results,
+			"total_hits":  result.TotalHits,
+			"query":       result.Query,
+			"search_time": result.SearchTime,
+			"search_mode": SearchModeFTS5,
+			"processed":   false,
+		}
+	} else {
+		out = processFTS5Result(result, SearchModeFTS5)
+	}
+	out["degraded"] = true
+	out["note"] = note
+	return out, nil
 }
 
 // hybridOpts builds hybrid options from RAG config plus request overrides.

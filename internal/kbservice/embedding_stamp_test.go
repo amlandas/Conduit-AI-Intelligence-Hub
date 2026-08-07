@@ -201,6 +201,84 @@ func TestSearch_HybridDegradesAfterModelChange(t *testing.T) {
 	}
 }
 
+// TestSearch_DegradedNoteReachesEveryMode pins F5 and F7 together: the reason a
+// leg is missing is in the RESULT, so every frontend can show it, and asking
+// for semantic search explicitly does not turn a degraded answer into an error.
+//
+// Before this, the note existed only inside the MCP server's banner. A CLI user
+// saw a shorter result list with no explanation, `--json` carried nothing at
+// all, and `kb search --semantic` failed outright where the MCP server's
+// mode=semantic degraded — the same condition answered two different ways by
+// two frontends that are supposed to be peers.
+func TestSearch_DegradedNoteReachesEveryMode(t *testing.T) {
+	ctx := context.Background()
+	svc := openTestService(t, testConfig(t))
+	useFakeEmbedder(t, svc, embed.ModelNomicEmbedTextV15)
+	seedIndexedCorpus(t, svc)
+	useFakeEmbedder(t, svc, embed.ModelMxbaiEmbedLargeV1)
+
+	modes := []struct {
+		name string
+		req  SearchRequest
+	}{
+		{"hybrid", SearchRequest{Query: "authentication", Limit: 5, MinScore: Unset}},
+		{"hybrid raw", SearchRequest{Query: "authentication", Limit: 5, MinScore: Unset, Raw: true}},
+		{"semantic", SearchRequest{Query: "authentication", Mode: SearchModeSemantic, Limit: 5, MinScore: Unset}},
+		{"semantic raw", SearchRequest{Query: "authentication", Mode: SearchModeSemantic, Limit: 5, MinScore: Unset, Raw: true}},
+	}
+
+	for _, tc := range modes {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := svc.Search(ctx, tc.req)
+			if err != nil {
+				t.Fatalf("search returned an error instead of degrading: %v", err)
+			}
+			if degraded, _ := out["degraded"].(bool); !degraded {
+				t.Error(`no "degraded" key: a caller cannot tell one leg from two`)
+			}
+			note, _ := out["note"].(string)
+			for _, want := range []string{
+				embed.ModelNomicEmbedTextV15,
+				embed.ModelMxbaiEmbedLargeV1,
+				kb.RebuildRemedy,
+			} {
+				if !strings.Contains(note, want) {
+					t.Errorf("note %q does not mention %q", note, want)
+				}
+			}
+			// The lexical leg still answered, which is the whole point of
+			// degrading rather than failing.
+			if isEmptyResults(out["results"]) {
+				t.Error("no results: degrading must still answer from the lexical leg")
+			}
+		})
+	}
+}
+
+// TestSearch_HealthyResultCarriesNoDegradedKeys keeps the additive keys
+// genuinely additive: a search with nothing wrong looks exactly as it did.
+func TestSearch_HealthyResultCarriesNoDegradedKeys(t *testing.T) {
+	ctx := context.Background()
+	svc := openTestService(t, testConfig(t))
+	useFakeEmbedder(t, svc, embed.ModelNomicEmbedTextV15)
+	seedIndexedCorpus(t, svc)
+
+	for _, mode := range []string{SearchModeHybrid, SearchModeSemantic, SearchModeFTS5} {
+		out, err := svc.Search(ctx, SearchRequest{
+			Query: "authentication", Mode: mode, Limit: 5, MinScore: Unset,
+		})
+		if err != nil {
+			t.Fatalf("%s search: %v", mode, err)
+		}
+		if _, present := out["degraded"]; present {
+			t.Errorf(`%s: "degraded" present on a healthy search`, mode)
+		}
+		if _, present := out["note"]; present {
+			t.Errorf(`%s: "note" present on a healthy search`, mode)
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Model-aware migrate
 // ---------------------------------------------------------------------------

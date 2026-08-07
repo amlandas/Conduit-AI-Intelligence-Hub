@@ -273,12 +273,16 @@ A width change is always caught, whatever the model is called.
 
 Knowledge bases indexed before 2.0.0-beta.5 have vectors and no record of what
 produced them. On first open, Conduit assumes the currently configured model
-built them, provided the vector width matches, and logs one line saying so.
+built them, **provided the vector width matches**, and logs one line saying so.
 `conduit doctor` marks the stamp `(assumed: ...)`.
 
-If you changed embedding model *before* upgrading, that assumption is wrong and
-nothing on disk could reveal it. Run `conduit kb sync --rebuild-vectors` once
-after upgrading if that applies to you.
+If you changed embedding model *before* upgrading to one of the **same width**,
+that assumption is wrong and nothing on disk could reveal it. Run
+`conduit kb sync --rebuild-vectors` once after upgrading if that applies to you.
+
+A model change that also changed the width *is* detected: Conduit records the
+width it actually found under a name that claims nothing, semantic search
+switches off, and `conduit doctor` shows a ✗ with the rebuild remedy.
 
 ### No data migration from Conduit 1.x
 

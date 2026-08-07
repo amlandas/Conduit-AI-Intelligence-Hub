@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -78,6 +79,13 @@ func kbStatsCmd() *cobra.Command {
 			fmt.Printf("Documents:   %d\n", totals.Documents)
 			fmt.Printf("Chunks:      %d\n", totals.Chunks)
 			fmt.Printf("Total Size:  %s\n", formatBytes(totals.TotalBytes))
+
+			// The vector half of the same picture. Reporting chunk counts while
+			// staying silent about how many of them are actually searchable by
+			// meaning -- and by which model -- leaves out the thing most likely
+			// to be wrong (#107).
+			printVectorStats(cmd.Context(), svc)
+
 			fmt.Println()
 			fmt.Println("By Source:")
 			fmt.Println("─────────────────────────────────────────")
@@ -499,6 +507,19 @@ Examples:
 			results, _ := resp["results"].([]interface{})
 			searchMode, _ := resp["search_mode"].(string)
 
+			// #107: say up front when a retrieval strategy did not run. The MCP
+			// server has shown this since #75; the CLI showed nothing, so a user
+			// could not tell a search that ran on one leg from one that ran on
+			// two. It goes BEFORE the results, because it changes how they
+			// should be read.
+			if degraded, _ := resp["degraded"].(bool); degraded {
+				if note, _ := resp["note"].(string); note != "" {
+					fmt.Printf("retrieval: degraded — %s\n\n", note)
+				} else {
+					fmt.Printf("retrieval: degraded — a retrieval strategy was unavailable for this query.\n\n")
+				}
+			}
+
 			if len(results) == 0 {
 				fmt.Printf("No results found for: %s\n", query)
 				// #97: "no results" from a knowledge base that was never
@@ -893,6 +914,35 @@ Examples:
 
 			return nil
 		},
+	}
+}
+
+// printVectorStats renders the vector count and the model that produced it.
+//
+// Both facts, or neither: a vector count with no model beside it is what let a
+// changed model go unnoticed, and a model with no count cannot show that the
+// index is empty. Silent when embeddings are off, which is a supported mode
+// rather than a gap.
+func printVectorStats(ctx context.Context, svc *kbservice.Service) {
+	status, err := svc.EmbeddingStampStatus(ctx)
+	if err != nil || status == nil {
+		return
+	}
+
+	fmt.Printf("Vectors:     %d\n", status.Vectors)
+
+	switch {
+	case status.Stamp == nil:
+		fmt.Printf("Model:       %s (nothing embedded yet)\n", status.Active.Display())
+	case status.Verdict == kb.StampMismatch:
+		fmt.Printf("Model:       %s — built these vectors\n", status.Stamp.Display())
+		fmt.Printf("             %s — configured now, so semantic search is off\n", status.Active.Display())
+		fmt.Printf("             → run '%s'\n", kb.RebuildRemedy)
+	case status.Verdict == kb.StampUnknown:
+		fmt.Printf("Model:       %s (configured now: %s — the two cannot be compared)\n",
+			status.Stamp.Display(), status.Active.Display())
+	default:
+		fmt.Printf("Model:       %s (%dd)\n", status.Stamp.Display(), status.Stamp.Dimensions)
 	}
 }
 

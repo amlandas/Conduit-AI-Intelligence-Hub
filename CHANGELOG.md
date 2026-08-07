@@ -190,10 +190,29 @@ deal of what follows is deletion.
   configured model unconditionally, which asserted the one thing that is false
   exactly when it matters.
 
-  **Upgrading:** a knowledge base with vectors but no stamp adopts the
-  configured model on first open, when the widths match, and logs one line
-  saying it has assumed this. If you changed embedding model before upgrading,
-  run `conduit kb sync --rebuild-vectors` once.
+  **Upgrading:** a knowledge base with vectors but no stamp always records
+  something on first open — the configured model when the widths match, marked
+  as an assumption, or the width actually found under a name that claims
+  nothing when they do not. If you changed to a *same-width* model before
+  upgrading, that assumption is wrong and nothing on disk could reveal it: run
+  `conduit kb sync --rebuild-vectors` once.
+  ([#107](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/107))
+
+- **The CLI never showed that a retrieval strategy had failed.** The MCP server
+  has carried a `retrieval: degraded` banner since #75, but `conduit kb search`
+  printed a shorter result list with no explanation, and `--json` carried
+  nothing at all — so a script could not tell a search that ran on one leg from
+  one that ran on two. Search responses now carry additive `degraded` and
+  `note` keys, absent when nothing failed, and the CLI prints the note above
+  the results. `kb search --semantic` also degrades to keyword search with the
+  note instead of erroring, matching what the MCP server's `mode=semantic` has
+  always done; the two frontends are peers and must not answer the same
+  condition differently.
+  ([#107](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/107))
+
+- **`conduit kb stats` reported chunk counts and nothing about vectors.** It now
+  shows how many vectors exist and which model built them, which is the half of
+  the picture most likely to be wrong. Silent when embeddings are off.
   ([#107](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/107))
 
 Dogfood week — four defects found by running Conduit as a user rather than as a
