@@ -94,7 +94,7 @@ jobs:
           path: ./artifacts/x64
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v3
         with:
           draft: false
           prerelease: false
