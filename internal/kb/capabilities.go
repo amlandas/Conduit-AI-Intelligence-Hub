@@ -89,12 +89,7 @@ func DetectCapabilitiesWithTimeout(ctx context.Context, db *sql.DB, embedder Emb
 		// Prefer what actually built the vectors over what is configured.
 		if db != nil {
 			if stamp, err := ReadEmbeddingStamp(ctx, db); err == nil && stamp != nil && stamp.Known() {
-				// Width and prefix scheme are unknown from an EmbedProbe, so this
-				// comparison is on the model name alone -- the conservative subset
-				// of the full check in SQLiteVectorIndex.guard, which is the one
-				// that actually enforces. Reporting a capability must never be
-				// stricter than the thing it describes.
-				active := NewEmbeddingIdentity(embedder.Model(), "", 0, "")
+				active := NewEmbeddingIdentity(embedder.Model(), "", probeDimension(embedder), "")
 				caps.EmbeddingModel = stamp.Canonical
 				if !strings.EqualFold(stamp.Canonical, active.Canonical) {
 					caps.ActiveEmbeddingModel = active.Canonical
@@ -111,6 +106,28 @@ func DetectCapabilitiesWithTimeout(ctx context.Context, db *sql.DB, embedder Emb
 	caps.SemanticAvailable = vectorOK && embedOK && !modelMismatch
 
 	return caps
+}
+
+// probeDimension recovers the embedder's vector width from an EmbedProbe.
+//
+// EmbedProbe is deliberately narrow -- Model and HealthCheck are all capability
+// detection needs to know about a provider -- but the width matters here, and
+// every production embedder is a kb.Embedder, which has it.
+//
+// Omitting this made the capability report a lie in the one case it exists to
+// catch: with a zero width, Compare's width branch cannot fire, so a
+// same-model-different-width knowledge base reported "semantic search:
+// available" while every search refused. A capability that is reported but
+// cannot be exercised is precisely the #107 defect in a status line.
+//
+// A provider that genuinely cannot say returns 0, and Compare then ignores the
+// width, which is the correct conservative fallback: this must never be
+// stricter than the guard that enforces.
+func probeDimension(embedder EmbedProbe) int {
+	if d, ok := embedder.(interface{ Dimension() int }); ok {
+		return d.Dimension()
+	}
+	return 0
 }
 
 // checkFTS5 verifies FTS5 extension is available.

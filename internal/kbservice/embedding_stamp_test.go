@@ -27,13 +27,20 @@ const fakeEmbedDim = 16
 // user does by editing embed.model and re-running a command.
 func useFakeEmbedder(t *testing.T, svc *Service, model string) *embed.FakeProvider {
 	t.Helper()
+	return useFakeEmbedderAt(t, svc, model, fakeEmbedDim)
+}
 
-	provider := embed.NewFakeProvider(model, fakeEmbedDim, 7)
+// useFakeEmbedderAt is useFakeEmbedder with an explicit vector width, so that a
+// model change that also changes width can be reproduced.
+func useFakeEmbedderAt(t *testing.T, svc *Service, model string, dim int) *embed.FakeProvider {
+	t.Helper()
+
+	provider := embed.NewFakeProvider(model, dim, 7)
 	embedder := kb.NewProviderEmbedder(provider)
-	identity := kb.NewEmbeddingIdentity(model, "test", fakeEmbedDim, embed.PrefixSchemeNone)
+	identity := kb.NewEmbeddingIdentity(model, "test", dim, embed.PrefixSchemeNone)
 
 	vectors, err := kb.NewSQLiteVectorIndex(svc.db, kb.VectorIndexConfig{
-		Dimension: fakeEmbedDim,
+		Dimension: dim,
 		Identity:  identity,
 	})
 	if err != nil {
@@ -49,7 +56,7 @@ func useFakeEmbedder(t *testing.T, svc *Service, model string) *embed.FakeProvid
 	svc.embedInfo = EmbedderInfo{
 		Provider:     "test",
 		Model:        model,
-		Dimensions:   fakeEmbedDim,
+		Dimensions:   dim,
 		PrefixScheme: embed.PrefixSchemeNone,
 		Available:    true,
 	}
@@ -499,6 +506,197 @@ func TestOpen_AdoptsStampForLegacyVectors(t *testing.T) {
 	}
 	if status.Verdict != kb.StampMismatch {
 		t.Errorf("verdict after a post-adoption model change = %v, want StampMismatch", status.Verdict)
+	}
+}
+
+// TestOpen_LegacyVectorsOfAnotherWidthAreNotBlessed replays, end to end, the
+// scenario that failed review.
+//
+// A knowledge base is indexed by pre-WP-4.3 Conduit at one width. The user then
+// changes embedding model to one of a DIFFERENT width and upgrades. Adoption
+// declines (the widths disagree), and before the fix that meant no stamp at
+// all — so the next sync wrote freely, stamped the knowledge base with the new
+// model, and left the old vectors permanently unreadable while doctor reported
+// green and the backfill saw nothing to do.
+func TestOpen_LegacyVectorsOfAnotherWidthAreNotBlessed(t *testing.T) {
+	ctx := context.Background()
+	svc := openTestService(t, testConfig(t))
+
+	// --- pre-WP-4.3: vectors written with no identity, at the wide width ------
+	const wideDim = fakeEmbedDim       // 16
+	const narrowDim = fakeEmbedDim / 2 // 8
+
+	legacyVectors, err := kb.NewSQLiteVectorIndex(svc.db, kb.VectorIndexConfig{Dimension: wideDim})
+	if err != nil {
+		t.Fatalf("NewSQLiteVectorIndex: %v", err)
+	}
+	legacyEmbedder := kb.NewProviderEmbedder(embed.NewFakeProvider(embed.ModelNomicEmbedTextV15, wideDim, 7))
+	svc.embedder = legacyEmbedder
+	svc.semantic = kb.NewSemanticSearcherWith(svc.db, legacyEmbedder, legacyVectors)
+	svc.source.SetSemanticSearcher(svc.semantic)
+	svc.indexer.SetSemanticSearcher(svc.semantic)
+
+	dir := corpusDir(t)
+	src, err := svc.AddSource(ctx, kb.AddSourceRequest{
+		Path: dir, Name: "legacy", Patterns: []string{"*.md"},
+	})
+	if err != nil {
+		t.Fatalf("AddSource: %v", err)
+	}
+	if _, err := svc.Sync(ctx, src.SourceID, false); err != nil {
+		t.Fatalf("legacy sync: %v", err)
+	}
+	legacyVectorCount := vectorCount(t, svc)
+	if legacyVectorCount == 0 {
+		t.Fatal("fixture produced no legacy vectors")
+	}
+	if stamp, _ := kb.ReadEmbeddingStamp(ctx, svc.db); stamp != nil {
+		t.Fatalf("the legacy path stamped anyway: %+v", stamp)
+	}
+
+	// --- upgrade, with a narrower model configured ----------------------------
+	useFakeEmbedderAt(t, svc, embed.ModelMxbaiEmbedLargeV1, narrowDim)
+	adopted, err := svc.vectors.AdoptLegacyStamp(ctx)
+	if err != nil {
+		t.Fatalf("AdoptLegacyStamp: %v", err)
+	}
+	if !adopted {
+		t.Fatal("adopted = false: leaving no stamp is what let the next write bless the wrong model")
+	}
+
+	status, err := svc.EmbeddingStampStatus(ctx)
+	if err != nil {
+		t.Fatalf("EmbeddingStampStatus: %v", err)
+	}
+	if status.Stamp == nil {
+		t.Fatal("no stamp after adoption")
+	}
+	if status.Stamp.Dimensions != wideDim {
+		t.Errorf("stamped width = %d, want %d (what is actually on disk)", status.Stamp.Dimensions, wideDim)
+	}
+	if status.Verdict != kb.StampMismatch {
+		t.Fatalf("verdict = %v, want StampMismatch", status.Verdict)
+	}
+
+	// --- the defect: a further sync must NOT write and must NOT re-stamp ------
+	if err := os.WriteFile(filepath.Join(dir, "new.md"), []byte("# New\n\nquokka telemetry\n"), 0600); err != nil {
+		t.Fatalf("write new document: %v", err)
+	}
+	res, err := svc.Sync(ctx, src.SourceID, false)
+	if err != nil {
+		t.Fatalf("sync after the upgrade returned an error instead of degrading: %v", err)
+	}
+	if res.Added != 1 {
+		t.Errorf("added = %d, want 1: the document must still be indexed lexically", res.Added)
+	}
+	if res.SemanticErrors == 0 {
+		t.Error("semantic_errors = 0: the refused vector write must be counted")
+	}
+
+	after, err := svc.EmbeddingStampStatus(ctx)
+	if err != nil {
+		t.Fatalf("EmbeddingStampStatus: %v", err)
+	}
+	if after.Stamp.Dimensions != wideDim {
+		t.Errorf("the stamp was overwritten to %dd; the wrong model was blessed over unreadable vectors",
+			after.Stamp.Dimensions)
+	}
+
+	// The reviewer's exact symptom: the stamp must describe every vector stored,
+	// not a fraction of them.
+	var total, atStampedWidth int
+	if err := svc.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(SUM(dim = ?), 0) FROM kb_vectors`,
+		after.Stamp.Dimensions).Scan(&total, &atStampedWidth); err != nil {
+		t.Fatalf("count vectors: %v", err)
+	}
+	if total != atStampedWidth {
+		t.Errorf("stamp describes %d of %d stored vectors", atStampedWidth, total)
+	}
+	if int64(total) != legacyVectorCount {
+		t.Errorf("vector count = %d, want %d: no new-width vector may join the old space",
+			total, legacyVectorCount)
+	}
+
+	// --- doctor reds, and the backfill does not report "nothing to do" --------
+	if after.Verdict != kb.StampMismatch {
+		t.Errorf("verdict = %v, want StampMismatch so doctor can report it", after.Verdict)
+	}
+
+	// --- and the model-aware migrate recovers ---------------------------------
+	mig, err := svc.Migrate(ctx, nil)
+	if err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	if !mig.FullReembed {
+		t.Fatal("Migrate backfilled instead of rebuilding; the dark vectors would have survived")
+	}
+	recovered, err := svc.EmbeddingStampStatus(ctx)
+	if err != nil {
+		t.Fatalf("EmbeddingStampStatus: %v", err)
+	}
+	if recovered.Verdict != kb.StampOK {
+		t.Errorf("verdict after recovery = %v, want StampOK", recovered.Verdict)
+	}
+	if recovered.Stamp.Dimensions != narrowDim {
+		t.Errorf("width after recovery = %d, want %d", recovered.Stamp.Dimensions, narrowDim)
+	}
+	if _, err := svc.Search(ctx, SearchRequest{
+		Query: "authentication", Mode: SearchModeSemantic, Limit: 5, MinScore: Unset,
+	}); err != nil {
+		t.Fatalf("semantic search after recovery: %v", err)
+	}
+}
+
+// TestSync_SingleSourceRebuildRefusedOnModelChange pins F6.
+//
+// Re-indexing a document deletes its vectors before writing the replacements,
+// and the replacements are what the guard refuses. Running the rebuild would
+// therefore destroy usable vectors and put nothing back — the user strictly
+// worse off than if they had done nothing, and on a single-source knowledge
+// base the stamp would be left describing zero vectors, breaking the invariant
+// the whole design rests on.
+func TestSync_SingleSourceRebuildRefusedOnModelChange(t *testing.T) {
+	ctx := context.Background()
+	svc := openTestService(t, testConfig(t))
+	useFakeEmbedder(t, svc, embed.ModelNomicEmbedTextV15)
+	sourceID := seedIndexedCorpus(t, svc)
+	before := vectorCount(t, svc)
+
+	useFakeEmbedder(t, svc, embed.ModelMxbaiEmbedLargeV1)
+
+	_, err := svc.Sync(ctx, sourceID, true)
+	if err == nil {
+		t.Fatal("a single-source rebuild under a model change was allowed to run")
+	}
+	if !errors.Is(err, kb.ErrEmbeddingModelMismatch) {
+		t.Errorf("error is not an embedding mismatch: %v", err)
+	}
+	if !strings.Contains(err.Error(), kb.RebuildRemedy) {
+		t.Errorf("error %q does not name the command that does work", err)
+	}
+
+	// Nothing was destroyed. This is the whole point of refusing early.
+	if got := vectorCount(t, svc); got != before {
+		t.Errorf("vector count = %d, want %d: the refused rebuild deleted vectors anyway", got, before)
+	}
+	status, err := svc.EmbeddingStampStatus(ctx)
+	if err != nil {
+		t.Fatalf("EmbeddingStampStatus: %v", err)
+	}
+	if status.Stamp == nil || status.Vectors == 0 {
+		t.Errorf("stamp now describes %d vectors; it must never describe an empty space", status.Vectors)
+	}
+
+	// The whole-knowledge-base route still works, and is what the message names.
+	if _, err := svc.PrepareVectorRebuild(ctx); err != nil {
+		t.Fatalf("PrepareVectorRebuild: %v", err)
+	}
+	if _, err := svc.Sync(ctx, sourceID, true); err != nil {
+		t.Fatalf("rebuild after PrepareVectorRebuild: %v", err)
+	}
+	if got := vectorCount(t, svc); got != before {
+		t.Errorf("vector count after the supported rebuild = %d, want %d", got, before)
 	}
 }
 

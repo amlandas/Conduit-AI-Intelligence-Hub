@@ -14,6 +14,7 @@ import (
 	"errors"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/simpleflo/conduit/internal/embed"
@@ -538,10 +539,153 @@ func TestStamp_NoAdoptionWithoutVectors(t *testing.T) {
 	}
 }
 
-// TestStamp_NoAdoptionOnWidthDisagreement leaves the width case to the guard
-// that already handles it. Adopting here would record a model that provably did
-// not produce the stored vectors.
-func TestStamp_NoAdoptionOnWidthDisagreement(t *testing.T) {
+// TestStamp_AdoptionOnWidthDisagreementRecordsTheStoredWidth is the regression
+// test for the highest-severity defect found in review.
+//
+// Adoption used to DECLINE when the stored width disagreed with the configured
+// model, on the reasoning that the dimension guard already covered it. It does
+// not. Declining leaves stamp == nil, and stamp == nil means "nothing to
+// compare" at every check — so the next write sails through, and stampAfterWrite
+// then blesses the knowledge base with the CURRENT model on top of vectors that
+// provably did not come from it. Those old vectors are unreadable forever (the
+// scan skips every row whose width disagrees with the query), doctor reports
+// green, and the backfill sees no gap because the dark chunks do have vector
+// rows.
+//
+// The fix records the width that was actually found, under a name that claims
+// nothing.
+func TestStamp_AdoptionOnWidthDisagreementRecordsTheStoredWidth(t *testing.T) {
+	ctx := context.Background()
+	db := newTestDB(t)
+
+	// Pre-WP-4.3 Conduit: vectors written by an index with no identity.
+	legacy, err := NewSQLiteVectorIndex(db, VectorIndexConfig{Dimension: stampDim})
+	if err != nil {
+		t.Fatalf("NewSQLiteVectorIndex: %v", err)
+	}
+	if err := writeOnePoint(t, db, legacy, "chunk-1", 0); err != nil {
+		t.Fatalf("legacy write: %v", err)
+	}
+
+	// Upgraded binary, and the model has changed width behind Conduit's back.
+	narrowDim := stampDim / 2
+	narrow, err := NewSQLiteVectorIndex(db, VectorIndexConfig{
+		Dimension: narrowDim,
+		Identity:  NewEmbeddingIdentity(embed.ModelNomicEmbedTextV15, "test", narrowDim, embed.PrefixSchemeNone),
+	})
+	if err != nil {
+		t.Fatalf("NewSQLiteVectorIndex: %v", err)
+	}
+
+	adopted, err := narrow.AdoptLegacyStamp(ctx)
+	if err != nil {
+		t.Fatalf("AdoptLegacyStamp: %v", err)
+	}
+	if !adopted {
+		t.Fatal("adopted = false: declining to stamp is what lets the next write bless the wrong model")
+	}
+
+	stamp, err := ReadEmbeddingStamp(ctx, db)
+	if err != nil || stamp == nil {
+		t.Fatalf("ReadEmbeddingStamp: stamp=%v err=%v", stamp, err)
+	}
+	if stamp.Dimensions != stampDim {
+		t.Errorf("stamped width = %d, want %d (the width actually found on disk)",
+			stamp.Dimensions, stampDim)
+	}
+	if stamp.Resolved {
+		t.Error("an inferred identity was marked resolved; a name we cannot trust must never be evidence")
+	}
+	if !stamp.Adopted {
+		t.Error("stamp is not marked as an assumption")
+	}
+	if strings.Contains(stamp.Observed, embed.ModelNomicEmbedTextV15) {
+		t.Errorf("observed model %q names the current model, which provably did not build these vectors",
+			stamp.Observed)
+	}
+
+	// The verdict is now a proven mismatch, and it is proven by WIDTH.
+	if got := stamp.Compare(narrow.Identity()); got != StampMismatch {
+		t.Errorf("verdict = %v, want StampMismatch", got)
+	}
+	if got := stamp.MismatchReason(narrow.Identity()); got != MismatchReasonWidth {
+		t.Errorf("reason = %q, want %q", got, MismatchReasonWidth)
+	}
+
+	// THE defect: the next write must be refused, not silently accepted.
+	seedChunk(t, db, "src-1", "doc-1", "chunk-2", "/docs/a.txt", "A", "content 2")
+	err = narrow.Upsert(ctx, []VectorPoint{{
+		ID: "chunk-2", Vector: unitVector(narrowDim, 0), DocumentID: "doc-1",
+	}})
+	if !errors.Is(err, ErrEmbeddingModelMismatch) {
+		t.Fatalf("write after a width-changing upgrade: err = %v, want ErrEmbeddingModelMismatch", err)
+	}
+
+	// And the stamp still describes every vector that exists, which is the
+	// invariant the old behaviour broke.
+	var total, atStampedWidth int
+	if err := db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(dim = ?), 0) FROM kb_vectors`,
+		stamp.Dimensions).Scan(&total, &atStampedWidth); err != nil {
+		t.Fatalf("count vectors: %v", err)
+	}
+	if total != atStampedWidth {
+		t.Errorf("stamp describes %d of %d stored vectors; it must describe all of them",
+			atStampedWidth, total)
+	}
+
+	// Searching is refused too, rather than quietly returning nothing because
+	// every stored row is the wrong width for the query.
+	if _, err := narrow.Search(ctx, unitVector(narrowDim, 0), VectorSearchOptions{Limit: 5}); !errors.Is(err, ErrEmbeddingModelMismatch) {
+		t.Errorf("search after a width-changing upgrade: err = %v, want ErrEmbeddingModelMismatch", err)
+	}
+}
+
+// TestStamp_WidthMismatchMessageSaysWhy pins the wording. A width-only mismatch
+// used to render as "vectors were built by X, current model is X" -- the same
+// model named twice, with nothing to act on.
+func TestStamp_WidthMismatchMessageSaysWhy(t *testing.T) {
+	stamped := NewEmbeddingIdentity(embed.ModelNomicEmbedTextV15, "test", 768, embed.PrefixSchemeNone)
+	active := NewEmbeddingIdentity(embed.ModelNomicEmbedTextV15, "test", 256, embed.PrefixSchemeNone)
+
+	stamp := &EmbeddingStamp{EmbeddingIdentity: stamped}
+	err := &ModelMismatchError{
+		Stamped: stamped, Active: active, Op: "semantic search",
+		Reason: stamp.MismatchReason(active),
+	}
+
+	note := err.Note()
+	if strings.Count(note, embed.ModelNomicEmbedTextV15) > 1 {
+		t.Errorf("width-only mismatch names the same model twice: %q", note)
+	}
+	for _, want := range []string{"768", "256", RebuildRemedy} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note %q does not mention %q", note, want)
+		}
+	}
+
+	// Two named models lead with the models even when the widths differ too,
+	// and carry both widths as supporting detail.
+	other := NewEmbeddingIdentity(embed.ModelMxbaiEmbedLargeV1, "test", 1024, embed.PrefixSchemeNone)
+	if got := stamp.MismatchReason(other); got != MismatchReasonModel {
+		t.Errorf("reason for two different registry models = %q, want %q", got, MismatchReasonModel)
+	}
+	modelErr := &ModelMismatchError{
+		Stamped: stamped, Active: other, Op: "semantic search",
+		Reason: stamp.MismatchReason(other),
+	}
+	note = modelErr.Note()
+	for _, want := range []string{embed.ModelNomicEmbedTextV15, embed.ModelMxbaiEmbedLargeV1, "768", "1024"} {
+		if !strings.Contains(note, want) {
+			t.Errorf("note %q does not mention %q", note, want)
+		}
+	}
+}
+
+// TestStamp_AdoptionIsRaceFree pins F3. Two processes opening the same knowledge
+// base at once both see no stamp; exactly one may write, and neither may
+// overwrite the other, or a second process configured with a different model
+// could silently replace the first's record.
+func TestStamp_AdoptionIsRaceFree(t *testing.T) {
 	ctx := context.Background()
 	db := newTestDB(t)
 
@@ -553,19 +697,43 @@ func TestStamp_NoAdoptionOnWidthDisagreement(t *testing.T) {
 		t.Fatalf("legacy write: %v", err)
 	}
 
-	wider, err := NewSQLiteVectorIndex(db, VectorIndexConfig{
-		Dimension: stampDim * 2,
-		Identity:  NewEmbeddingIdentity(embed.ModelNomicEmbedTextV15, "test", stampDim*2, embed.PrefixSchemeNone),
-	})
-	if err != nil {
-		t.Fatalf("NewSQLiteVectorIndex: %v", err)
+	const racers = 6
+	models := []string{embed.ModelNomicEmbedTextV15, embed.ModelMxbaiEmbedLargeV1}
+
+	var (
+		wg        sync.WaitGroup
+		mu        sync.Mutex
+		adoptions int
+	)
+	for i := 0; i < racers; i++ {
+		model := models[i%len(models)]
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			vi := indexOver(t, db, identityFor(model))
+			ok, err := vi.AdoptLegacyStamp(ctx)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				t.Errorf("AdoptLegacyStamp: %v", err)
+				return
+			}
+			if ok {
+				adoptions++
+			}
+		}()
 	}
-	adopted, err := wider.AdoptLegacyStamp(ctx)
-	if err != nil {
-		t.Fatalf("AdoptLegacyStamp: %v", err)
+	wg.Wait()
+
+	if adoptions != 1 {
+		t.Errorf("%d concurrent adopters reported success, want exactly 1", adoptions)
 	}
-	if adopted {
-		t.Error("adopted a model whose width disagrees with the stored vectors")
+	var rows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM kb_embedding_stamp`).Scan(&rows); err != nil {
+		t.Fatalf("count stamps: %v", err)
+	}
+	if rows != 1 {
+		t.Errorf("stamp row count = %d, want 1", rows)
 	}
 }
 

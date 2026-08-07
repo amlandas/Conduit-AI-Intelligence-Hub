@@ -286,7 +286,36 @@ func (s *Service) RemoveSource(ctx context.Context, sourceID string) (*RemoveRes
 }
 
 // Sync indexes a source. RebuildVectors forces re-embedding of every document.
+//
+// A rebuild is refused outright when the embedding model has changed, because
+// re-indexing a document DELETES its vectors before writing the replacements,
+// and the replacements are exactly what the model guard refuses. Letting it run
+// would destroy usable vectors and put nothing back -- the user would end up
+// strictly worse off than if they had done nothing, and on a single-source
+// knowledge base the stamp would be left describing zero vectors.
+//
+// Rebuilding one source cannot fix a model change in any case: the other
+// sources would stay in the old model's space, which is the mixture this whole
+// mechanism exists to prevent. The whole knowledge base has to move at once, so
+// the error names the command that does that.
+//
+// PrepareVectorRebuild is the supported route. It clears the vector space
+// first, which removes the mismatch, so the rebuild that follows passes this
+// check and proceeds normally.
 func (s *Service) Sync(ctx context.Context, sourceID string, rebuildVectors bool) (*kb.SyncResult, error) {
+	if rebuildVectors {
+		status, err := s.EmbeddingStampStatus(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if mismatch := status.mismatchError("rebuild vectors for one source"); mismatch != nil {
+			return nil, fmt.Errorf(
+				"%w — rebuilding a single source would delete its vectors and be unable to "+
+					"replace them, and would leave every other source in the old model's space. "+
+					"Rebuild the whole knowledge base instead: `%s`",
+				mismatch, kb.RebuildRemedy)
+		}
+	}
 	return s.source.SyncWithOptions(ctx, sourceID, &kb.SyncOptions{RebuildVectors: rebuildVectors})
 }
 
@@ -399,11 +428,7 @@ func (s *Service) PrepareVectorRebuild(ctx context.Context) (*kb.ModelMismatchEr
 	if err := s.semantic.ResetVectorSpace(ctx); err != nil {
 		return nil, err
 	}
-	return &kb.ModelMismatchError{
-		Stamped: status.Stamp.EmbeddingIdentity,
-		Active:  status.Active,
-		Op:      "rebuild vectors",
-	}, nil
+	return status.mismatchError("rebuild vectors"), nil
 }
 
 // EmbeddingStampStatus describes how the stored vectors and the configured
@@ -421,6 +446,23 @@ type EmbeddingStampStatus struct {
 	// AdoptedThisOpen is true when this process inferred the stamp for
 	// pre-existing vectors rather than reading one that was already there.
 	AdoptedThisOpen bool
+}
+
+// mismatchError renders this status as the error a refused operation returns,
+// or nil when the two identities agree.
+//
+// It is the single place that reason is derived, so a message can never explain
+// the mismatch differently from the check that found it.
+func (st *EmbeddingStampStatus) mismatchError(op string) *kb.ModelMismatchError {
+	if st == nil || st.Stamp == nil || st.Verdict != kb.StampMismatch {
+		return nil
+	}
+	return &kb.ModelMismatchError{
+		Stamped: st.Stamp.EmbeddingIdentity,
+		Active:  st.Active,
+		Op:      op,
+		Reason:  st.Stamp.MismatchReason(st.Active),
+	}
 }
 
 // StoredEmbeddingStamp returns the recorded identity of the stored vectors

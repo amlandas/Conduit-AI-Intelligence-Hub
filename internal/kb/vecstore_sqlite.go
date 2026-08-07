@@ -289,8 +289,9 @@ func (vi *SQLiteVectorIndex) ensureSchema(ctx context.Context) error {
 				embedding   BLOB NOT NULL,
 				created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 			)`,
-			// Must match migration 006 exactly; the statement is shared rather
-			// than duplicated so it cannot drift. See embedding_stamp.go.
+			// Must match migration 006 byte for byte. It is a duplicated
+			// statement, not a shared one -- see the comment on
+			// embeddingStampDDL for why, and for what stops it drifting.
 			embeddingStampDDL,
 			`CREATE INDEX IF NOT EXISTS idx_vectors_document ON kb_vectors(document_id)`,
 			`CREATE INDEX IF NOT EXISTS idx_vectors_source ON kb_vectors(source_id)`,
@@ -344,6 +345,7 @@ func (vi *SQLiteVectorIndex) guard(ctx context.Context, q rowQuerier, op string)
 			Stamped: stamp.EmbeddingIdentity,
 			Active:  vi.identity,
 			Op:      op,
+			Reason:  stamp.MismatchReason(vi.identity),
 		}
 
 	case StampUnknown:
@@ -403,9 +405,22 @@ func (vi *SQLiteVectorIndex) stampAfterWrite(ctx context.Context, ex execer, exi
 // that makes every LATER model change detectable. Refusing to guess would leave
 // the installed base permanently unprotected.
 //
-// It returns true when a stamp was adopted. It is a no-op when a stamp already
-// exists, when there are no vectors, or when the widths disagree -- that last
-// case is already handled, loudly, by the dimension check on write.
+// Whether the widths agree decides WHAT is adopted, never whether anything is:
+//
+//   - widths match     -> adopt the configured model. Most likely true, and it
+//     makes every later model change detectable.
+//   - widths disagree  -> the configured model provably did not build these
+//     vectors, so adopt an unnamed identity carrying the width that DID (see
+//     UnknownLegacyIdentity). Writes then refuse, doctor reports it, and
+//     `kb migrate` rebuilds.
+//
+// Declining to stamp in the second case was a defect, not a simplification:
+// stamp == nil reads as "nothing to compare", so the next write would be
+// accepted and would stamp the knowledge base with the current model over
+// vectors that could never be read again.
+//
+// It returns true when a stamp was adopted, and is a no-op when one already
+// exists or when there are no vectors to describe.
 func (vi *SQLiteVectorIndex) AdoptLegacyStamp(ctx context.Context) (bool, error) {
 	if !vi.identity.Known() {
 		return false, nil
@@ -414,7 +429,17 @@ func (vi *SQLiteVectorIndex) AdoptLegacyStamp(ctx context.Context) (bool, error)
 		return false, err
 	}
 
-	stamp, err := ReadEmbeddingStamp(ctx, vi.db)
+	// One transaction for read, decide and write. Two processes opening the same
+	// knowledge base at once would otherwise both see no stamp and both write
+	// one; ON CONFLICT DO NOTHING inside AdoptEmbeddingStamp settles the tie
+	// without either of them overwriting the other.
+	tx, err := vi.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("begin stamp adoption: %w", err)
+	}
+	defer tx.Rollback()
+
+	stamp, err := ReadEmbeddingStamp(ctx, tx)
 	if err != nil {
 		return false, err
 	}
@@ -425,7 +450,7 @@ func (vi *SQLiteVectorIndex) AdoptLegacyStamp(ctx context.Context) (bool, error)
 	// One representative width is enough: kb_vectors rows are only ever written
 	// through UpsertTx, which rejects any vector that is not vi.dimension wide.
 	var storedDim int
-	err = vi.db.QueryRowContext(ctx, `SELECT dim FROM kb_vectors LIMIT 1`).Scan(&storedDim)
+	err = tx.QueryRowContext(ctx, `SELECT dim FROM kb_vectors LIMIT 1`).Scan(&storedDim)
 	if errors.Is(err, sql.ErrNoRows) {
 		// No vectors: nothing to adopt. The first write will stamp.
 		return false, nil
@@ -436,19 +461,41 @@ func (vi *SQLiteVectorIndex) AdoptLegacyStamp(ctx context.Context) (bool, error)
 		}
 		return false, fmt.Errorf("inspect stored vector width: %w", err)
 	}
-	if storedDim != vi.identity.Dimensions {
+
+	adoptee := vi.identity
+	widthsAgree := storedDim == vi.identity.Dimensions
+	if !widthsAgree {
+		adoptee = UnknownLegacyIdentity(storedDim)
+	}
+
+	adopted, err := AdoptEmbeddingStamp(ctx, tx, adoptee)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit stamp adoption: %w", err)
+	}
+	if !adopted {
 		return false, nil
 	}
 
-	if err := WriteEmbeddingStamp(ctx, vi.db, vi.identity, true); err != nil {
-		return false, err
+	if widthsAgree {
+		vi.logger.Info().
+			Str("model", vi.identity.Display()).
+			Int("dimensions", storedDim).
+			Msg("existing vectors carried no embedding-model record; assuming they were built by the " +
+				"currently configured model, because their width matches it. " +
+				"If you have changed embedding model since indexing, run `" + RebuildRemedy + "`")
+		return true, nil
 	}
-	vi.logger.Info().
-		Str("model", vi.identity.Display()).
-		Int("dimensions", storedDim).
-		Msg("existing vectors carried no embedding-model record; assuming they were built by the " +
-			"currently configured model, because their width matches it. " +
-			"If you have changed embedding model since indexing, run `" + RebuildRemedy + "`")
+
+	vi.logger.Warn().
+		Int("stored_dimensions", storedDim).
+		Str("current_model", vi.identity.Display()).
+		Int("current_dimensions", vi.identity.Dimensions).
+		Msg("existing vectors carried no embedding-model record and are not the width the current " +
+			"model produces, so they were built by a different model; semantic search is disabled " +
+			"until they are rebuilt with `" + RebuildRemedy + "`")
 	return true, nil
 }
 

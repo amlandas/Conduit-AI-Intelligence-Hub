@@ -111,6 +111,34 @@ func NewEmbeddingIdentity(observed, provider string, dimensions int, prefixSchem
 	}
 }
 
+// UnknownLegacyIdentity describes vectors that predate stamping and demonstrably
+// did NOT come from the configured embedder, because they are not the width it
+// produces.
+//
+// Recording an identity we cannot name looks pointless until you follow what
+// happens without it. Declining to stamp leaves stamp == nil, and stamp == nil
+// means "nothing to compare" everywhere -- so the very next write is accepted
+// and stamps the knowledge base with the CURRENT model, over vectors that
+// provably did not come from it. The old vectors are then permanently
+// unreadable (the scan skips every row whose width disagrees with the query),
+// doctor reports green, and the backfill sees no gap because those chunks do
+// have vector rows. The knowledge base is silently and durably broken by the
+// mechanism meant to protect it.
+//
+// So the width is recorded even though the model cannot be. Resolved is false,
+// because nothing here was resolved through the registry and a name that cannot
+// be trusted must never be treated as evidence. The width alone is enough:
+// Compare tests it first and unconditionally.
+func UnknownLegacyIdentity(storedDim int) EmbeddingIdentity {
+	observed := fmt.Sprintf("unknown (pre-2.0 vectors, %dd)", storedDim)
+	return EmbeddingIdentity{
+		Observed:   observed,
+		Canonical:  observed,
+		Resolved:   false,
+		Dimensions: storedDim,
+	}
+}
+
 // Known reports whether this identity names an embedder at all.
 func (id EmbeddingIdentity) Known() bool { return id.Observed != "" }
 
@@ -198,6 +226,47 @@ func (s *EmbeddingStamp) Compare(active EmbeddingIdentity) StampVerdict {
 // stamp. Callers should test with errors.Is / errors.As rather than on text.
 var ErrEmbeddingModelMismatch = errors.New("embedding model mismatch")
 
+// MismatchReason names the property that proved the vectors and the embedder
+// belong to different spaces.
+//
+// It exists because "vectors were built by X, current model is X" is not a
+// sentence anyone can act on, and that is exactly what a width-only mismatch
+// used to produce. Every message now states which property disagrees.
+type MismatchReason string
+
+const (
+	// MismatchReasonModel: two different registry models.
+	MismatchReasonModel MismatchReason = "model"
+
+	// MismatchReasonWidth: the vector widths differ, whatever the models are
+	// called. Same model at two widths is the Matryoshka-truncation case.
+	MismatchReasonWidth MismatchReason = "width"
+)
+
+// MismatchReason picks which property to lead the explanation with.
+//
+// This is not Compare's ordering, and deliberately so. Compare tests width
+// first because width is the cheapest thing to be CERTAIN about; a message
+// wants the most INFORMATIVE fact. Two named models that differ is the better
+// headline even when their widths differ too -- and Describe carries the widths
+// either way, so nothing is lost.
+//
+// Everything else leads with the width, which covers the two cases where a name
+// would say nothing: the same model configured at two widths, and vectors
+// adopted from a pre-2.0 knowledge base whose model is unknown by construction.
+func (s *EmbeddingStamp) MismatchReason(active EmbeddingIdentity) MismatchReason {
+	if s == nil {
+		return MismatchReasonModel
+	}
+	if s.Resolved && active.Resolved && !strings.EqualFold(s.Canonical, active.Canonical) {
+		return MismatchReasonModel
+	}
+	if s.Dimensions > 0 && active.Dimensions > 0 && s.Dimensions != active.Dimensions {
+		return MismatchReasonWidth
+	}
+	return MismatchReasonModel
+}
+
 // ModelMismatchError reports that the stored vectors and the active embedder
 // disagree about which model is in use.
 type ModelMismatchError struct {
@@ -207,6 +276,9 @@ type ModelMismatchError struct {
 	Active EmbeddingIdentity
 	// Op names what was refused, e.g. "write vectors" or "semantic search".
 	Op string
+	// Reason names the property that disagrees. The zero value renders as a
+	// model mismatch, which is the case that needs no width to explain it.
+	Reason MismatchReason
 }
 
 // RebuildRemedy is the single command that resolves a stamp mismatch. It is
@@ -214,17 +286,31 @@ type ModelMismatchError struct {
 // that a user is never told two different things.
 const RebuildRemedy = "conduit kb sync --rebuild-vectors"
 
+// Describe states what disagrees, in one clause, without a leading capital or a
+// trailing stop so that callers can embed it.
+//
+// Widths are always included. When the models differ they are the headline and
+// the widths are supporting detail; when only the width differs, naming the
+// model twice would say nothing, so the sentence is about the widths.
+func (e *ModelMismatchError) Describe() string {
+	if e.Reason == MismatchReasonWidth {
+		return fmt.Sprintf("the stored vectors are %d-dimensional, but %s is configured to produce %d",
+			e.Stamped.Dimensions, e.Active.Display(), e.Active.Dimensions)
+	}
+	return fmt.Sprintf("vectors were built by %s (%dd), current model is %s (%dd)",
+		e.Stamped.Display(), e.Stamped.Dimensions, e.Active.Display(), e.Active.Dimensions)
+}
+
 func (e *ModelMismatchError) Error() string {
-	return fmt.Sprintf("%s: %s (vectors were built by %s, current model is %s; run `%s`)",
-		e.Op, ErrEmbeddingModelMismatch, e.Stamped.Display(), e.Active.Display(), RebuildRemedy)
+	return fmt.Sprintf("%s: %s (%s; run `%s`)",
+		e.Op, ErrEmbeddingModelMismatch, e.Describe(), RebuildRemedy)
 }
 
 func (e *ModelMismatchError) Is(target error) bool { return target == ErrEmbeddingModelMismatch }
 
 // Note returns the one-sentence explanation shown to users and AI clients.
 func (e *ModelMismatchError) Note() string {
-	return fmt.Sprintf("Semantic search is unavailable: vectors were built by %s, current model is %s. Run `%s`.",
-		e.Stamped.Display(), e.Active.Display(), RebuildRemedy)
+	return fmt.Sprintf("Semantic search is unavailable: %s. Run `%s`.", e.Describe(), RebuildRemedy)
 }
 
 // ---------------------------------------------------------------------------
@@ -237,11 +323,18 @@ func (e *ModelMismatchError) Note() string {
 // as a whole, and CHECK (id = 1) makes a second, contradictory row impossible
 // rather than merely unlikely.
 //
-// This statement is shared verbatim between migration 006 and
-// SQLiteVectorIndex.ensureSchema. WP-2.3 found those two paths had drifted for
+// This constant is used by SQLiteVectorIndex.ensureSchema. Migration 006 in
+// internal/store carries a byte-identical COPY of it, not a reference:
+// internal/store cannot import internal/kb, because internal/kb's own test
+// files import internal/store and the cycle would not build.
+//
+// The duplication is therefore deliberate and unavoidable, which makes it
+// dangerous -- WP-2.3 found these two paths had already drifted for
 // kb_entity_vectors, producing databases that behaved differently depending on
-// which path created them; a shared constant plus a parity test is the fix that
-// makes the drift impossible rather than merely discouraged.
+// which one created them. What keeps them honest is
+// TestSchemaParityMigrationVsEnsureSchema, which builds a database each way and
+// compares what SQLite actually stored. Edit one of these two statements and
+// you must edit the other.
 const embeddingStampDDL = `CREATE TABLE IF NOT EXISTS kb_embedding_stamp (
 	id              INTEGER PRIMARY KEY CHECK (id = 1),
 	canonical_model TEXT NOT NULL,
@@ -331,6 +424,37 @@ func WriteEmbeddingStamp(ctx context.Context, ex execer, id EmbeddingIdentity, a
 		return fmt.Errorf("write embedding stamp: %w", err)
 	}
 	return nil
+}
+
+// AdoptEmbeddingStamp records id as an ASSUMED identity for vectors that were
+// written before Conduit stamped anything, and reports whether it did.
+//
+// The difference from WriteEmbeddingStamp is DO NOTHING rather than DO UPDATE.
+// Adoption is a guess made from the only evidence available, and a guess must
+// never overwrite a record: two processes opening the same knowledge base at
+// once would otherwise race, and last-commit-wins would let a second process
+// configured with a different model quietly replace the first's stamp. Losing
+// that race is the correct outcome for an adopter -- somebody already decided.
+func AdoptEmbeddingStamp(ctx context.Context, ex execer, id EmbeddingIdentity) (bool, error) {
+	if !id.Known() {
+		return false, nil
+	}
+	res, err := ex.ExecContext(ctx, `
+		INSERT INTO kb_embedding_stamp
+			(id, canonical_model, observed_model, resolved, dimensions, prefix_scheme, provider, adopted)
+		VALUES (1, ?, ?, ?, ?, ?, ?, 1)
+		ON CONFLICT(id) DO NOTHING
+	`, id.Canonical, id.Observed, boolToInt(id.Resolved), id.Dimensions, id.PrefixScheme, id.Provider)
+	if err != nil {
+		return false, fmt.Errorf("adopt embedding stamp: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		// The insert succeeded; only the count is unavailable. Reporting "not
+		// adopted" is the safe lie: it costs a log line, not correctness.
+		return false, nil
+	}
+	return n > 0, nil
 }
 
 // ClearEmbeddingStamp removes the stamp. It is called only as part of a
