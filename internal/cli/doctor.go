@@ -496,22 +496,23 @@ func renderEmbedStampCheck(status *kbservice.EmbeddingStampStatus, stored *kb.Em
 		// the dimension guard on write already refuses -- loudly and by itself.
 		return check{
 			Name: name, Status: checkWarn,
-			Detail: fmt.Sprintf("%d vectors carry no model record and their width does not match %s (%dd)",
-				status.Vectors, status.Active.Display(), status.Active.Dimensions),
+			Detail: fmt.Sprintf("%s carry no model record and their width does not match %s (%dd)",
+				plural(status.Vectors, "vector"), status.Active.Display(), status.Active.Dimensions),
 			Remedy: "run '" + kb.RebuildRemedy + "'",
 		}
 	}
 
-	base := fmt.Sprintf("%s · %dd · %d vectors%s",
-		status.Stamp.Display(), status.Stamp.Dimensions, status.Vectors, stampedOn(status.Stamp))
+	base := fmt.Sprintf("%s · %dd · %s%s",
+		status.Stamp.Display(), status.Stamp.Dimensions, plural(status.Vectors, "vector"),
+		stampedOn(status.Stamp))
 
 	switch status.Verdict {
 	case kb.StampMismatch:
 		return check{
 			Name: name, Status: checkFail,
 			Detail: fmt.Sprintf("vectors were built by %s, current model is %s — "+
-				"semantic search is disabled until they agree (%d vectors affected)",
-				status.Stamp.Display(), status.Active.Display(), status.Vectors),
+				"semantic search is disabled until they agree (%s affected)",
+				status.Stamp.Display(), status.Active.Display(), plural(status.Vectors, "vector")),
 			Remedy: "run '" + kb.RebuildRemedy + "'",
 		}
 
@@ -544,6 +545,15 @@ func renderEmbedStampCheck(status *kbservice.EmbeddingStampStatus, stored *kb.Em
 	}
 
 	return check{Name: name, Status: checkOK, Detail: base}
+}
+
+// plural renders a count with its noun, pluralised. "1 vectors affected" reads
+// as a bug in the tool rather than a fact about the knowledge base.
+func plural(n int64, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("1 %s", noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
 }
 
 // stampedOn renders the stamp date, or "" when it is not known.

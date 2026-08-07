@@ -81,6 +81,16 @@ deal of what follows is deletion.
 
 ### Changed
 
+- **`conduit kb migrate` is model-aware, and its backfill is now actually a
+  backfill.** It has always advertised itself as the way to give already-indexed
+  documents their vectors, but it visited every document unconditionally and
+  re-embedded the whole corpus, at full model cost, to fill a handful of gaps.
+  It now visits only documents that have a chunk without a vector — unless the
+  embedding model has changed, in which case filling gaps would deepen a mix of
+  two incompatible vector spaces, so it discards every vector and rebuilds. Which
+  of the two it does is decided from the knowledge base's state rather than from
+  a flag. `migrate --help` documents both.
+  ([#107](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/107))
 - **MCP server ported to the official Go SDK**, negotiating spec revision
   2026-07-28 and falling back for older clients. Existing tool descriptions and
   argument names were carried over verbatim — they are a tuned asset and client
@@ -148,6 +158,43 @@ deal of what follows is deletion.
   ([#66](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/pull/66))
 
 ### Fixed
+
+- **An embedding-model change silently randomised every ranking.** `kb_vectors`
+  recorded how WIDE a vector was but not what produced it, so the check on write
+  caught only a swap that changed the width. Swap one 768-dimension model for
+  another and every write was accepted: queries were embedded in the new model's
+  space and scored against chunks from the old one. Similarity between two
+  unrelated vector spaces is not a weak signal, it is noise — and nothing
+  warned. `conduit doctor` reported ✓ across the board.
+
+  A knowledge base now records what built its vectors — canonical model, width,
+  instruction-prefix scheme and provider — in `kb_embedding_stamp` (migration
+  006), written in the same transaction as the first vectors it describes. On a
+  proven model change, vector writes are refused, the semantic leg of a search
+  is skipped, and both the CLI and the MCP result text carry a note naming both
+  models and the one command that fixes it. Keyword search is untouched
+  throughout.
+
+  Identity is resolved through the pinned model registry rather than compared as
+  a string, because the same weights answer to several names: Ollama serves
+  `nomic-embed-text-v1.5` as `nomic-embed-text`, and the artifact is a `.gguf`
+  filename. A string comparison would have reported a model change every time
+  someone switched `embed.provider` and disabled semantic search on a healthy
+  knowledge base — a worse failure than the one being fixed. `ModelSpec` gains
+  an `Aliases` field, and a difference involving a model that is not in the
+  registry warns without disabling anything.
+
+  `conduit doctor` gains an **embedding model stamp** line. Stats and
+  capabilities now report the model that BUILT the vectors, with the configured
+  model shown separately when they differ; they previously reported the
+  configured model unconditionally, which asserted the one thing that is false
+  exactly when it matters.
+
+  **Upgrading:** a knowledge base with vectors but no stamp adopts the
+  configured model on first open, when the widths match, and logs one line
+  saying it has assumed this. If you changed embedding model before upgrading,
+  run `conduit kb sync --rebuild-vectors` once.
+  ([#107](https://github.com/amlandas/Conduit-AI-Intelligence-Hub/issues/107))
 
 Dogfood week — four defects found by running Conduit as a user rather than as a
 test suite:

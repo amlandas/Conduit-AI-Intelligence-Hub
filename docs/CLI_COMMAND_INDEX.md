@@ -261,11 +261,23 @@ Show knowledge base statistics.
 
 ### `conduit kb migrate`
 
-Migrate existing FTS5-indexed documents to the vector search index. Required to
-enable semantic search for documents indexed before semantic search was
-enabled; new documents are indexed in both automatically.
+Bring the vector index into line with the full-text index. Which of two jobs it
+does is decided from the knowledge base's state, not from a flag:
+
+- **Backfill** (the usual case) — documents that are indexed but have no vectors
+  get them; documents that already have vectors are left alone. This is what you
+  want after turning semantic search on for a knowledge base that was already
+  indexed.
+- **Full re-embed** — when the stored vectors were built by a *different*
+  embedding model, every vector is discarded and rebuilt with the model
+  configured now, and the knowledge base is re-stamped. Filling gaps instead
+  would leave two incompatible sets of vectors in one index.
+
+New documents are indexed into both FTS5 and the vector index automatically;
+this command is for catching up.
 
 Requires an embedding provider, and fails when `embed.provider` is `none`.
+Exits 2 when some documents could not be embedded.
 
 ---
 

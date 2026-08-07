@@ -107,6 +107,17 @@ The retrieval engine. The largest package and the one with the most invariants.
   ordinary SQL predicates evaluated *before* the distance, so a selective
   source filter can never silently cost recall the way post-filtering an
   approximate index would.
+- `embedding_stamp.go` — the identity of whatever built the stored vectors,
+  in one row of `kb_embedding_stamp`, written in the same transaction as the
+  first vectors it describes. Its job is to make an embedding-model change
+  *visible*: the width check in `vecstore_sqlite.go` catches only a swap that
+  changes the width, and a same-width swap silently mixes two incomparable
+  vector spaces (#107). Model names are canonicalised through the
+  `internal/embed` registry before comparison — the same weights answer to
+  several names — and a difference involving a model the registry does not know
+  warns without disabling anything. Never make that comparison a string
+  compare: it would report a model change on every `embed.provider` switch and
+  turn semantic search off on a healthy knowledge base.
 - `chunker.go`, `indexer.go`, `searcher.go`, `semantic_search.go`,
   `result_processor.go`, `content_cleaner.go` — the ingest and retrieval path.
 - `graph_store_sqlite.go`, `graph_schema.go`, `kag_search.go`,
@@ -182,6 +193,14 @@ than ignoring them, so a stale key from a removed subsystem is visible.
 ### `internal/store`
 
 SQLite open and migrate. Migrations are embedded via `go:embed migrations/*.sql`.
+
+Migration 006 adds `kb_embedding_stamp`. Two tables — the vector tables and the
+stamp — are created by *both* the migration chain here and
+`SQLiteVectorIndex.ensureSchema` in `internal/kb`, because a database can reach
+the vector index before the chain has run and `internal/store` cannot import
+`internal/kb` without a cycle. `TestSchemaParityMigrationVsEnsureSchema`
+compares what SQLite actually stored from each path; WP-2.3 found the two had
+drifted once already.
 
 ### `internal/querylog`
 

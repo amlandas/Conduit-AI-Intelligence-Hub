@@ -366,8 +366,9 @@ truncated, corrupted or replaced.
 
 ### Changing models
 
-Different models produce different vector widths, so existing vectors become
-wrong. After switching:
+Vectors from two different models cannot be compared. A cosine similarity
+computed across them is not a weaker signal, it is noise. So every stored vector
+has to be produced again after a model change:
 
 ```bash
 conduit config set embed.model qwen3-embedding-0.6b
@@ -376,6 +377,82 @@ conduit kb sync --rebuild-vectors
 ```
 
 Leave `embed.dimensions` at 0 so the width comes from the registry.
+
+### The embedding model stamp
+
+A knowledge base records which model built its vectors, in a single row of
+`kb_embedding_stamp`: the canonical model id, the vector width, the
+instruction-prefix scheme, the provider that served it, and when it was
+recorded. The row is written in the same transaction as the first vectors it
+describes, so there is no window in which vectors exist with nothing explaining
+where they came from.
+
+The width check on write catches a model swap only when the width changes.
+Two 768-dimension models are indistinguishable to it, and the failure that
+follows is silent: writes are accepted, queries return confident nonsense.
+The stamp is what closes that (issue #107).
+
+**What happens on a mismatch**
+
+| Operation | Behaviour |
+|---|---|
+| Vector write | Refused. The document is still indexed for keyword search and counted in the sync's aggregate warning. |
+| Semantic search | The semantic leg is skipped. The response carries a note naming both models and the remedy. |
+| Keyword search | Unaffected. |
+| `kb sync --rebuild-vectors` (all sources) | Discards the old vectors, rebuilds, and re-stamps. |
+| `kb sync --rebuild-vectors <source>` | Leaves the mismatch in place — rebuilding one source would leave the rest in the old model's space. Use the whole-knowledge-base form. |
+| `kb migrate` | Detects the change and re-embeds everything, rather than backfilling into a mixed index. |
+
+**Model identity is canonical, not literal**
+
+The same weights answer to several names. Ollama serves
+`nomic-embed-text-v1.5` under the tag `nomic-embed-text`, and the pinned
+artifact is a file called `nomic-embed-text-v1.5.f16.gguf`. Comparing those as
+strings would report a model change every time an operator switched
+`embed.provider`, and disable semantic search on a knowledge base with nothing
+wrong with it.
+
+So identifiers are resolved through the model registry
+(`internal/embed/registry.go`, `ModelSpec.Aliases`) before comparison, and the
+comparison has three outcomes:
+
+- **Same canonical model** — proceed, silently.
+- **Two different registry models** — mismatch. Refuse and report.
+- **Either identifier is not in the registry** — warn once, disable nothing.
+
+The third case is the honest answer for a model Conduit does not know, such as a
+locally built Ollama tag. Conduit cannot prove it differs from the stamped one,
+so it says what it saw and leaves the decision to you. **This is a real limit:**
+a knowledge base built with an unregistered model, whose model is then changed
+to another unregistered one, will not be caught. Adding the model to the
+registry, or watching for the warning in `conduit doctor`, is the mitigation.
+
+A width change is always a mismatch regardless of model name, because two
+widths are never comparable.
+
+**Upgrading a knowledge base built before 2.0.0-beta.5**
+
+Such a knowledge base has vectors and no stamp. On the first open with a build
+that stamps, Conduit adopts the currently configured model as the stamp, if and
+only if the stored vector width matches that model's, and logs one
+informational line saying it has assumed this. `conduit doctor` marks the stamp
+`(assumed: ...)` afterwards.
+
+The assumption is necessary. Without it, the first write after the upgrade
+would stamp the knowledge base with whatever model was configured then —
+blessing exactly the mixture the stamp exists to prevent. It is also
+falsifiable: **if you changed embedding model before upgrading, run
+`conduit kb sync --rebuild-vectors` once.** No information exists on disk that
+could tell Conduit this had happened.
+
+**Instruction prefixes are recorded too**
+
+`nomic-embed-text-v1.5` is trained asymmetrically: documents are prefixed with
+`search_document: ` and queries with `search_query: `. Conduit's llama-server
+provider applies those from the registry. The Ollama provider is currently
+wired without them. Both produce vectors in the same space, so a switch between
+them is not a mismatch and nothing is disabled — but retrieval accuracy differs,
+so the change is recorded, warned about once, and shown by `conduit doctor`.
 
 ---
 
@@ -531,8 +608,26 @@ The main tool. Checks, in order:
 - SQLite FTS5 is compiled in and initialised
 - the embedding provider is configured and reachable (**skipped** when
   `embed.provider` is `none`)
+- the pinned model artifact is on disk at the expected size
 - the vector index exists, and whether it is populated
+- **the embedding model stamp**: which model built the stored vectors, and
+  whether it agrees with the one configured now
 - at least one AI client has the MCP server configured
+
+The stamp line reports one of:
+
+```
+  ✓ embedding model stamp        nomic-embed-text-v1.5 · 768d · 1204 vectors · stamped 2026-08-01
+  ✓ embedding model stamp        nomic-embed-text-v1.5 · 768d · 1204 vectors · stamped 2026-08-01 (assumed: these vectors predate model recording, and their width matches)
+  ⚠ embedding model stamp        ... at least one of the two is not in Conduit's registry, so they cannot be compared
+  ✗ embedding model stamp        vectors were built by X, current model is Y — semantic search is disabled until they agree
+      → run 'conduit kb sync --rebuild-vectors'
+  ⓘ embedding model stamp        stored vectors were built by X; embeddings are currently off (embed.provider=none)
+```
+
+Only the ✗ counts towards the exit code. See
+[the embedding model stamp](#the-embedding-model-stamp) for what each state
+means.
 
 ```bash
 conduit doctor
@@ -587,6 +682,11 @@ correlating files.
 
 Script against these. Code 2 is the important one: search works, but on
 keywords only.
+
+The JSON sync result carries `semantic_errors` and, when the cause was an
+embedding-model change rather than a provider failure, a `model_mismatch`
+string naming both models and the remedy. Retrying is pointless in that case;
+`conduit kb sync --rebuild-vectors` is the fix.
 
 ---
 
