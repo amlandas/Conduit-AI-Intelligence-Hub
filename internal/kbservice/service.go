@@ -45,11 +45,16 @@ type Service struct {
 	searcher *kb.Searcher
 	indexer  *kb.Indexer
 	semantic *kb.SemanticSearcher
+	vectors  *kb.SQLiteVectorIndex
 	hybrid   *kb.HybridSearcher
 	graph    *kb.GraphStore
 
 	embedder  kb.Embedder
 	embedInfo EmbedderInfo
+
+	// stampAdopted records that this open inferred an embedding-model stamp for
+	// vectors that predate stamping, so `conduit doctor` can say so.
+	stampAdopted bool
 
 	logger zerolog.Logger
 }
@@ -100,18 +105,37 @@ func Open(cfg *config.Config) (*Service, error) {
 		if dim <= 0 {
 			dim = kb.DefaultEmbeddingDimension
 		}
+		identity := kb.NewEmbeddingIdentity(embedder.Model(), info.Provider, dim, info.PrefixScheme)
 		vectors, verr := kb.NewSQLiteVectorIndex(s.db, kb.VectorIndexConfig{
 			Dimension: dim,
 			BatchSize: 100,
+			Identity:  identity,
 		})
 		if verr != nil {
 			logger.Warn().Err(verr).Msg("vector index unavailable; retrieval is lexical-only")
 			s.embedInfo.Available = false
 			s.embedInfo.Err = verr.Error()
 		} else {
+			s.vectors = vectors
 			s.semantic = kb.NewSemanticSearcherWith(s.db, embedder, vectors)
 			s.source.SetSemanticSearcher(s.semantic)
 			s.indexer.SetSemanticSearcher(s.semantic)
+
+			// Adopt an identity for vectors that predate stamping (WP-4.3).
+			//
+			// This has to happen on open, not on the next write. A knowledge base
+			// upgraded with unstamped vectors that is then indexed with a DIFFERENT
+			// model would otherwise be stamped with that new model at the first
+			// write, silently blessing exactly the mix the stamp exists to prevent.
+			// Adopting first means the change is compared against something.
+			//
+			// A failure here is never fatal: the knowledge base may be on read-only
+			// media, and losing the check is much better than losing the command.
+			adopted, aerr := vectors.AdoptLegacyStamp(context.Background())
+			if aerr != nil {
+				logger.Debug().Err(aerr).Msg("could not record embedding-model stamp for existing vectors")
+			}
+			s.stampAdopted = adopted
 		}
 	}
 
@@ -266,23 +290,171 @@ func (s *Service) Sync(ctx context.Context, sourceID string, rebuildVectors bool
 	return s.source.SyncWithOptions(ctx, sourceID, &kb.SyncOptions{RebuildVectors: rebuildVectors})
 }
 
-// Migrate embeds documents that are in the full-text index but have no vector.
-// It returns the number migrated. It is a no-op error when embeddings are off.
-func (s *Service) Migrate(ctx context.Context, progress func(current, total int)) (int, error) {
+// MigrateResult reports what `conduit kb migrate` did.
+type MigrateResult struct {
+	// Documents is how many documents were embedded.
+	Documents int `json:"documents"`
+	// Failed is how many were skipped after an error.
+	Failed int `json:"failed"`
+	// Total is how many were in scope.
+	Total int `json:"total"`
+
+	// FullReembed is true when the pass rebuilt EVERY vector because the
+	// embedding model had changed, rather than filling in missing ones.
+	FullReembed bool `json:"full_reembed"`
+	// FromModel and ToModel are set only on a full re-embed.
+	FromModel string `json:"from_model,omitempty"`
+	ToModel   string `json:"to_model,omitempty"`
+}
+
+// Migrate brings the vector index into line with the full-text index.
+//
+// It has two behaviours, chosen from the knowledge base's own state rather than
+// from a flag, because the user cannot be expected to know which one they need:
+//
+//   - Ordinary backfill: documents that are indexed but have no vectors get
+//     them. Documents that already have vectors are left alone.
+//   - Model change: when the stored vectors were built by a different embedding
+//     model, filling in the gaps would only deepen the mix. Every vector is
+//     discarded and rebuilt, and the knowledge base is restamped as it goes.
+//
+// It is an error when embeddings are switched off; there is nothing to migrate
+// to.
+func (s *Service) Migrate(ctx context.Context, progress func(current, total int)) (*MigrateResult, error) {
 	if s.semantic == nil {
-		return 0, ErrSemanticUnavailable
+		return nil, ErrSemanticUnavailable
 	}
-	var migrated int
-	fn := func(current, total int) {
-		migrated = current
-		if progress != nil {
-			progress(current, total)
+
+	status, err := s.EmbeddingStampStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if status != nil && status.Verdict == kb.StampMismatch {
+		return s.reembedAll(ctx, status, progress)
+	}
+
+	res, err := s.semantic.ReembedDocuments(ctx, kb.ReembedMissing, progress)
+	return &MigrateResult{Documents: res.Embedded, Failed: res.Failed, Total: res.Total}, err
+}
+
+// ReembedAll discards every stored vector and rebuilds it with the currently
+// configured model.
+//
+// This is the engine a `conduit model upgrade` command fronts, and the same code
+// path `kb migrate` and `kb sync --rebuild-vectors` take after a model change.
+// It is deliberately not conditional: a caller asking for this has already
+// decided.
+func (s *Service) ReembedAll(ctx context.Context, progress func(current, total int)) (*MigrateResult, error) {
+	if s.semantic == nil {
+		return nil, ErrSemanticUnavailable
+	}
+	status, err := s.EmbeddingStampStatus(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return s.reembedAll(ctx, status, progress)
+}
+
+// reembedAll performs the destructive rebuild. status may be nil.
+func (s *Service) reembedAll(ctx context.Context, status *EmbeddingStampStatus, progress func(current, total int)) (*MigrateResult, error) {
+	out := &MigrateResult{FullReembed: true}
+	if status != nil {
+		if status.Stamp != nil {
+			out.FromModel = status.Stamp.Display()
 		}
+		out.ToModel = status.Active.Display()
 	}
-	if err := s.semantic.MigrateFromFTS(ctx, fn); err != nil {
-		return migrated, err
+
+	// Clearing before rebuilding is what makes the guard let these writes
+	// through, and it is also the only ordering in which the stamp never
+	// describes vectors that are not there. See SQLiteVectorIndex.ResetVectorSpace.
+	if err := s.semantic.ResetVectorSpace(ctx); err != nil {
+		return out, err
 	}
-	return migrated, nil
+
+	res, err := s.semantic.ReembedDocuments(ctx, kb.ReembedAll, progress)
+	out.Documents, out.Failed, out.Total = res.Embedded, res.Failed, res.Total
+	return out, err
+}
+
+// PrepareVectorRebuild clears the vector space when, and only when, the stored
+// vectors were built by a different embedding model.
+//
+// `conduit kb sync --rebuild-vectors` calls it once before syncing every source.
+// Without it the rebuild could not succeed: each write would be refused by the
+// very guard that detected the change. With it, the sync re-embeds into an empty
+// space and stamps it with the model actually in use.
+//
+// It returns the mismatch it acted on so the caller can tell the user what
+// happened, or (nil, nil) when there was nothing to do -- which is the case for
+// every ordinary rebuild.
+func (s *Service) PrepareVectorRebuild(ctx context.Context) (*kb.ModelMismatchError, error) {
+	if s.semantic == nil {
+		return nil, nil
+	}
+	status, err := s.EmbeddingStampStatus(ctx)
+	if err != nil || status == nil || status.Verdict != kb.StampMismatch {
+		return nil, err
+	}
+	if err := s.semantic.ResetVectorSpace(ctx); err != nil {
+		return nil, err
+	}
+	return &kb.ModelMismatchError{
+		Stamped: status.Stamp.EmbeddingIdentity,
+		Active:  status.Active,
+		Op:      "rebuild vectors",
+	}, nil
+}
+
+// EmbeddingStampStatus describes how the stored vectors and the configured
+// embedder relate. It is what `conduit doctor` reports.
+type EmbeddingStampStatus struct {
+	// Stamp is the recorded identity of the stored vectors, nil when none has
+	// been recorded.
+	Stamp *kb.EmbeddingStamp
+	// Active is the identity of the embedder configured now.
+	Active kb.EmbeddingIdentity
+	// Verdict is the comparison outcome.
+	Verdict kb.StampVerdict
+	// Vectors is how many vectors are stored.
+	Vectors int64
+	// AdoptedThisOpen is true when this process inferred the stamp for
+	// pre-existing vectors rather than reading one that was already there.
+	AdoptedThisOpen bool
+}
+
+// StoredEmbeddingStamp returns the recorded identity of the stored vectors
+// without needing an embedder.
+//
+// It exists for embed.provider=none, where there is no vector index to ask but
+// the record of what built the existing vectors is still worth showing: it is
+// what they will be compared against if embeddings are turned back on.
+func (s *Service) StoredEmbeddingStamp(ctx context.Context) (*kb.EmbeddingStamp, error) {
+	return kb.ReadEmbeddingStamp(ctx, s.db)
+}
+
+// EmbeddingStampStatus returns the stamp comparison, or nil when embeddings are
+// switched off (there is no vector space to describe).
+func (s *Service) EmbeddingStampStatus(ctx context.Context) (*EmbeddingStampStatus, error) {
+	if s.vectors == nil {
+		return nil, nil
+	}
+	stamp, err := s.vectors.Stamp(ctx)
+	if err != nil {
+		return nil, err
+	}
+	count, err := s.VectorCount(ctx)
+	if err != nil {
+		count = 0
+	}
+	active := s.vectors.Identity()
+	return &EmbeddingStampStatus{
+		Stamp:           stamp,
+		Active:          active,
+		Verdict:         stamp.Compare(active),
+		Vectors:         count,
+		AdoptedThisOpen: s.stampAdopted,
+	}, nil
 }
 
 // ErrSemanticUnavailable is returned by operations that require embeddings

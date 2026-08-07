@@ -300,6 +300,9 @@ func runDoctor(ctx context.Context, probeTimeout time.Duration) []check {
 		}
 	}
 
+	// ---- embedding model stamp ----------------------------------------------
+	checks = append(checks, embedStampCheck(ctx, svc))
+
 	// ---- content ------------------------------------------------------------
 	if totals, _, serr := svc.Stats(ctx); serr != nil {
 		checks = append(checks, check{
@@ -429,6 +432,110 @@ func embedModelCheck(cfg *config.Config) check {
 		Name: "embedding model", Status: checkOK,
 		Detail: fmt.Sprintf("%s present (%s)", spec.ID, humanBytes(st.SizeBytes)),
 	}
+}
+
+// embedStampCheck reports which embedding model built the stored vectors.
+//
+// This is the check that makes issue #107 visible. Everything else doctor
+// reports is about whether a component is present and answering; this one is
+// about whether the data means what the system assumes it means. A knowledge
+// base whose vectors came from a different model passes every other check on
+// this page and returns nonsense.
+func embedStampCheck(ctx context.Context, svc *kbservice.Service) check {
+	const name = "embedding model stamp"
+
+	status, err := svc.EmbeddingStampStatus(ctx)
+	if err != nil {
+		return check{Name: name, Status: checkWarn, Detail: err.Error()}
+	}
+
+	// embed.provider=none: nothing embeds now, but the record of what once did
+	// is still worth showing -- it is what the vectors will be compared against
+	// if embeddings are switched back on.
+	if status == nil || !status.Active.Known() {
+		stamp, serr := svc.StoredEmbeddingStamp(ctx)
+		if serr != nil || stamp == nil {
+			return check{
+				Name: name, Status: checkSkip,
+				Detail: "no embedding model in use (embed.provider=none)",
+			}
+		}
+		return check{
+			Name: name, Status: checkSkip,
+			Detail: fmt.Sprintf("stored vectors were built by %s (%dd)%s; "+
+				"embeddings are currently off (embed.provider=none)",
+				stamp.Display(), stamp.Dimensions, stampedOn(stamp)),
+		}
+	}
+
+	if status.Stamp == nil {
+		if status.Vectors == 0 {
+			return check{
+				Name: name, Status: checkOK,
+				Detail: fmt.Sprintf("nothing indexed yet; %s will be recorded at the first index",
+					status.Active.Display()),
+			}
+		}
+		// Vectors with no stamp and no adoption means the widths disagree, which
+		// the dimension guard on write already refuses -- loudly and by itself.
+		return check{
+			Name: name, Status: checkWarn,
+			Detail: fmt.Sprintf("%d vectors carry no model record and their width does not match %s (%dd)",
+				status.Vectors, status.Active.Display(), status.Active.Dimensions),
+			Remedy: "run '" + kb.RebuildRemedy + "'",
+		}
+	}
+
+	base := fmt.Sprintf("%s · %dd · %d vectors%s",
+		status.Stamp.Display(), status.Stamp.Dimensions, status.Vectors, stampedOn(status.Stamp))
+
+	switch status.Verdict {
+	case kb.StampMismatch:
+		return check{
+			Name: name, Status: checkFail,
+			Detail: fmt.Sprintf("vectors were built by %s, current model is %s — "+
+				"semantic search is disabled until they agree (%d vectors affected)",
+				status.Stamp.Display(), status.Active.Display(), status.Vectors),
+			Remedy: "run '" + kb.RebuildRemedy + "'",
+		}
+
+	case kb.StampUnknown:
+		return check{
+			Name: name, Status: checkWarn,
+			Detail: fmt.Sprintf("%s, but the model configured now is %s and at least one of the two "+
+				"is not in Conduit's registry, so they cannot be compared — semantic search is left on",
+				base, status.Active.Display()),
+			Remedy: "if you did change embedding model, run '" + kb.RebuildRemedy + "'",
+		}
+
+	case kb.StampPrefixChanged:
+		return check{
+			Name: name, Status: checkWarn,
+			Detail: base + ", but with different instruction prefixes than the current provider " +
+				"applies; results are usable but less accurate",
+			Remedy: "run '" + kb.RebuildRemedy + "' to restore full accuracy",
+		}
+	}
+
+	if status.Stamp.Adopted {
+		// Say so plainly. The stamp on an upgraded knowledge base is an
+		// inference from vector width, not a record, and a user who changed
+		// model before upgrading is the one person this page must not mislead.
+		return check{
+			Name: name, Status: checkOK,
+			Detail: base + " (assumed: these vectors predate model recording, and their width matches)",
+		}
+	}
+
+	return check{Name: name, Status: checkOK, Detail: base}
+}
+
+// stampedOn renders the stamp date, or "" when it is not known.
+func stampedOn(stamp *kb.EmbeddingStamp) string {
+	if stamp.CreatedAt.IsZero() {
+		return ""
+	}
+	return " · stamped " + stamp.CreatedAt.Format("2006-01-02")
 }
 
 // mcpClientCheck reports whether any supported AI client is wired to Conduit.

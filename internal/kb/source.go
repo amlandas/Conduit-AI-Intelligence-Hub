@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -483,6 +484,14 @@ func (sm *SourceManager) SyncWithOptions(ctx context.Context, sourceID string, o
 
 	result.Duration = time.Since(start)
 	result.SemanticErrors = sm.indexer.GetSemanticErrors()
+	if mismatch := sm.indexer.GetModelMismatch(); mismatch != nil {
+		var mm *ModelMismatchError
+		if errors.As(mismatch, &mm) {
+			result.ModelMismatch = mm.Note()
+		} else {
+			result.ModelMismatch = mismatch.Error()
+		}
+	}
 
 	// Update source stats
 	sm.updateSourceStats(ctx, sourceID)

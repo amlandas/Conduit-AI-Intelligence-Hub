@@ -33,6 +33,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -187,6 +188,13 @@ type VectorIndexConfig struct {
 	BatchSize int
 	// CollectionName is a cosmetic label surfaced in stats output.
 	CollectionName string
+	// Identity names the embedder these vectors are written and queried with.
+	//
+	// The width check above only catches a swap that changes the width. A
+	// same-width swap needs a name, and this is it -- see embedding_stamp.go.
+	// The zero value disables stamping and checking entirely, which is what
+	// callers that genuinely do not know their embedder should pass.
+	Identity EmbeddingIdentity
 }
 
 // ---------------------------------------------------------------------------
@@ -199,10 +207,16 @@ type SQLiteVectorIndex struct {
 	dimension      int
 	batchSize      int
 	collectionName string
+	identity       EmbeddingIdentity
 	logger         zerolog.Logger
 
 	schemaOnce sync.Once
 	schemaErr  error
+
+	// Warnings that describe a standing condition rather than an event, so they
+	// are emitted once per process instead of once per document.
+	unknownModelOnce sync.Once
+	prefixChangeOnce sync.Once
 }
 
 // NewSQLiteVectorIndex opens a vector index over an existing Conduit database.
@@ -225,14 +239,26 @@ func NewSQLiteVectorIndex(db *sql.DB, cfg VectorIndexConfig) (*SQLiteVectorIndex
 		cfg.CollectionName = DefaultCollectionName
 	}
 
+	// The identity's width and the index's width are the same fact; keeping them
+	// in step here means a caller cannot configure a stamp that disagrees with
+	// the guard on the very next line of code.
+	if cfg.Identity.Known() && cfg.Identity.Dimensions <= 0 {
+		cfg.Identity.Dimensions = cfg.Dimension
+	}
+
 	return &SQLiteVectorIndex{
 		db:             db,
 		dimension:      cfg.Dimension,
 		batchSize:      cfg.BatchSize,
 		collectionName: cfg.CollectionName,
+		identity:       cfg.Identity,
 		logger:         observability.Logger("kb.vecstore"),
 	}, nil
 }
+
+// Identity reports the embedder this index writes and queries with. The zero
+// value means the caller did not supply one.
+func (vi *SQLiteVectorIndex) Identity() EmbeddingIdentity { return vi.identity }
 
 // ensureSchema creates the vector tables if the database predates migration 005.
 // Migrations normally do this; the lazy path keeps a hand-rolled or partially
@@ -263,6 +289,9 @@ func (vi *SQLiteVectorIndex) ensureSchema(ctx context.Context) error {
 				embedding   BLOB NOT NULL,
 				created_at  TEXT NOT NULL DEFAULT (datetime('now'))
 			)`,
+			// Must match migration 006 exactly; the statement is shared rather
+			// than duplicated so it cannot drift. See embedding_stamp.go.
+			embeddingStampDDL,
 			`CREATE INDEX IF NOT EXISTS idx_vectors_document ON kb_vectors(document_id)`,
 			`CREATE INDEX IF NOT EXISTS idx_vectors_source ON kb_vectors(source_id)`,
 		}
@@ -278,6 +307,187 @@ func (vi *SQLiteVectorIndex) ensureSchema(ctx context.Context) error {
 
 // Dimension returns the expected embedding width.
 func (vi *SQLiteVectorIndex) Dimension() int { return vi.dimension }
+
+// ---------------------------------------------------------------------------
+// Embedding-model identity guard (WP-4.3, issue #107)
+// ---------------------------------------------------------------------------
+
+// Stamp returns the recorded identity of the stored vectors, or nil when none
+// has been recorded.
+func (vi *SQLiteVectorIndex) Stamp(ctx context.Context) (*EmbeddingStamp, error) {
+	if err := vi.ensureSchema(ctx); err != nil {
+		return nil, err
+	}
+	return ReadEmbeddingStamp(ctx, vi.db)
+}
+
+// guard refuses an operation whose result would mix two vector spaces.
+//
+// It returns nil for every verdict except a PROVEN model change, so a knowledge
+// base built with a model Conduit does not recognise keeps working -- the
+// diagnosis is a warning, not a refusal. op names the operation in the error.
+//
+// q is the transaction when there is one, so that the read of the stamp and the
+// write it authorises are the same atomic view of the database.
+func (vi *SQLiteVectorIndex) guard(ctx context.Context, q rowQuerier, op string) (*EmbeddingStamp, error) {
+	if !vi.identity.Known() {
+		return nil, nil
+	}
+	stamp, err := ReadEmbeddingStamp(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+
+	switch stamp.Compare(vi.identity) {
+	case StampMismatch:
+		return stamp, &ModelMismatchError{
+			Stamped: stamp.EmbeddingIdentity,
+			Active:  vi.identity,
+			Op:      op,
+		}
+
+	case StampUnknown:
+		// One of the two identifiers is not in the pinned registry, so we cannot
+		// tell a renamed model from a different one. Disabling semantic search on
+		// that guess is the false positive this whole design exists to avoid.
+		vi.unknownModelOnce.Do(func() {
+			vi.logger.Warn().
+				Str("stamped_model", stamp.Observed).
+				Str("current_model", vi.identity.Observed).
+				Msg("stored vectors name a different embedding model, but at least one of the two " +
+					"is not in Conduit's model registry, so they cannot be compared; " +
+					"semantic search is left ON -- re-run `" + RebuildRemedy + "` if you did change model")
+		})
+
+	case StampPrefixChanged:
+		// Same weights, different instruction decoration: still one space, but
+		// asymmetric models lose accuracy when documents and queries are
+		// decorated differently. Worth saying, not worth refusing over.
+		vi.prefixChangeOnce.Do(func() {
+			vi.logger.Warn().
+				Str("model", vi.identity.Canonical).
+				Str("stamped_prefix_scheme", stamp.PrefixScheme).
+				Str("current_prefix_scheme", vi.identity.PrefixScheme).
+				Msg("stored vectors were built with different instruction prefixes than the current " +
+					"provider applies; retrieval quality may be reduced -- `" + RebuildRemedy + "` restores it")
+		})
+	}
+
+	return stamp, nil
+}
+
+// stampAfterWrite records the active identity when the knowledge base has none.
+//
+// It runs inside the caller's transaction, so the stamp and the first vectors it
+// describes commit together or not at all: there is no window in which vectors
+// exist with nothing recorded about what produced them.
+//
+// An existing stamp is never overwritten here. Replacing it is a deliberate act
+// (ResetVectorSpace), not a side effect of an ordinary write -- overwriting on
+// the StampUnknown path would destroy the very evidence the user needs.
+func (vi *SQLiteVectorIndex) stampAfterWrite(ctx context.Context, ex execer, existing *EmbeddingStamp) error {
+	if !vi.identity.Known() || existing != nil {
+		return nil
+	}
+	return WriteEmbeddingStamp(ctx, ex, vi.identity, false)
+}
+
+// AdoptLegacyStamp records the active embedder as the author of vectors that
+// were written before Conduit stamped anything.
+//
+// This is the upgrade path, and it is a guess -- an honest one. A knowledge base
+// carrying vectors but no stamp was built by some earlier Conduit, and the only
+// evidence available about which model that was is the width of the vectors it
+// left behind. When that width matches the embedder configured now, assuming
+// they are the same model is by far the most likely reading, and it is the one
+// that makes every LATER model change detectable. Refusing to guess would leave
+// the installed base permanently unprotected.
+//
+// It returns true when a stamp was adopted. It is a no-op when a stamp already
+// exists, when there are no vectors, or when the widths disagree -- that last
+// case is already handled, loudly, by the dimension check on write.
+func (vi *SQLiteVectorIndex) AdoptLegacyStamp(ctx context.Context) (bool, error) {
+	if !vi.identity.Known() {
+		return false, nil
+	}
+	if err := vi.ensureSchema(ctx); err != nil {
+		return false, err
+	}
+
+	stamp, err := ReadEmbeddingStamp(ctx, vi.db)
+	if err != nil {
+		return false, err
+	}
+	if stamp != nil {
+		return false, nil
+	}
+
+	// One representative width is enough: kb_vectors rows are only ever written
+	// through UpsertTx, which rejects any vector that is not vi.dimension wide.
+	var storedDim int
+	err = vi.db.QueryRowContext(ctx, `SELECT dim FROM kb_vectors LIMIT 1`).Scan(&storedDim)
+	if errors.Is(err, sql.ErrNoRows) {
+		// No vectors: nothing to adopt. The first write will stamp.
+		return false, nil
+	}
+	if err != nil {
+		if isMissingTableErr(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("inspect stored vector width: %w", err)
+	}
+	if storedDim != vi.identity.Dimensions {
+		return false, nil
+	}
+
+	if err := WriteEmbeddingStamp(ctx, vi.db, vi.identity, true); err != nil {
+		return false, err
+	}
+	vi.logger.Info().
+		Str("model", vi.identity.Display()).
+		Int("dimensions", storedDim).
+		Msg("existing vectors carried no embedding-model record; assuming they were built by the " +
+			"currently configured model, because their width matches it. " +
+			"If you have changed embedding model since indexing, run `" + RebuildRemedy + "`")
+	return true, nil
+}
+
+// ResetVectorSpace deletes every stored vector and the stamp that describes
+// them, in one transaction.
+//
+// It is the first half of a whole-knowledge-base re-embed, and the reason the
+// two halves are ordered this way: the stamp must never describe vectors that
+// are not there, and vectors must never be present with no stamp explaining
+// them. Emptying both at once is the only state that satisfies both, and it is
+// also the only state from which a re-embed can begin without the model guard
+// refusing its own writes.
+//
+// If the re-embed that follows fails part way, what is left is a knowledge base
+// holding only new-model vectors, stamped with the new model, and documents
+// whose vectors have not been rebuilt yet. That is a coherent state: nothing is
+// mixed, lexical search is untouched, and re-running the command finishes the
+// job.
+func (vi *SQLiteVectorIndex) ResetVectorSpace(ctx context.Context) error {
+	if err := vi.ensureSchema(ctx); err != nil {
+		return err
+	}
+	tx, err := vi.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin vector reset: %w", err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM kb_vectors`); err != nil {
+		return fmt.Errorf("clear vectors: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM kb_entity_vectors`); err != nil {
+		return fmt.Errorf("clear entity vectors: %w", err)
+	}
+	if err := ClearEmbeddingStamp(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
 
 // Upsert writes points using their own transaction.
 func (vi *SQLiteVectorIndex) Upsert(ctx context.Context, points []VectorPoint) error {
@@ -308,6 +518,14 @@ func (vi *SQLiteVectorIndex) UpsertTx(ctx context.Context, tx *sql.Tx, points []
 	}
 	start := time.Now()
 
+	// Read the stamp inside the caller's transaction. Doing it here rather than
+	// before the transaction opens is what makes "check, then write" atomic:
+	// nothing can stamp a different model between the two.
+	stamp, err := vi.guard(ctx, tx, "write vectors")
+	if err != nil {
+		return err
+	}
+
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO kb_vectors (chunk_id, document_id, source_id, dim, norm, embedding)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -336,6 +554,10 @@ func (vi *SQLiteVectorIndex) UpsertTx(ctx context.Context, tx *sql.Tx, points []
 		}
 	}
 
+	if err := vi.stampAfterWrite(ctx, tx, stamp); err != nil {
+		return err
+	}
+
 	vi.logger.Debug().
 		Int("count", len(points)).
 		Dur("duration", time.Since(start)).
@@ -353,6 +575,12 @@ func (vi *SQLiteVectorIndex) Search(ctx context.Context, query []float32, opts V
 	}
 	if len(query) == 0 {
 		return nil, fmt.Errorf("query vector is empty")
+	}
+	// Scoring a query from one model against vectors from another does not
+	// return worse results, it returns arbitrary ones. Refusing is what lets the
+	// hybrid searcher fall back to lexical and SAY why (issue #107).
+	if _, err := vi.guard(ctx, vi.db, "semantic search"); err != nil {
+		return nil, err
 	}
 
 	queryNorm := l2Norm(query)
@@ -648,6 +876,13 @@ func (vi *SQLiteVectorIndex) UpsertEntityBatch(ctx context.Context, points []Ent
 	}
 	defer tx.Rollback()
 
+	// Entity vectors live in the same space as chunk vectors and are produced by
+	// the same embedder, so they answer to the same stamp.
+	stamp, err := vi.guard(ctx, tx, "write entity vectors")
+	if err != nil {
+		return err
+	}
+
 	stmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO kb_entity_vectors
 			(entity_id, name, entity_type, description, source_ids, confidence, dim, norm, embedding)
@@ -677,6 +912,10 @@ func (vi *SQLiteVectorIndex) UpsertEntityBatch(ctx context.Context, points []Ent
 		}
 	}
 
+	if err := vi.stampAfterWrite(ctx, tx, stamp); err != nil {
+		return err
+	}
+
 	return tx.Commit()
 }
 
@@ -690,6 +929,12 @@ func (vi *SQLiteVectorIndex) SearchEntities(ctx context.Context, query []float32
 	}
 	if len(query) == 0 {
 		return nil, fmt.Errorf("query vector is empty")
+	}
+	// KAG's entity search already treats a semantic failure as "fall back to
+	// lexical" (searchEntitiesHybrid), so refusing here degrades rather than
+	// breaks kag_query.
+	if _, err := vi.guard(ctx, vi.db, "semantic entity search"); err != nil {
+		return nil, err
 	}
 	queryNorm := l2Norm(query)
 	if queryNorm == 0 {

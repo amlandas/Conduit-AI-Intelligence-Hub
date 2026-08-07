@@ -56,6 +56,12 @@ type SyncResult struct {
 	Duration        time.Duration `json:"duration"`
 	SemanticEnabled bool          `json:"semantic_enabled"` // Whether semantic indexing was attempted
 	SemanticErrors  int           `json:"semantic_errors"`  // Number of documents with semantic indexing failures
+
+	// ModelMismatch explains a semantic failure that no retry will fix: the
+	// stored vectors were built by a different embedding model, so writing more
+	// into the same index is refused. Empty in every other case. Additive field,
+	// safe for existing consumers of this JSON.
+	ModelMismatch string `json:"model_mismatch,omitempty"`
 }
 
 // SyncError represents an error during sync.

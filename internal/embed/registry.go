@@ -2,6 +2,7 @@ package embed
 
 import (
 	"fmt"
+	"hash/fnv"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -21,6 +22,25 @@ import (
 type ModelSpec struct {
 	// ID is the registry key, e.g. "nomic-embed-text-v1.5".
 	ID string
+
+	// Aliases lists the other strings this exact model is known by, so that the
+	// SAME weights reached through a different provider resolve to the SAME
+	// canonical identity.
+	//
+	// This is not cosmetic bookkeeping. Ollama serves nomic-embed-text-v1.5
+	// under the tag "nomic-embed-text"; the pinned GGUF is a file called
+	// "nomic-embed-text-v1.5.f16.gguf". A naive string comparison between the
+	// model that built a knowledge base's vectors and the model configured now
+	// would call a provider switch between those three spellings a model
+	// change, and disabling semantic search on a perfectly healthy knowledge
+	// base is a worse failure than the one the check exists to catch.
+	//
+	// Entries are matched after normalisation (see normalizeModelID): case,
+	// surrounding whitespace, an Ollama ":latest" tag, a directory prefix and a
+	// ".gguf" suffix are all insignificant. Every alias must name the same
+	// weights at the same width -- an alias is an assertion that two vectors
+	// produced through these two names are directly comparable.
+	Aliases []string
 
 	// Dimensions is the vector width the model produces.
 	Dimensions int
@@ -137,7 +157,16 @@ const DefaultModelID = ModelNomicEmbedTextV15
 // and are exact. Adding a model here without a verified hash is a bug.
 var registry = map[string]ModelSpec{
 	ModelNomicEmbedTextV15: {
-		ID:            ModelNomicEmbedTextV15,
+		ID: ModelNomicEmbedTextV15,
+		// "nomic-embed-text" is the Ollama library name, whose `latest` tag is
+		// v1.5 -- the same 768-dim weights this GGUF holds. The bare filename is
+		// listed so a model path can be canonicalised too.
+		Aliases: []string{
+			"nomic-embed-text",
+			"nomic-embed-text:v1.5",
+			"nomic-embed-text-v1.5.f16.gguf",
+			"nomic-ai/nomic-embed-text-v1.5",
+		},
 		Dimensions:    768,
 		ContextTokens: 2048,
 		Pooling:       "mean",
@@ -156,7 +185,13 @@ var registry = map[string]ModelSpec{
 			"larger on a model this small.",
 	},
 	ModelQwen3Embedding06B: {
-		ID:            ModelQwen3Embedding06B,
+		ID: ModelQwen3Embedding06B,
+		Aliases: []string{
+			"qwen3-embedding:0.6b",
+			"Qwen3-Embedding-0.6B",
+			"Qwen3-Embedding-0.6B-Q8_0.gguf",
+			"Qwen/Qwen3-Embedding-0.6B",
+		},
 		Dimensions:    1024,
 		ContextTokens: 32768,
 		// Qwen3-Embedding is a causal LM that pools the FINAL token. Mean
@@ -180,7 +215,12 @@ var registry = map[string]ModelSpec{
 			"token appended to every input. See BAKEOFF-WP-2.2.md before promoting.",
 	},
 	ModelMxbaiEmbedLargeV1: {
-		ID:            ModelMxbaiEmbedLargeV1,
+		ID: ModelMxbaiEmbedLargeV1,
+		Aliases: []string{
+			"mxbai-embed-large",
+			"mxbai-embed-large-v1_fp16.gguf",
+			"mixedbread-ai/mxbai-embed-large-v1",
+		},
 		Dimensions:    1024,
 		ContextTokens: 512,
 		Pooling:       "cls",
@@ -204,6 +244,111 @@ func LookupModel(id string) (ModelSpec, error) {
 		return ModelSpec{}, fmt.Errorf("embed: unknown model %q (known: %v)", id, ModelIDs())
 	}
 	return spec, nil
+}
+
+// aliasIndex maps every normalised spelling of a known model onto its registry
+// key. It is built once at init so that canonicalisation is a map lookup rather
+// than a scan, and so that a duplicate alias is a startup panic rather than a
+// silently ambiguous resolution.
+var aliasIndex = func() map[string]string {
+	idx := make(map[string]string, len(registry)*3)
+	add := func(name, canonical string) {
+		key := normalizeModelID(name)
+		if key == "" {
+			return
+		}
+		if prev, dup := idx[key]; dup && prev != canonical {
+			// Two models claiming the same spelling would make canonicalisation
+			// depend on map iteration order, which is exactly the kind of
+			// non-determinism that turns a correctness guard into a coin flip.
+			panic(fmt.Sprintf("embed: model alias %q claimed by both %q and %q", name, prev, canonical))
+		}
+		idx[key] = canonical
+	}
+	for id, spec := range registry {
+		add(id, id)
+		for _, alias := range spec.Aliases {
+			add(alias, id)
+		}
+	}
+	return idx
+}()
+
+// normalizeModelID reduces a model identifier to the form aliases are matched
+// in: lower case, no surrounding whitespace, no directory prefix, no ".gguf"
+// suffix and no Ollama ":latest" tag.
+//
+// Only insignificant decoration is stripped. A meaningful version tag such as
+// ":0.6b" or "-v1.5" survives, because two models that differ there are two
+// different models and must not collapse onto one identity.
+func normalizeModelID(id string) string {
+	s := strings.ToLower(strings.TrimSpace(id))
+	if s == "" {
+		return ""
+	}
+	s = strings.TrimSuffix(s, ".gguf")
+	s = strings.TrimSuffix(s, ":latest")
+	return s
+}
+
+// CanonicalModelID resolves an observed embedding-model identifier onto the
+// registry's canonical id.
+//
+// It returns (canonical, true) when the model is one Conduit knows, and
+// (normalised, false) when it is not -- a user-supplied Ollama model, say. An
+// unresolved identifier is still usable as an identity: it just cannot be
+// PROVEN equal to a differently spelled one, and callers must treat a
+// difference involving an unresolved id as "unknown", never as "changed".
+func CanonicalModelID(observed string) (string, bool) {
+	norm := normalizeModelID(observed)
+	if norm == "" {
+		return "", false
+	}
+	if canonical, ok := aliasIndex[norm]; ok {
+		return canonical, true
+	}
+	// Fall back to the bare file/tag name, so that an absolute model_path such
+	// as /models/nomic-embed-text-v1.5.f16.gguf resolves the same as the
+	// filename alias does.
+	if i := strings.LastIndexAny(norm, `/\`); i >= 0 && i < len(norm)-1 {
+		if canonical, ok := aliasIndex[norm[i+1:]]; ok {
+			return canonical, true
+		}
+	}
+	return norm, false
+}
+
+// PrefixSchemeNone is the scheme identifier for "no decoration applied".
+const PrefixSchemeNone = "none"
+
+// PrefixSchemeID returns a short, stable identifier for the instruction
+// decoration a provider applies to its inputs.
+//
+// The decoration is part of what a stored vector MEANS. nomic-embed-text is
+// trained asymmetrically: documents carry "search_document: " and queries
+// "search_query: ". Conduit's llama-server provider applies those prefixes from
+// the registry; the Ollama provider is wired without them (see
+// kbservice.newEmbedder). Vectors built one way and queried the other are still
+// in the same space, so retrieval degrades rather than collapses -- which is
+// precisely why it is worth recording and reporting instead of guessing.
+func PrefixSchemeID(docPrefix, queryPrefix, inputSuffix string) string {
+	if docPrefix == "" && queryPrefix == "" && inputSuffix == "" {
+		return PrefixSchemeNone
+	}
+	h := fnv.New64a()
+	// The separators keep ("ab", "", "") from colliding with ("a", "b", "").
+	_, _ = h.Write([]byte(docPrefix))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(queryPrefix))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(inputSuffix))
+	return fmt.Sprintf("%08x", uint32(h.Sum64()>>32))
+}
+
+// PrefixScheme returns the scheme identifier for this model's pinned
+// decoration, i.e. what a provider configured from the registry will apply.
+func (s ModelSpec) PrefixScheme() string {
+	return PrefixSchemeID(s.DocPrefix, s.QueryPrefix, s.InputSuffix)
 }
 
 // ModelIDs returns the registered model ids in stable sorted order.

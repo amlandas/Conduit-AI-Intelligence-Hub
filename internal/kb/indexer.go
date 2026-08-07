@@ -22,6 +22,12 @@ type Indexer struct {
 	logger           zerolog.Logger
 	semanticErrors   int // Counter for semantic indexing failures in current batch
 	extractionErrors int // Counter for KAG extraction failures in current batch
+
+	// modelMismatch holds the embedding-model mismatch, if any, that caused the
+	// semantic failures in this batch. It exists so the caller can say "your
+	// model changed, rebuild" instead of the generic "embedding failed, retry",
+	// which for this cause would send the user round a loop that cannot work.
+	modelMismatch error
 }
 
 // NewIndexer creates a new indexer.
@@ -65,11 +71,18 @@ func (idx *Indexer) HasEntityExtraction() bool {
 // Call this before starting a batch operation to track errors for that batch.
 func (idx *Indexer) ResetSemanticErrors() {
 	idx.semanticErrors = 0
+	idx.modelMismatch = nil
 }
 
 // GetSemanticErrors returns the number of semantic indexing failures since last reset.
 func (idx *Indexer) GetSemanticErrors() int {
 	return idx.semanticErrors
+}
+
+// GetModelMismatch returns the embedding-model mismatch behind this batch's
+// semantic failures, or nil when they had some other cause.
+func (idx *Indexer) GetModelMismatch() error {
+	return idx.modelMismatch
 }
 
 // ResetExtractionErrors resets the KAG extraction error counter.
@@ -196,7 +209,23 @@ func (idx *Indexer) Index(ctx context.Context, doc *Document, chunks []Chunk) er
 	// half-indexed state; the caller retries the document as a unit.
 	if idx.semantic != nil && embeddings != nil {
 		if err := idx.semantic.IndexVectorsTx(ctx, tx, doc, chunksWithIDs, embeddings); err != nil {
-			return fmt.Errorf("index vectors: %w", err)
+			// One failure here is not like the others. A model mismatch means
+			// the vector was REFUSED, not that the write broke: the guard runs
+			// before any row is touched, so the transaction is clean and the
+			// lexical half of this document is perfectly good. Failing the whole
+			// document would cost the user their keyword search over content
+			// that has nothing wrong with it, which is the opposite of graceful
+			// degradation (#107).
+			if errors.Is(err, ErrEmbeddingModelMismatch) {
+				idx.logger.Info().
+					Err(err).
+					Str("document_id", doc.DocumentID).
+					Msg("embedding model changed, indexing lexical content only")
+				idx.semanticErrors++
+				idx.modelMismatch = err
+			} else {
+				return fmt.Errorf("index vectors: %w", err)
+			}
 		}
 	}
 

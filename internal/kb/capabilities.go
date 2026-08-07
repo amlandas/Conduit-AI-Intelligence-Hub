@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -32,9 +33,20 @@ type Capabilities struct {
 	// VectorStatus describes the state of the in-database vector index
 	VectorStatus string `json:"vector_status"`
 
-	// EmbeddingModel is the model used for embeddings, empty when embeddings
-	// are disabled.
+	// EmbeddingModel is the model that BUILT the stored vectors, read from the
+	// knowledge base's embedding stamp (WP-4.3). It falls back to the configured
+	// model when nothing has been stamped, and is empty when embeddings are
+	// disabled.
+	//
+	// It used to report the configured model unconditionally, which quietly
+	// asserted that the current model had produced the stored vectors -- the one
+	// claim that is false in precisely the situation a reader needs to know
+	// about.
 	EmbeddingModel string `json:"embedding_model,omitempty"`
+
+	// ActiveEmbeddingModel is the model configured now. It is set only when it
+	// differs from EmbeddingModel, i.e. when the vectors need rebuilding.
+	ActiveEmbeddingModel string `json:"active_embedding_model,omitempty"`
 
 	// EmbedStatus describes embedding provider connectivity.
 	EmbedStatus string `json:"embed_status"`
@@ -71,6 +83,17 @@ func DetectCapabilitiesWithTimeout(ctx context.Context, db *sql.DB, embedder Emb
 	caps.EmbedStatus = embedStatus
 	if embedder != nil {
 		caps.EmbeddingModel = embedder.Model()
+
+		// Prefer what actually built the vectors over what is configured.
+		if db != nil {
+			if stamp, err := ReadEmbeddingStamp(ctx, db); err == nil && stamp != nil && stamp.Known() {
+				active := NewEmbeddingIdentity(embedder.Model(), "", 0, "")
+				caps.EmbeddingModel = stamp.Canonical
+				if !strings.EqualFold(stamp.Canonical, active.Canonical) {
+					caps.ActiveEmbeddingModel = active.Canonical
+				}
+			}
+		}
 	}
 
 	// Semantic search needs somewhere to search and something to embed with.
