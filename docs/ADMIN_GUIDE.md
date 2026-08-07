@@ -232,7 +232,8 @@ embed:
 ```
 
 Leave `dimensions` at 0. It is the only value that cannot be wrong — anything
-else must match the model exactly, and a mismatch corrupts retrieval quietly.
+else must match the model exactly. A mismatch is refused loudly: writes are
+rejected, `doctor` reports it, and the remedy is a full re-embed.
 
 ### MCP server
 
