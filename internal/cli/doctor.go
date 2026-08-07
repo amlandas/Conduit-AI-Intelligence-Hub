@@ -442,19 +442,35 @@ func embedModelCheck(cfg *config.Config) check {
 // base whose vectors came from a different model passes every other check on
 // this page and returns nonsense.
 func embedStampCheck(ctx context.Context, svc *kbservice.Service) check {
-	const name = "embedding model stamp"
-
 	status, err := svc.EmbeddingStampStatus(ctx)
 	if err != nil {
-		return check{Name: name, Status: checkWarn, Detail: err.Error()}
+		return check{Name: embedStampCheckName, Status: checkWarn, Detail: err.Error()}
 	}
+	// The provider=none branch has no vector index to ask, so the stored record
+	// is read separately. Fetching it here keeps renderEmbedStampCheck a pure
+	// function of the state, which is how every one of its branches is testable.
+	var stored *kb.EmbeddingStamp
+	if status == nil || !status.Active.Known() {
+		stored, _ = svc.StoredEmbeddingStamp(ctx)
+	}
+	return renderEmbedStampCheck(status, stored)
+}
+
+// embedStampCheckName is the label the stamp check reports under.
+const embedStampCheckName = "embedding model stamp"
+
+// renderEmbedStampCheck turns the stamp comparison into a doctor line.
+//
+// status is nil when embeddings are off; stored is the recorded stamp read
+// without an embedder, used only in that case.
+func renderEmbedStampCheck(status *kbservice.EmbeddingStampStatus, stored *kb.EmbeddingStamp) check {
+	const name = embedStampCheckName
 
 	// embed.provider=none: nothing embeds now, but the record of what once did
 	// is still worth showing -- it is what the vectors will be compared against
 	// if embeddings are switched back on.
 	if status == nil || !status.Active.Known() {
-		stamp, serr := svc.StoredEmbeddingStamp(ctx)
-		if serr != nil || stamp == nil {
+		if stored == nil {
 			return check{
 				Name: name, Status: checkSkip,
 				Detail: "no embedding model in use (embed.provider=none)",
@@ -464,7 +480,7 @@ func embedStampCheck(ctx context.Context, svc *kbservice.Service) check {
 			Name: name, Status: checkSkip,
 			Detail: fmt.Sprintf("stored vectors were built by %s (%dd)%s; "+
 				"embeddings are currently off (embed.provider=none)",
-				stamp.Display(), stamp.Dimensions, stampedOn(stamp)),
+				stored.Display(), stored.Dimensions, stampedOn(stored)),
 		}
 	}
 
