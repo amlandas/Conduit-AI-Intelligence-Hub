@@ -589,7 +589,16 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 		degradedNotes = append(degradedNotes, "Lexical search failed: "+ftsErr.Error())
 	}
 	if semErr != nil {
-		hs.logger.Warn().Err(semErr).Msg("semantic search failed, using FTS5 only")
+		// A model change gets its own line. The generic one reads as a transient
+		// fault -- "failed, using FTS5 only" invites a retry -- and stacks the
+		// wrapped error text on top of a message that already says everything
+		// worth saying.
+		var mismatch *ModelMismatchError
+		if errors.As(semErr, &mismatch) {
+			hs.logger.Warn().Msg(mismatch.Note())
+		} else {
+			hs.logger.Warn().Err(semErr).Msg("semantic search failed, using FTS5 only")
+		}
 		semanticDegraded = true
 	}
 	if semanticDegraded {
