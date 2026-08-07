@@ -2,6 +2,7 @@ package kb
 
 import (
 	"context"
+	"errors"
 	"math"
 	"regexp"
 	"sort"
@@ -588,11 +589,21 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 		degradedNotes = append(degradedNotes, "Lexical search failed: "+ftsErr.Error())
 	}
 	if semErr != nil {
-		hs.logger.Warn().Err(semErr).Msg("semantic search failed, using FTS5 only")
+		// A model change is reported in the RESULT, to every frontend, by the
+		// degraded note below -- so logging it here as well would print it to a
+		// CLI user twice. Debug keeps it available when someone is actually
+		// debugging. The generic failure stays at warn because its note does not
+		// carry the underlying error, and that detail has to live somewhere.
+		var mismatch *ModelMismatchError
+		if errors.As(semErr, &mismatch) {
+			hs.logger.Debug().Err(semErr).Msg("semantic leg skipped: embedding model changed")
+		} else {
+			hs.logger.Warn().Err(semErr).Msg("semantic search failed, using FTS5 only")
+		}
 		semanticDegraded = true
 	}
 	if semanticDegraded {
-		degradedNotes = append(degradedNotes, "Semantic search unavailable, using lexical search only")
+		degradedNotes = append(degradedNotes, semanticDegradedNote(semErr))
 	}
 
 	// Apply RRF fusion with agreement tracking.
@@ -655,6 +666,21 @@ func (hs *HybridSearcher) searchFusion(ctx context.Context, query string, opts H
 	}
 
 	return result
+}
+
+// semanticDegradedNote explains a failed semantic leg in one sentence.
+//
+// The generic sentence is right for a provider that is down or slow: retry, or
+// look at doctor. It is wrong for a model change, where the vectors are intact,
+// the provider is healthy, nothing will fix itself, and there is exactly one
+// command that helps -- so that case gets its own sentence naming both models
+// and the remedy (issue #107).
+func semanticDegradedNote(err error) string {
+	var mismatch *ModelMismatchError
+	if errors.As(err, &mismatch) {
+		return mismatch.Note()
+	}
+	return "Semantic search unavailable, using lexical search only"
 }
 
 // agreementInfo tracks which strategies found each result.
@@ -1161,6 +1187,21 @@ func (hs *HybridSearcher) searchSemanticOnly(ctx context.Context, query string, 
 
 	result, err := hs.semantic.Search(ctx, query, semOpts)
 	if err != nil {
+		// A model change is not a transient failure: the semantic leg will stay
+		// unusable until the vectors are rebuilt. Returning nothing would tell a
+		// user their knowledge base is empty, so fall through to lexical -- which
+		// is completely unaffected -- and carry the explanation with it.
+		var mismatch *ModelMismatchError
+		if errors.As(err, &mismatch) {
+			// Debug, for the same reason as in searchFusion: the note below
+			// reaches every frontend, and repeating it in the log prints it to a
+			// CLI user twice.
+			hs.logger.Debug().Err(err).Msg("semantic leg skipped: embedding model changed")
+			out := hs.searchFTSOnly(ctx, query, opts)
+			out.DegradedMode = true
+			out.Note = strings.TrimSpace(mismatch.Note() + " " + out.Note)
+			return out
+		}
 		hs.logger.Error().Err(err).Msg("semantic search failed")
 		return &HybridSearchResult{
 			DegradedMode: true,

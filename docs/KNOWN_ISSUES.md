@@ -243,6 +243,47 @@ them, search runs on FTS5 keyword matching — a supported mode, not a broken
 install. Set `embed.provider: none` to make that explicit and silence the
 probe.
 
+### A model change is only detected for models Conduit knows
+
+Conduit records which embedding model built a knowledge base's vectors and
+refuses to mix two vector spaces (issue #107). The check resolves model names
+through the pinned registry, so that the same model reached through a different
+provider — Ollama's `nomic-embed-text` and the registry's
+`nomic-embed-text-v1.5` — is correctly recognised as one model rather than two.
+
+The limit is the other direction. If the model is **not** in the registry, such
+as a locally built Ollama tag, Conduit cannot prove that a differently spelled
+name is a different model, and refuses to guess: it warns once, records the
+identifier it saw, and disables nothing. So this case is not caught:
+
+> A knowledge base indexed with an unregistered model, whose `embed.model` is
+> then changed to a *different* unregistered model of the same width.
+
+This is deliberate. The alternative — treating any unrecognised difference as a
+model change — would disable semantic search on a working knowledge base every
+time a user ran a model Conduit has no entry for, which is a worse and far more
+common failure than the one it would catch.
+
+Mitigations: watch the ⚠ on `conduit doctor`'s **embedding model stamp** line,
+which reports exactly this state; or use a registry model.
+
+A width change is always caught, whatever the model is called.
+
+### An upgraded knowledge base's model is assumed, not known
+
+Knowledge bases indexed before 2.0.0-beta.5 have vectors and no record of what
+produced them. On first open, Conduit assumes the currently configured model
+built them, **provided the vector width matches**, and logs one line saying so.
+`conduit doctor` marks the stamp `(assumed: ...)`.
+
+If you changed embedding model *before* upgrading to one of the **same width**,
+that assumption is wrong and nothing on disk could reveal it. Run
+`conduit kb sync --rebuild-vectors` once after upgrading if that applies to you.
+
+A model change that also changed the width *is* detected: Conduit records the
+width it actually found under a name that claims nothing, semantic search
+switches off, and `conduit doctor` shows a ✗ with the rebuild remedy.
+
 ### No data migration from Conduit 1.x
 
 A v1 knowledge base cannot be read by v2, and no converter exists or is planned.

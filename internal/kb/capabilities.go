@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -32,9 +33,20 @@ type Capabilities struct {
 	// VectorStatus describes the state of the in-database vector index
 	VectorStatus string `json:"vector_status"`
 
-	// EmbeddingModel is the model used for embeddings, empty when embeddings
-	// are disabled.
+	// EmbeddingModel is the model that BUILT the stored vectors, read from the
+	// knowledge base's embedding stamp (WP-4.3). It falls back to the configured
+	// model when nothing has been stamped, and is empty when embeddings are
+	// disabled.
+	//
+	// It used to report the configured model unconditionally, which quietly
+	// asserted that the current model had produced the stored vectors -- the one
+	// claim that is false in precisely the situation a reader needs to know
+	// about.
 	EmbeddingModel string `json:"embedding_model,omitempty"`
+
+	// ActiveEmbeddingModel is the model configured now. It is set only when it
+	// differs from EmbeddingModel, i.e. when the vectors need rebuilding.
+	ActiveEmbeddingModel string `json:"active_embedding_model,omitempty"`
 
 	// EmbedStatus describes embedding provider connectivity.
 	EmbedStatus string `json:"embed_status"`
@@ -69,14 +81,53 @@ func DetectCapabilitiesWithTimeout(ctx context.Context, db *sql.DB, embedder Emb
 	// Check the embedding provider
 	embedOK, embedStatus := checkEmbedder(ctx, embedder, probeTimeout)
 	caps.EmbedStatus = embedStatus
+
+	modelMismatch := false
 	if embedder != nil {
 		caps.EmbeddingModel = embedder.Model()
+
+		// Prefer what actually built the vectors over what is configured.
+		if db != nil {
+			if stamp, err := ReadEmbeddingStamp(ctx, db); err == nil && stamp != nil && stamp.Known() {
+				active := NewEmbeddingIdentity(embedder.Model(), "", probeDimension(embedder), "")
+				caps.EmbeddingModel = stamp.Canonical
+				if !strings.EqualFold(stamp.Canonical, active.Canonical) {
+					caps.ActiveEmbeddingModel = active.Canonical
+				}
+				modelMismatch = stamp.Compare(active) == StampMismatch
+			}
+		}
 	}
 
-	// Semantic search needs somewhere to search and something to embed with.
-	caps.SemanticAvailable = vectorOK && embedOK
+	// Semantic search needs somewhere to search, something to embed with, and
+	// vectors that the embedder can actually be compared against. A reachable
+	// provider over a foreign vector space is not a working capability, and
+	// reporting it as one is what let issue #107 stay invisible.
+	caps.SemanticAvailable = vectorOK && embedOK && !modelMismatch
 
 	return caps
+}
+
+// probeDimension recovers the embedder's vector width from an EmbedProbe.
+//
+// EmbedProbe is deliberately narrow -- Model and HealthCheck are all capability
+// detection needs to know about a provider -- but the width matters here, and
+// every production embedder is a kb.Embedder, which has it.
+//
+// Omitting this made the capability report a lie in the one case it exists to
+// catch: with a zero width, Compare's width branch cannot fire, so a
+// same-model-different-width knowledge base reported "semantic search:
+// available" while every search refused. A capability that is reported but
+// cannot be exercised is precisely the #107 defect in a status line.
+//
+// A provider that genuinely cannot say returns 0, and Compare then ignores the
+// width, which is the correct conservative fallback: this must never be
+// stricter than the guard that enforces.
+func probeDimension(embedder EmbedProbe) int {
+	if d, ok := embedder.(interface{ Dimension() int }); ok {
+		return d.Dimension()
+	}
+	return 0
 }
 
 // checkFTS5 verifies FTS5 extension is available.
@@ -157,9 +208,16 @@ func (c *Capabilities) Summary() string {
 		status += "FTS5: not available\n"
 	}
 
-	if c.SemanticAvailable {
+	switch {
+	case c.SemanticAvailable:
 		status += fmt.Sprintf("Semantic: available (model: %s)\n", c.EmbeddingModel)
-	} else {
+	case c.ActiveEmbeddingModel != "":
+		// Naming both models is the whole point: "not available" alone would
+		// send a user to look at a provider that is working perfectly.
+		status += fmt.Sprintf("Semantic: not available (vectors were built by %s, "+
+			"current model is %s; run `%s`)\n",
+			c.EmbeddingModel, c.ActiveEmbeddingModel, RebuildRemedy)
+	default:
 		status += fmt.Sprintf("Semantic: not available (vectors: %s, embeddings: %s)\n",
 			c.VectorStatus, c.EmbedStatus)
 	}

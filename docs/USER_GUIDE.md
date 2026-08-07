@@ -14,13 +14,14 @@
 5. [Searching](#searching)
 6. [Connecting AI clients](#connecting-ai-clients)
 7. [The embedding model](#the-embedding-model)
-8. [Workspaces](#workspaces)
-9. [The knowledge graph (optional)](#the-knowledge-graph-optional)
-10. [Checking on things](#checking-on-things)
-11. [Backup](#backup)
-12. [Privacy and safety](#privacy-and-safety)
-13. [Troubleshooting](#troubleshooting)
-14. [Command reference](#command-reference)
+8. [Choosing a different embedding model](#choosing-a-different-embedding-model)
+9. [Workspaces](#workspaces)
+10. [The knowledge graph (optional)](#the-knowledge-graph-optional)
+11. [Checking on things](#checking-on-things)
+12. [Backup](#backup)
+13. [Privacy and safety](#privacy-and-safety)
+14. [Troubleshooting](#troubleshooting)
+15. [Command reference](#command-reference)
 
 ---
 
@@ -438,11 +439,67 @@ SHA-256. The download goes to a temporary name and is only renamed into place
 once the hash matches; a mismatch deletes it and fails. There is no flag to
 install an unverified model. Re-running `download` is safe and idempotent.
 
-**Changing models changes vector dimensions.** After switching, rebuild:
+---
+
+## Choosing a different embedding model
+
+Most people should not. The default is the right answer for an English-language
+corpus of notes, documents and code, and changing model costs a full re-index of
+everything you have.
+
+**When it is worth it**
+
+- **Your documents are not mostly in English.** This is the main reason. The
+  default model is strongest on English; a multilingual corpus is where a
+  different model genuinely changes what you can find.
+- **Your documents are much longer than the default model can see at once.**
+  `nomic-embed-text-v1.5` reads 2048 tokens per chunk;
+  `qwen3-embedding-0.6b` reads 32768. Conduit chunks to about 1000 characters,
+  so this rarely binds — but if you have deliberately raised `kb.chunk_size`, it
+  can.
+
+**When it is not**
+
+- **Your machine is large.** A bigger model is not a better model here, only a
+  slower one. Retrieval quality is not a function of RAM.
+- **Search returned something disappointing once.** Look at
+  `conduit doctor` first, and at [when a search finds nothing](#when-a-search-finds-nothing).
+  A model swap will not fix an unindexed folder.
+
+**What it costs**
+
+Every vector in your knowledge base has to be produced again, because vectors
+from two different models cannot be compared — scores computed across them are
+not weaker, they are meaningless. Expect a full pass over your corpus, at the
+same speed as the original index.
+
+Conduit records which model built your vectors, so it will not let the two mix.
+If you change model without rebuilding, semantic search switches itself off and
+says so, keyword search carries on as normal, and `conduit doctor` shows:
+
+```
+  ✗ embedding model stamp        vectors were built by nomic-embed-text-v1.5,
+                                 current model is qwen3-embedding-0.6b —
+                                 semantic search is disabled until they agree
+      → run 'conduit kb sync --rebuild-vectors'
+```
+
+**How to do it**
 
 ```bash
-conduit kb sync --rebuild-vectors
+conduit model download qwen3-embedding-0.6b   # fetch it first
+conduit config set embed.model qwen3-embedding-0.6b
+conduit kb sync --rebuild-vectors             # rebuild everything
 ```
+
+`conduit kb migrate` does the same job and is the better choice when your source
+folders are large or slow to walk: it re-embeds from what is already indexed
+rather than re-reading every file from disk.
+
+Switching between `embed.provider` values — Ollama to the built-in
+llama-server, say — while keeping the *same model* is not a model change and
+needs no rebuild. Conduit recognises the model under each provider's name for
+it.
 
 ---
 
@@ -642,11 +699,22 @@ Or re-run `./scripts/install.sh --from-source`, which sets them.
 `conduit doctor` will say why. Usually: no model downloaded
 (`conduit model download`), or `embed.provider` is set to `none`.
 
+If doctor's **embedding model stamp** line has a ✗, the embedding model changed
+since your documents were indexed. Vectors from two models cannot be compared,
+so Conduit switches the semantic half off rather than return scores that mean
+nothing. Keyword search is unaffected. Rebuild with
+`conduit kb sync --rebuild-vectors` — or, if you did not mean to change model,
+put `embed.model` back to what the stamp names and nothing needs rebuilding.
+
 ### `kb sync` exits 2
 
 Keyword indexing worked; the embedding step did not. Search works on keywords
 meanwhile. `conduit doctor --probe-timeout 30` — a cold model often just needs
 longer than the default probe.
+
+If the message names two embedding models, this is the model-change case above
+and no amount of retrying will help: the fix is
+`conduit kb sync --rebuild-vectors`.
 
 ### The AI client doesn't see the tools
 

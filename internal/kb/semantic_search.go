@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -433,22 +434,46 @@ func (ss *SemanticSearcher) GetStats(ctx context.Context) (*SemanticSearchStats,
 		return nil, err
 	}
 
-	return &SemanticSearchStats{
+	stats := &SemanticSearchStats{
 		VectorCount:    vsStats.VectorCount,
 		CollectionName: vsStats.CollectionName,
 		EmbeddingModel: ss.embeddings.Model(),
+		ActiveModel:    ss.embeddings.Model(),
 		Dimension:      ss.embeddings.Dimension(),
 		Status:         vsStats.Status,
-	}, nil
+	}
+
+	// EmbeddingModel answers "what produced these vectors", which is the
+	// question a reader of vector stats is actually asking. Before WP-4.3 it
+	// reported the CURRENTLY CONFIGURED model, which is the same answer only
+	// when nothing has changed -- and silently wrong exactly when it matters.
+	if stamper, ok := ss.vectors.(interface {
+		Stamp(context.Context) (*EmbeddingStamp, error)
+	}); ok {
+		if stamp, err := stamper.Stamp(ctx); err == nil && stamp != nil && stamp.Known() {
+			stats.EmbeddingModel = stamp.Canonical
+			if stamp.Dimensions > 0 {
+				stats.Dimension = stamp.Dimensions
+			}
+		}
+	}
+
+	return stats, nil
 }
 
 // SemanticSearchStats contains semantic search statistics.
 type SemanticSearchStats struct {
 	VectorCount    int    `json:"vector_count"`
 	CollectionName string `json:"collection_name"`
+	// EmbeddingModel is the model that BUILT the stored vectors, taken from the
+	// knowledge base's embedding stamp. It falls back to the configured model
+	// when nothing has been stamped yet.
 	EmbeddingModel string `json:"embedding_model"`
-	Dimension      int    `json:"dimension"`
-	Status         string `json:"status"`
+	// ActiveModel is the model configured right now. It differs from
+	// EmbeddingModel only when the vectors need rebuilding.
+	ActiveModel string `json:"active_model,omitempty"`
+	Dimension   int    `json:"dimension"`
+	Status      string `json:"status"`
 }
 
 // Close closes the semantic searcher and its resources.
@@ -456,70 +481,157 @@ func (ss *SemanticSearcher) Close() error {
 	return ss.vectors.Close()
 }
 
-// MigrateFromFTS migrates existing FTS-indexed documents to vector search.
-// This reads all chunks from SQLite and generates embeddings for them.
-func (ss *SemanticSearcher) MigrateFromFTS(ctx context.Context, progressFn func(current, total int)) error {
-	// Count total documents
-	var totalDocs int
-	err := ss.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM kb_documents`).Scan(&totalDocs)
-	if err != nil {
-		return fmt.Errorf("failed to count documents: %w", err)
+// ReembedScope selects which documents a re-embed visits.
+type ReembedScope int
+
+const (
+	// ReembedMissing visits only documents that have at least one chunk with no
+	// vector. This is the backfill `conduit kb migrate` has always claimed to
+	// do: turn on embeddings, then give the already-indexed corpus its vectors.
+	ReembedMissing ReembedScope = iota
+
+	// ReembedAll visits every document. This is what a model change requires --
+	// existing vectors are not stale, they are in the wrong space, and only
+	// producing them again fixes that. It is the engine a `model upgrade`
+	// command fronts.
+	ReembedAll
+)
+
+// ReembedResult reports what a re-embed did.
+type ReembedResult struct {
+	// Total is how many documents were in scope.
+	Total int `json:"total"`
+	// Embedded is how many were embedded successfully.
+	Embedded int `json:"embedded"`
+	// Failed is how many were skipped because embedding or writing failed.
+	Failed int `json:"failed"`
+}
+
+// ReembedDocuments generates and stores embeddings for documents already in the
+// full-text index.
+//
+// Before WP-4.3 this was MigrateFromFTS, which visited EVERY document
+// unconditionally -- so the backfill it advertised re-embedded a corpus that
+// mostly had vectors already, at full model cost. Scope makes the two jobs
+// distinct: ReembedMissing is the cheap backfill, ReembedAll is the expensive
+// thing a model change genuinely needs.
+//
+// A document that fails is counted and skipped, not fatal: one unreadable
+// document must not cost a user the other nine hundred.
+func (ss *SemanticSearcher) ReembedDocuments(ctx context.Context, scope ReembedScope, progressFn func(current, total int)) (ReembedResult, error) {
+	var res ReembedResult
+
+	// Creates the vector tables if this database predates them, so the scope
+	// predicate below can reference kb_vectors safely.
+	if err := ss.vectors.HealthCheck(ctx); err != nil {
+		return res, err
 	}
 
-	if totalDocs == 0 {
-		ss.logger.Info().Msg("no documents to migrate")
-		return nil
+	where := ""
+	if scope == ReembedMissing {
+		// "Has at least one chunk with no vector." Written as a correlated
+		// EXISTS rather than a LEFT JOIN so a document with a thousand chunks
+		// stops being examined at the first gap.
+		where = `WHERE EXISTS (
+			SELECT 1 FROM kb_chunks c
+			WHERE c.document_id = d.document_id
+			  AND NOT EXISTS (SELECT 1 FROM kb_vectors v WHERE v.chunk_id = c.chunk_id)
+		)`
 	}
 
-	ss.logger.Info().Int("total", totalDocs).Msg("starting FTS to vector migration")
+	if err := ss.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM kb_documents d `+where).Scan(&res.Total); err != nil {
+		return res, fmt.Errorf("failed to count documents: %w", err)
+	}
+	if res.Total == 0 {
+		ss.logger.Info().Msg("no documents need embedding")
+		return res, nil
+	}
 
-	// Get all documents
+	ss.logger.Info().
+		Int("total", res.Total).
+		Bool("full_reembed", scope == ReembedAll).
+		Msg("starting document embedding pass")
+
 	rows, err := ss.db.QueryContext(ctx, `
-		SELECT document_id, source_id, path, title, mime_type
-		FROM kb_documents
-		ORDER BY document_id
+		SELECT d.document_id, d.source_id, d.path, d.title, d.mime_type
+		FROM kb_documents d `+where+`
+		ORDER BY d.document_id
 	`)
 	if err != nil {
-		return fmt.Errorf("failed to query documents: %w", err)
+		return res, fmt.Errorf("failed to query documents: %w", err)
 	}
-	defer rows.Close()
 
-	current := 0
+	// The document list is read fully before any embedding happens. Holding the
+	// cursor open across a network round trip per document would keep a read
+	// transaction alive for the whole pass.
+	type docRow struct{ doc Document }
+	var pending []docRow
 	for rows.Next() {
-		var doc Document
-		if err := rows.Scan(&doc.DocumentID, &doc.SourceID, &doc.Path, &doc.Title, &doc.MimeType); err != nil {
-			ss.logger.Warn().Err(err).Msg("failed to scan document")
-			continue
+		var d Document
+		if err := rows.Scan(&d.DocumentID, &d.SourceID, &d.Path, &d.Title, &d.MimeType); err != nil {
+			rows.Close()
+			return res, fmt.Errorf("scan document: %w", err)
 		}
+		pending = append(pending, docRow{doc: d})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return res, fmt.Errorf("read documents: %w", err)
+	}
+	rows.Close()
 
-		// Get chunks for this document
+	for i := range pending {
+		doc := pending[i].doc
+
 		chunks, err := ss.getDocumentChunks(ctx, doc.DocumentID)
 		if err != nil {
 			ss.logger.Warn().Err(err).Str("doc_id", doc.DocumentID).Msg("failed to get chunks")
+			res.Failed++
 			continue
 		}
 
-		// Index the document
 		if err := ss.IndexDocument(ctx, &doc, chunks); err != nil {
+			// A model mismatch is not a per-document problem and will fail for
+			// every remaining document too. Stop and say so once.
+			if errors.Is(err, ErrEmbeddingModelMismatch) {
+				return res, err
+			}
 			ss.logger.Warn().Err(err).Str("doc_id", doc.DocumentID).Msg("failed to index document")
+			res.Failed++
 			continue
 		}
 
-		current++
+		res.Embedded++
 		if progressFn != nil {
-			progressFn(current, totalDocs)
+			progressFn(res.Embedded, res.Total)
 		}
 
-		if current%10 == 0 {
+		if res.Embedded%10 == 0 {
 			ss.logger.Info().
-				Int("current", current).
-				Int("total", totalDocs).
-				Msg("migration progress")
+				Int("current", res.Embedded).
+				Int("total", res.Total).
+				Msg("embedding progress")
 		}
 	}
 
-	ss.logger.Info().Int("migrated", current).Msg("FTS to vector migration completed")
-	return nil
+	ss.logger.Info().
+		Int("embedded", res.Embedded).
+		Int("failed", res.Failed).
+		Msg("document embedding pass completed")
+	return res, nil
+}
+
+// ResetVectorSpace discards every stored vector and the model stamp describing
+// them. See SQLiteVectorIndex.ResetVectorSpace for why the two go together.
+func (ss *SemanticSearcher) ResetVectorSpace(ctx context.Context) error {
+	resetter, ok := ss.vectors.(interface {
+		ResetVectorSpace(context.Context) error
+	})
+	if !ok {
+		return fmt.Errorf("vector index does not support re-embedding")
+	}
+	return resetter.ResetVectorSpace(ctx)
 }
 
 // getDocumentChunks retrieves all chunks for a document.

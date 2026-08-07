@@ -114,6 +114,13 @@ func (s *Store) migrate() error {
 		}
 	}
 
+	// Run migration 006 for the embedding-model identity stamp (WP-4.3)
+	if currentVersion < 6 {
+		if err := s.runMigration006(); err != nil {
+			return fmt.Errorf("run migration 006: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -568,6 +575,54 @@ func (s *Store) runMigration005() error {
 
 	// Record migration
 	_, err = tx.Exec("INSERT INTO migrations (version) VALUES (5)")
+	if err != nil {
+		return err
+	}
+
+	return tx.Commit()
+}
+
+// runMigration006 adds the embedding-model identity stamp (WP-4.3, issue #107).
+//
+// kb_vectors records how WIDE a vector is but not what produced it, so swapping
+// one 768-dimension embedding model for another was accepted silently and left
+// queries scoring against a vector space they did not come from. The stamp is
+// the missing fact: one row naming the model, its width, its instruction-prefix
+// scheme and the provider that served it, written in the same transaction as the
+// first vectors it describes.
+//
+// The statement below is duplicated verbatim in internal/kb (embeddingStampDDL),
+// which creates the same table lazily for databases that reach the vector index
+// before this migration has run. The duplication is deliberate -- internal/store
+// cannot import internal/kb without a cycle -- and it is held honest by
+// TestSchemaParityMigrationVsEnsureSchema, which builds a database each way and
+// compares what SQLite actually stored. WP-2.3 found these two paths had already
+// drifted once for kb_entity_vectors.
+func (s *Store) runMigration006() error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.Exec(`CREATE TABLE IF NOT EXISTS kb_embedding_stamp (
+	id              INTEGER PRIMARY KEY CHECK (id = 1),
+	canonical_model TEXT NOT NULL,
+	observed_model  TEXT NOT NULL,
+	resolved        INTEGER NOT NULL DEFAULT 0,
+	dimensions      INTEGER NOT NULL,
+	prefix_scheme   TEXT NOT NULL DEFAULT '',
+	provider        TEXT NOT NULL DEFAULT '',
+	adopted         INTEGER NOT NULL DEFAULT 0,
+	created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+	updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+)`)
+	if err != nil {
+		return err
+	}
+
+	// Record migration
+	_, err = tx.Exec("INSERT INTO migrations (version) VALUES (6)")
 	if err != nil {
 		return err
 	}

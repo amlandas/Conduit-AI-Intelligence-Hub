@@ -138,6 +138,14 @@ type EmbedderInfo struct {
 	// Dimensions is the vector width, 0 when Provider is "none".
 	Dimensions int `json:"dimensions,omitempty"`
 
+	// PrefixScheme identifies the instruction decoration this provider applies
+	// to its inputs (embed.PrefixSchemeID). It is part of a vector's meaning and
+	// is recorded in the embedding stamp, because the same model reached through
+	// two providers is not decorated the same way: the llama-server path takes
+	// its prefixes from the pinned registry, the Ollama path is wired without
+	// them.
+	PrefixScheme string `json:"prefix_scheme,omitempty"`
+
 	// Available is false when the provider is "none" or could not be
 	// constructed at all. It does NOT mean the provider answered a probe:
 	// reachability is a per-call property, checked by doctor.
@@ -191,6 +199,11 @@ func newEmbedder(cfg *config.Config) (kb.Embedder, EmbedderInfo, error) {
 		}
 		info.Model = model
 		info.Dimensions = dims
+		// No prefixes are passed to OllamaConfig above, so none are applied.
+		// Recording that faithfully is the point: a knowledge base built here and
+		// later served by llama-server, which DOES apply the registry prefixes,
+		// is worth a word to the user even though the model is the same.
+		info.PrefixScheme = embed.PrefixSchemeNone
 		info.Available = true
 		return &embedAdapter{
 			modelID:    model,
@@ -226,6 +239,7 @@ func newEmbedder(cfg *config.Config) (kb.Embedder, EmbedderInfo, error) {
 
 		info.Model = modelID
 		info.Dimensions = mcfg.Dimensions
+		info.PrefixScheme = embed.PrefixSchemeID(mcfg.DocPrefix, mcfg.QueryPrefix, mcfg.InputSuffix)
 		info.Available = true
 		return &embedAdapter{
 			modelID:    modelID,

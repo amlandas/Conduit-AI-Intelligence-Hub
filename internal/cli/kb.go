@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -78,6 +79,13 @@ func kbStatsCmd() *cobra.Command {
 			fmt.Printf("Documents:   %d\n", totals.Documents)
 			fmt.Printf("Chunks:      %d\n", totals.Chunks)
 			fmt.Printf("Total Size:  %s\n", formatBytes(totals.TotalBytes))
+
+			// The vector half of the same picture. Reporting chunk counts while
+			// staying silent about how many of them are actually searchable by
+			// meaning -- and by which model -- leaves out the thing most likely
+			// to be wrong (#107).
+			printVectorStats(cmd.Context(), svc)
+
 			fmt.Println()
 			fmt.Println("By Source:")
 			fmt.Println("─────────────────────────────────────────")
@@ -499,6 +507,19 @@ Examples:
 			results, _ := resp["results"].([]interface{})
 			searchMode, _ := resp["search_mode"].(string)
 
+			// #107: say up front when a retrieval strategy did not run. The MCP
+			// server has shown this since #75; the CLI showed nothing, so a user
+			// could not tell a search that ran on one leg from one that ran on
+			// two. It goes BEFORE the results, because it changes how they
+			// should be read.
+			if degraded, _ := resp["degraded"].(bool); degraded {
+				if note, _ := resp["note"].(string); note != "" {
+					fmt.Printf("retrieval: degraded — %s\n\n", note)
+				} else {
+					fmt.Printf("retrieval: degraded — a retrieval strategy was unavailable for this query.\n\n")
+				}
+			}
+
 			if len(results) == 0 {
 				fmt.Printf("No results found for: %s\n", query)
 				// #97: "no results" from a knowledge base that was never
@@ -624,6 +645,27 @@ Examples:
 			}
 			defer svc.Close()
 
+			// A rebuild is the one command that is allowed to replace the vector
+			// space, so it is also the one place a model change can be resolved.
+			// It has to cover the WHOLE knowledge base: clearing the vectors of a
+			// single source would leave the rest in the old model's space, which
+			// is the mixture this whole mechanism exists to prevent. A rebuild
+			// aimed at one source therefore leaves the model change in place, and
+			// that source's documents fall back to keyword search with the usual
+			// aggregate warning.
+			if rebuildVectors && len(args) == 0 {
+				mismatch, perr := svc.PrepareVectorRebuild(cmd.Context())
+				if perr != nil {
+					return fmt.Errorf("sync failed: %w", perr)
+				}
+				if mismatch != nil {
+					fmt.Printf("Embedding model changed: vectors were built by %s, current model is %s.\n",
+						mismatch.Stamped.Display(), mismatch.Active.Display())
+					fmt.Println("Discarding the old vectors and rebuilding every document.")
+					fmt.Println()
+				}
+			}
+
 			if len(args) > 0 {
 				// Sync specific source
 				sourceID := args[0]
@@ -675,8 +717,14 @@ Examples:
 				// Exit with code 2 for partial success (semantic errors)
 				if semanticErrors > 0 {
 					fmt.Println()
-					fmt.Println("   To diagnose: conduit doctor")
-					fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
+					if note, _ := result["model_mismatch"].(string); note != "" {
+						fmt.Printf("   %s\n", note)
+						fmt.Println("   (rebuilding one source is not enough — the whole knowledge base")
+						fmt.Println("    must move to the new model at once)")
+					} else {
+						fmt.Println("   To diagnose: conduit doctor")
+						fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
+					}
 					return exitWith(2)
 				}
 
@@ -712,6 +760,7 @@ Examples:
 				totalDeleted := 0
 				totalSemanticErrors := 0
 				semanticEnabled := false
+				modelMismatchNote := ""
 
 				for _, source := range sources {
 					sourceID := source.SourceID
@@ -751,6 +800,9 @@ Examples:
 					if v, ok := result["semantic_enabled"].(bool); ok && v {
 						semanticEnabled = true
 					}
+					if v, ok := result["model_mismatch"].(string); ok && v != "" {
+						modelMismatchNote = v
+					}
 
 					totalAdded += added
 					totalUpdated += updated
@@ -774,8 +826,12 @@ Examples:
 					fmt.Printf("⚠️  Semantic indexing failed for %d documents (FTS5 fallback used)\n", totalSemanticErrors)
 					fmt.Println("   Search will use keyword matching only for affected documents.")
 					fmt.Println()
-					fmt.Println("   To diagnose: conduit doctor")
-					fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
+					if modelMismatchNote != "" {
+						fmt.Printf("   %s\n", modelMismatchNote)
+					} else {
+						fmt.Println("   To diagnose: conduit doctor")
+						fmt.Println("   To retry:    conduit kb sync --rebuild-vectors")
+					}
 					// Return exit code 2 for partial success
 					return exitWith(2)
 				} else if semanticEnabled && (totalAdded > 0 || totalUpdated > 0) {
@@ -794,12 +850,23 @@ Examples:
 func kbMigrateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "migrate",
-		Short: "Migrate FTS documents to vector search",
-		Long: `Migrate existing FTS5-indexed documents to the vector search index.
+		Short: "Give indexed documents their vectors, or rebuild them after a model change",
+		Long: `Bring the vector index into line with the full-text index.
 
-This is required to enable semantic search for documents that were indexed
-before semantic search was enabled. New documents are automatically indexed
-in both FTS5 and vector search.
+Which of two jobs this does is decided from the knowledge base's own state,
+because the answer is not something you should have to work out:
+
+  Backfill (the usual case)
+      Documents that are indexed but have no vectors get them. Documents that
+      already have vectors are left alone. This is what you want after turning
+      semantic search on for a knowledge base that was already indexed.
+
+  Full re-embed (after an embedding model change)
+      When the stored vectors were built by a DIFFERENT embedding model, filling
+      in the gaps would leave two incompatible sets of vectors in one index, and
+      scores computed across them are meaningless. So every vector is discarded
+      and rebuilt with the model configured now, and the knowledge base is
+      re-stamped with it. This costs a full pass over the corpus.
 
 Requires an embedding provider (see 'embed.provider' in the config); it fails
 when that is set to "none".
@@ -813,19 +880,69 @@ Examples:
 			}
 			defer svc.Close()
 
-			fmt.Println("Migrating documents to vector search...")
-			fmt.Println("This may take a while for large knowledge bases.")
+			if status, serr := svc.EmbeddingStampStatus(cmd.Context()); serr == nil &&
+				status != nil && status.Verdict == kb.StampMismatch {
+				fmt.Printf("Embedding model changed: vectors were built by %s, current model is %s.\n",
+					status.Stamp.Display(), status.Active.Display())
+				fmt.Println("Re-embedding every document. This may take a while for large knowledge bases.")
+			} else {
+				fmt.Println("Embedding documents that have no vectors yet...")
+				fmt.Println("This may take a while for large knowledge bases.")
+			}
 			fmt.Println()
 
-			migrated, err := svc.Migrate(cmd.Context(), nil)
+			res, err := svc.Migrate(cmd.Context(), nil)
 			if err != nil {
 				return fmt.Errorf("migration failed: %w", err)
 			}
 
-			fmt.Printf("✓ Migration complete: %d documents migrated to vector search\n", migrated)
+			switch {
+			case res.Total == 0:
+				fmt.Println("✓ Nothing to do: every indexed document already has vectors.")
+			case res.FullReembed:
+				fmt.Printf("✓ Re-embed complete: %d of %d documents rebuilt with %s\n",
+					res.Documents, res.Total, res.ToModel)
+			default:
+				fmt.Printf("✓ Migration complete: %d of %d documents embedded\n",
+					res.Documents, res.Total)
+			}
+			if res.Failed > 0 {
+				fmt.Printf("⚠️  %d document(s) failed and were left to keyword search only\n", res.Failed)
+				fmt.Println("   To diagnose: conduit doctor")
+				return exitWith(2)
+			}
 
 			return nil
 		},
+	}
+}
+
+// printVectorStats renders the vector count and the model that produced it.
+//
+// Both facts, or neither: a vector count with no model beside it is what let a
+// changed model go unnoticed, and a model with no count cannot show that the
+// index is empty. Silent when embeddings are off, which is a supported mode
+// rather than a gap.
+func printVectorStats(ctx context.Context, svc *kbservice.Service) {
+	status, err := svc.EmbeddingStampStatus(ctx)
+	if err != nil || status == nil {
+		return
+	}
+
+	fmt.Printf("Vectors:     %d\n", status.Vectors)
+
+	switch {
+	case status.Stamp == nil:
+		fmt.Printf("Model:       %s (nothing embedded yet)\n", status.Active.Display())
+	case status.Verdict == kb.StampMismatch:
+		fmt.Printf("Model:       %s — built these vectors\n", status.Stamp.Display())
+		fmt.Printf("             %s — configured now, so semantic search is off\n", status.Active.Display())
+		fmt.Printf("             → run '%s'\n", kb.RebuildRemedy)
+	case status.Verdict == kb.StampUnknown:
+		fmt.Printf("Model:       %s (configured now: %s — the two cannot be compared)\n",
+			status.Stamp.Display(), status.Active.Display())
+	default:
+		fmt.Printf("Model:       %s (%dd)\n", status.Stamp.Display(), status.Stamp.Dimensions)
 	}
 }
 
