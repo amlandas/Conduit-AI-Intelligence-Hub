@@ -647,6 +647,79 @@ func TestStamp_EntityVectorsShareTheStamp(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// Capability reporting
+// ---------------------------------------------------------------------------
+
+// TestStamp_CapabilitiesReportTheModelThatBuiltTheVectors pins the reporting
+// change. EmbeddingModel used to name the CONFIGURED model unconditionally,
+// which quietly asserted that it had produced the stored vectors -- true in
+// every case except the one a reader needs to know about.
+func TestStamp_CapabilitiesReportTheModelThatBuiltTheVectors(t *testing.T) {
+	ctx := context.Background()
+	db, vi := newStampedIndex(t, embed.ModelNomicEmbedTextV15)
+	if err := writeOnePoint(t, db, vi, "chunk-1", 0); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Agreement: one model named, nothing to disambiguate.
+	caps := DetectCapabilities(ctx, db, &stampProbe{model: embed.ModelNomicEmbedTextV15})
+	if caps.EmbeddingModel != embed.ModelNomicEmbedTextV15 {
+		t.Errorf("EmbeddingModel = %q, want %q", caps.EmbeddingModel, embed.ModelNomicEmbedTextV15)
+	}
+	if caps.ActiveEmbeddingModel != "" {
+		t.Errorf("ActiveEmbeddingModel = %q, want empty when the two agree", caps.ActiveEmbeddingModel)
+	}
+	if !caps.SemanticAvailable {
+		t.Error("SemanticAvailable = false on a healthy knowledge base")
+	}
+
+	// An alias is still agreement.
+	caps = DetectCapabilities(ctx, db, &stampProbe{model: "nomic-embed-text"})
+	if !caps.SemanticAvailable {
+		t.Error("SemanticAvailable = false after a provider switch of the SAME model")
+	}
+	if caps.ActiveEmbeddingModel != "" {
+		t.Errorf("ActiveEmbeddingModel = %q, want empty for an alias", caps.ActiveEmbeddingModel)
+	}
+
+	// Disagreement: both named, and the capability is honestly withdrawn.
+	caps = DetectCapabilities(ctx, db, &stampProbe{model: embed.ModelMxbaiEmbedLargeV1})
+	if caps.EmbeddingModel != embed.ModelNomicEmbedTextV15 {
+		t.Errorf("EmbeddingModel = %q, want the model that BUILT the vectors", caps.EmbeddingModel)
+	}
+	if caps.ActiveEmbeddingModel != embed.ModelMxbaiEmbedLargeV1 {
+		t.Errorf("ActiveEmbeddingModel = %q, want %q", caps.ActiveEmbeddingModel, embed.ModelMxbaiEmbedLargeV1)
+	}
+	if caps.SemanticAvailable {
+		t.Error("SemanticAvailable = true over a vector space the embedder cannot be compared against")
+	}
+	if caps.SearchMode() != "fts5" {
+		t.Errorf("SearchMode() = %q, want fts5", caps.SearchMode())
+	}
+	summary := caps.Summary()
+	for _, want := range []string{embed.ModelNomicEmbedTextV15, embed.ModelMxbaiEmbedLargeV1, RebuildRemedy} {
+		if !strings.Contains(summary, want) {
+			t.Errorf("summary %q does not mention %q", summary, want)
+		}
+	}
+
+	// An unprovable difference is reported but disables nothing.
+	caps = DetectCapabilities(ctx, db, &stampProbe{model: "home-grown"})
+	if !caps.SemanticAvailable {
+		t.Error("SemanticAvailable = false on an unprovable difference")
+	}
+	if caps.ActiveEmbeddingModel != "home-grown" {
+		t.Errorf("ActiveEmbeddingModel = %q, want the identifier we saw", caps.ActiveEmbeddingModel)
+	}
+}
+
+// stampProbe is the minimal EmbedProbe: a model name and a healthy provider.
+type stampProbe struct{ model string }
+
+func (p *stampProbe) Model() string                     { return p.model }
+func (p *stampProbe) HealthCheck(context.Context) error { return nil }
+
+// ---------------------------------------------------------------------------
 // Schema parity
 // ---------------------------------------------------------------------------
 

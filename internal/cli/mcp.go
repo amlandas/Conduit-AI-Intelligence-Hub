@@ -285,9 +285,16 @@ Use --json for machine-readable output (used by GUI).`,
 				fmt.Println("  ✗ FTS5 (keyword search): not available")
 			}
 
-			if caps.SemanticAvailable {
+			switch {
+			case caps.SemanticAvailable:
 				fmt.Printf("  ✓ Semantic search: available (model: %s)\n", caps.EmbeddingModel)
-			} else {
+			case caps.ActiveEmbeddingModel != "":
+				// "not available" on its own would send the reader to check a
+				// provider that is answering perfectly well.
+				fmt.Printf("  ✗ Semantic search: not available — vectors were built by %s, "+
+					"current model is %s\n", caps.EmbeddingModel, caps.ActiveEmbeddingModel)
+				fmt.Printf("      → run '%s'\n", kb.RebuildRemedy)
+			default:
 				fmt.Println("  ✗ Semantic search: not available")
 			}
 
